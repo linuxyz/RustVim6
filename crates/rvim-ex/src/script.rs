@@ -1403,7 +1403,6 @@ pub const HOST_BUILTINS: &[&str] = &[
     "getcwd",
     "bufname",
     "bufnr",
-    "winnr",
     "mode",
     "strftime",
     "localtime",
@@ -1543,7 +1542,8 @@ fn host_builtin(
             "expand_special" => Ok(Value::String(expand_special(ed, state, &s(0)))),
             "fnamemodify" => Ok(Value::String(fnamemodify(&s(0), &s(1), &ed.cwd))),
             "getcwd" => Ok(Value::String(ed.cwd.display().to_string())),
-            "winnr" => Ok(Value::Number(1)),
+            // `winnr()`/`tabpagenr()` are answered by host_win with the real
+            // window/tabpage model; these arms must not shadow them.
             "tabpagenr" => Ok(Value::Number(1)),
             "mode" => Ok(Value::String("n".to_string())),
             "strftime" => Ok(Value::String(String::new())),

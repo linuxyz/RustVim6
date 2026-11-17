@@ -8,19 +8,24 @@
 
 pub mod abbrev;
 pub mod autocmd;
+pub mod diff;
 pub mod editor;
+pub mod fold;
 pub mod keynames;
 pub mod maps;
 pub mod mark;
 pub mod message;
 pub mod mode;
 pub mod options;
+pub mod quickfix;
 pub mod register;
 pub mod usercmd;
+pub mod viminfo;
+pub mod window;
 
 pub use abbrev::{AbbrevEntry, AbbrevMode, AbbrevStore};
 pub use autocmd::{AutoCmd, AutocmdStore, EVENTS};
-pub use editor::{Editor, LastSubstitute};
+pub use editor::{ChangePos, Editor, JumpPos, LastSubstitute, RepeatChange, SetScope, VisualState};
 pub use maps::{Key, MapEntry, MapMode, MapOptions, MapStore};
 pub use mark::MarkStore;
 pub use message::MessageLog;
@@ -28,3 +33,4 @@ pub use mode::Mode;
 pub use options::{OptValue, Options};
 pub use register::{RegType, Register, RegisterStore};
 pub use usercmd::{Nargs, UserCommand, UserCommandStore};
+pub use window::{Dir, Layout, Rect, TabPage, TabpageId, Window, WindowId, Windows};

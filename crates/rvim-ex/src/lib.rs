@@ -8,11 +8,17 @@
 pub mod addr;
 pub mod autodispatch;
 pub mod cmd_table;
+pub mod errorformat;
 pub mod exec;
+pub mod handlers_diff;
 pub mod handlers_edit;
+pub mod handlers_fold;
 pub mod handlers_map;
+pub mod handlers_qf;
 pub mod handlers_script;
+pub mod handlers_session;
 pub mod handlers_viml;
+pub mod handlers_win;
 pub mod host_meta;
 pub mod host_more;
 pub mod host_win;

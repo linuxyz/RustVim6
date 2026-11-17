@@ -8,13 +8,13 @@
 use std::collections::VecDeque;
 
 use rvim_core::{Pos, VimError, VimResult};
-use rvim_editor::Mode;
 use rvim_editor::maps::{Key, MapMode};
+use rvim_editor::{Mode, Rect, WindowId};
 use rvim_normal::{NormalEngine, insert};
-use rvim_term::{
-    CmdlineView, Grid, Input, KeySource, ScreenModel, Theme, WildmenuView, display_col,
-    gutter_width, render,
+use rvim_term::pane::{
+    CmdlineText, PaneView, RowView, ScreenLayout, SelectionView, WildmenuItems, render_layout,
 };
+use rvim_term::{Grid, Input, KeySource, Theme, display_col, gutter_width};
 
 use crate::Session;
 
@@ -27,6 +27,16 @@ enum Pending {
     OperatorGg(char),
     /// `g`: waiting for `g` (`gg`, `3gg`).
     G,
+    /// `<C-w>`: waiting for the window command key.
+    WindowCmd,
+    /// An operator waiting for a text object character (`diw`, `ca("`).
+    TextObject(char, bool),
+    /// `g` in visual mode (only `gg` is supported).
+    VisualG,
+    /// `z`: waiting for the fold command key.
+    Fold,
+    /// `]` (true) or `[` (false): waiting for the following key.
+    Bracket(bool),
 }
 
 /// Command line being edited.
@@ -96,10 +106,6 @@ pub struct Tui {
     pub message_queue: VecDeque<String>,
     pub quit: bool,
     pub exit_code: i32,
-    /// First visible buffer line (vertical scroll).
-    pub top: usize,
-    /// Horizontal scroll in display cells.
-    pub left: usize,
     pub cmdline: Option<Cmdline>,
     /// Keys buffered while deciding whether a mapping applies.
     pending_keys: Vec<Key>,
@@ -127,8 +133,6 @@ impl Tui {
             message_queue: VecDeque::new(),
             quit: false,
             exit_code: 0,
-            top: 0,
-            left: 0,
             cmdline: None,
             pending_keys: Vec::new(),
             pending_op: None,
@@ -178,6 +182,8 @@ impl Tui {
             self.session.normal.cancel_pending();
             if self.session.editor.mode.is_insert_like() {
                 self.finish_insert_mode();
+            } else if self.session.editor.mode.is_visual() {
+                rvim_normal::visual::stop(self.editor());
             } else if self.session.editor.mode != Mode::Normal {
                 // Cancel a pending operator/motion (normal.c nv_esc) without
                 // touching the cursor or the undo state.
@@ -301,6 +307,7 @@ impl Tui {
             Mode::Insert | Mode::Replace => self.handle_insert_key(key),
             // The command line is handled before dispatch (feed_cmdline).
             Mode::CommandLine => Ok(()),
+            mode if mode.is_visual() => self.handle_visual_key(key),
             _ => self.handle_normal_key(key),
         }
     }
@@ -316,16 +323,43 @@ impl Tui {
                 self.start_cmdline(':');
                 return Ok(());
             }
+            // ]c / [c jump between diff changes.
+            Key::Char(']') => {
+                self.pending_op = Some(Pending::Bracket(true));
+                return Ok(());
+            }
+            Key::Char('[') => {
+                self.pending_op = Some(Pending::Bracket(false));
+                return Ok(());
+            }
+            // z starts a fold command (zo, zc, zf, zR, ...).
+            Key::Char('z') => {
+                self.pending_op = Some(Pending::Fold);
+                return Ok(());
+            }
+            // v / V start a character-wise or line-wise selection.
+            Key::Char('v') | Key::Char('V') => {
+                let mode = if matches!(&key, Key::Char('V')) {
+                    Mode::VisualLine
+                } else {
+                    Mode::Visual
+                };
+                rvim_normal::visual::start(self.editor(), mode)?;
+                return Ok(());
+            }
             Key::Char('/') => {
+                self.session.editor.push_jump();
                 self.start_cmdline('/');
                 return Ok(());
             }
             // `?` searches backwards, `n`/`N` repeat the last search.
             Key::Char('?') => {
+                self.session.editor.push_jump();
                 self.start_cmdline('?');
                 return Ok(());
             }
             Key::Char('n') | Key::Char('N') => {
+                self.session.editor.push_jump();
                 let same_direction = matches!(&key, Key::Char('n'));
                 let mut engine = std::mem::replace(&mut self.session.normal, NormalEngine::new());
                 let count = engine.take_pending_count();
@@ -334,6 +368,9 @@ impl Tui {
             }
             Key::Char(ch) => {
                 let ch = *ch;
+                if ch == 'G' {
+                    self.session.editor.push_jump();
+                }
                 let mut engine = std::mem::replace(&mut self.session.normal, NormalEngine::new());
                 let result = engine.feed(self.editor(), ch);
                 self.session.normal = engine;
@@ -374,35 +411,26 @@ impl Tui {
                 "BS" => engine.feed(self.editor(), 'h'),
                 "DELETE" => engine.feed(self.editor(), 'x'),
                 "C-R" => engine.ctrl_r(self.editor()).map(|_| true),
+                // CTRL-O / CTRL-I walk the jump list (mark.c).
+                "C-O" => self.session.editor.jump_back().map(|_| true),
+                "C-I" => self.session.editor.jump_forward().map(|_| true),
+                // <C-w> starts a window command; the next key selects it.
+                "C-W" => {
+                    self.pending_op = Some(Pending::WindowCmd);
+                    Ok(true)
+                }
+                // <C-v> starts a blockwise selection.
+                "C-V" => rvim_normal::visual::start(self.editor(), Mode::VisualBlock).map(|_| true),
                 // <PageDown>/<C-f> and <PageUp>/<C-b> scroll one screen and keep
                 // the cursor in the same screen row (normal.c nv_page).
                 "PAGEDOWN" | "C-F" => {
-                    let page = self.screen_size.1.saturating_sub(2).max(1);
-                    let total = self.session.editor.line_count();
-                    let row = self.session.editor.cursor().line.saturating_sub(self.top);
-                    self.top = (self.top + page).min(total.saturating_sub(1));
-                    let line = (self.top + row).min(total.saturating_sub(1));
-                    let pos = self.session.editor.cursor();
-                    let pos = self
-                        .session
-                        .editor
-                        .current_buffer()
-                        .clamp_pos(Pos::new(line, pos.col));
-                    self.session.editor.set_cursor(pos);
+                    let page = self.text_rows();
+                    self.scroll_line(page as i64, true);
                     Ok(true)
                 }
                 "PAGEUP" | "C-B" => {
-                    let page = self.screen_size.1.saturating_sub(2).max(1);
-                    let row = self.session.editor.cursor().line.saturating_sub(self.top);
-                    self.top = self.top.saturating_sub(page);
-                    let line = self.top + row;
-                    let pos = self.session.editor.cursor();
-                    let pos = self
-                        .session
-                        .editor
-                        .current_buffer()
-                        .clamp_pos(Pos::new(line, pos.col));
-                    self.session.editor.set_cursor(pos);
+                    let page = self.text_rows();
+                    self.scroll_line(-(page as i64), false);
                     Ok(true)
                 }
                 _ => Ok(true),
@@ -417,6 +445,67 @@ impl Tui {
     /// Complete a two-key command whose first key is buffered.
     fn finish_pending_command(&mut self, pending: Pending, key: Key) -> VimResult<()> {
         match pending {
+            Pending::WindowCmd => {
+                let Some(ch) = motion_key(&key) else {
+                    return Ok(());
+                };
+                let mut engine = std::mem::replace(&mut self.session.normal, NormalEngine::new());
+                let count = engine.take_pending_count();
+                self.session.normal = engine;
+                self.session.editor.wincmd(ch, count)?;
+                Ok(())
+            }
+            Pending::TextObject(op, around) => {
+                let Some(object) = motion_key(&key) else {
+                    self.session.editor.mode = Mode::Normal;
+                    return Ok(());
+                };
+                self.apply_text_object(op, object, around)?;
+                Ok(())
+            }
+            Pending::Bracket(forward) => {
+                if matches!(&key, Key::Char('c')) {
+                    self.diff_jump(forward)?;
+                }
+                Ok(())
+            }
+            Pending::Fold => {
+                let Some(ch) = motion_key(&key) else {
+                    return Ok(());
+                };
+                let mut engine = std::mem::replace(&mut self.session.normal, NormalEngine::new());
+                let count = engine.take_pending_count();
+                self.session.normal = engine;
+                // zf over a visual selection creates a fold for that range.
+                if ch == 'f' && self.session.editor.visual.is_some() {
+                    let Some(range) = rvim_normal::visual::range(&self.session.editor) else {
+                        return Ok(());
+                    };
+                    let last = if range.linewise {
+                        range.end.line.saturating_sub(1)
+                    } else {
+                        range.end.line
+                    };
+                    rvim_normal::visual::stop(self.editor());
+                    rvim_normal::foldcmd::create_fold(self.editor(), range.start.line, last)?;
+                    return Ok(());
+                }
+                if !rvim_normal::foldcmd::feed_z(self.editor(), ch, count)? {
+                    rvim_normal::foldcmd::fold_motion(self.editor(), ch, count)?;
+                }
+                Ok(())
+            }
+            Pending::VisualG => {
+                if matches!(&key, Key::Char('g')) {
+                    let mut engine =
+                        std::mem::replace(&mut self.session.normal, NormalEngine::new());
+                    let count = engine.take_pending_count();
+                    self.session.normal = engine;
+                    let pos = rvim_normal::motions::goto_line(self.editor(), count, false)?;
+                    self.session.editor.set_cursor(pos);
+                }
+                Ok(())
+            }
             Pending::OperatorGg(op) => {
                 let mut engine = std::mem::replace(&mut self.session.normal, NormalEngine::new());
                 let result = if matches!(&key, Key::Char('g')) {
@@ -434,17 +523,45 @@ impl Tui {
             Pending::G => {
                 let mut engine = std::mem::replace(&mut self.session.normal, NormalEngine::new());
                 let result = if matches!(&key, Key::Char('g')) {
+                    self.session.editor.push_jump();
                     engine.feed_pair(self.editor(), 'g', 'g')
                 } else {
                     Ok(())
                 };
                 self.session.normal = engine;
+                if matches!(&key, Key::Char('v')) {
+                    // gv: restore the last visual selection.
+                    if rvim_normal::visual::reselect(self.editor()) {
+                        return Ok(());
+                    }
+                }
                 if !matches!(&key, Key::Char('g')) {
                     self.session.editor.mode = Mode::Normal;
                 }
                 result
             }
             Pending::Operator(op) => {
+                // do / dp: copy the current diff hunk from or to the other window.
+                if op == 'd' && matches!(&key, Key::Char('o') | Key::Char('p')) {
+                    let win = self.session.editor.windows.current_id();
+                    let target = self.session.editor.diff_counterparts(win).first().copied();
+                    self.session.editor.mode = Mode::Normal;
+                    if let Some(target) = target {
+                        if matches!(&key, Key::Char('o')) {
+                            self.session.editor.diff_get(target, None)?;
+                        } else {
+                            self.session.editor.diff_put(target, None)?;
+                        }
+                    }
+                    return Ok(());
+                }
+                // i/a after an operator introduce a text object (diw, ca(, yap).
+                if matches!(&key, Key::Char('i') | Key::Char('a')) {
+                    let around = matches!(&key, Key::Char('a'));
+                    self.pending_op = Some(Pending::TextObject(op, around));
+                    self.session.editor.mode = Mode::OperatorPending;
+                    return Ok(());
+                }
                 let Some(second) = motion_key(&key) else {
                     // Unsupported operator+motion combination: cancel like <Esc>.
                     self.session.editor.mode = Mode::Normal;
@@ -483,22 +600,11 @@ impl Tui {
             Key::Special(name) => {
                 let mut engine = std::mem::replace(&mut self.session.normal, NormalEngine::new());
                 let result = match name.as_str() {
-                    // <CR> splits the line at the cursor; the text before stays
-                    // on the current line and the cursor moves to the new one.
-                    "CR" => {
-                        let pos = self.editor().cursor();
-                        let line = self.editor().current_line();
-                        let before = line[..pos.col].to_string();
-                        let after = line[pos.col..].to_string();
-                        let result = self
-                            .editor()
-                            .replace_lines(pos.line, pos.line + 1, vec![before, after])
-                            .map(|_| ());
-                        if result.is_ok() {
-                            self.editor().set_cursor(Pos::new(pos.line + 1, 0));
-                        }
-                        result
-                    }
+                    // <CR> inserts a newline exactly like typing one: the insert
+                    // session must record it, otherwise a counted insert (3i%<CR>)
+                    // or "." repeats the text without the line break (normal.c
+                    // ins_eol / edit.c ins_char).
+                    "CR" => insert::type_char(self.editor(), &mut engine, '\n'),
                     "TAB" => insert::type_char(self.editor(), &mut engine, '\t'),
                     "BS" => insert::backspace(self.editor(), &mut engine),
                     "DELETE" => {
@@ -537,7 +643,8 @@ impl Tui {
         let mut engine = std::mem::replace(&mut self.session.normal, NormalEngine::new());
         engine.finish_insert(self.editor());
         self.session.normal = engine;
-        // vim leaves the cursor on the last inserted character.
+        // vim leaves the cursor on the last inserted character (ins_esc()),
+        // while the buffer parks it just past the inserted text.
         let pos = self.editor().cursor();
         if pos.col > 0 {
             let line = self.editor().current_line();
@@ -790,7 +897,441 @@ impl Tui {
 
     // ------------------------------------------------------------ rendering
 
-    pub fn grid(&mut self, cols: usize, rows: usize) -> Grid {
+    /// Content rows of the current window (the last row of its frame is its
+    /// status line).
+    fn text_rows(&self) -> usize {
+        let rows = self.session.editor.windows.current().rect.text_rows();
+        if rows == 0 {
+            self.screen_size.1.saturating_sub(2).max(1)
+        } else {
+            rows
+        }
+    }
+
+    /// Scroll the current window by `delta` lines, keeping the cursor on the same
+    /// screen row (normal.c nv_page).
+    fn scroll_line(&mut self, delta: i64, _keep_row: bool) {
+        let total = self.session.editor.line_count().max(1);
+        let win = self.session.editor.windows.current();
+        let row = win.cursor.line.saturating_sub(win.top_line);
+        let top = (win.top_line as i64 + delta).clamp(0, (total - 1) as i64) as usize;
+        let line = (top + row).min(total - 1);
+        self.session.editor.windows.current_mut().top_line = top;
+        let col = self.session.editor.cursor().col;
+        let pos = self
+            .session
+            .editor
+            .current_buffer()
+            .clamp_pos(Pos::new(line, col));
+        self.session.editor.set_cursor(pos);
+    }
+
+    /// Keep every window's viewport on its own cursor.
+    fn scroll_windows(&mut self, cols: usize) {
+        let _ = cols;
+        let tabstop = self.tabstop();
+        for id in self.session.editor.windows.ids() {
+            let Some(win) = self.session.editor.windows.get(id) else {
+                continue;
+            };
+            let rect = win.rect;
+            let text_rows = rect.text_rows().max(1);
+            let number = self.session.editor.wopt_for_bool(id, "number", false);
+            let line_count = self
+                .session
+                .editor
+                .buffer(win.bufnr)
+                .map(|b| b.line_count())
+                .unwrap_or(1);
+            let gutter = if number {
+                gutter_width(true, line_count)
+            } else {
+                0
+            };
+            let text_cols = rect.cols.saturating_sub(gutter).max(1);
+            let cursor = win.cursor;
+            let bufnr = win.bufnr;
+            let mut top = win.top_line;
+            let mut left = win.left;
+            if cursor.line < top {
+                top = cursor.line;
+            } else if cursor.line >= top + text_rows {
+                top = cursor.line + 1 - text_rows;
+            }
+            let line = self
+                .session
+                .editor
+                .buffer(bufnr)
+                .ok()
+                .and_then(|b| b.line_str(cursor.line).ok())
+                .unwrap_or("")
+                .to_string();
+            let cursor_cell = display_col(&line, cursor.col, tabstop);
+            if cursor_cell < left {
+                left = cursor_cell;
+            } else if cursor_cell >= left + text_cols {
+                left = cursor_cell + 1 - text_cols;
+            }
+            if let Some(window) = self.session.editor.windows.get_mut(id) {
+                window.top_line = top;
+                window.left = left;
+            }
+        }
+    }
+
+    /// Tabline: one entry per tabpage, like vim`s `1:file 2:other`.
+    fn tabline(&self, cols: usize) -> String {
+        let ed = &self.session.editor;
+        let current = ed.windows.current_tab_index();
+        let mut out = String::new();
+        for (index, tab) in ed.windows.tabs.iter().enumerate() {
+            let name = ed
+                .windows
+                .get(tab.current)
+                .and_then(|w| ed.buffer(w.bufnr).ok())
+                .map(|b| b.display_name().to_string())
+                .unwrap_or_default();
+            let modified = ed
+                .windows
+                .get(tab.current)
+                .and_then(|w| ed.buffer(w.bufnr).ok())
+                .is_some_and(|b| b.is_changed());
+            let marker = if modified { " +" } else { "" };
+            if index == current {
+                out.push_str(&format!(" {}:{} ", index + 1, name));
+            } else {
+                out.push_str(&format!(" {}:{}{} ", index + 1, name, marker));
+            }
+            if out.chars().count() >= cols {
+                break;
+            }
+        }
+        out.chars().take(cols).collect()
+    }
+
+    /// Build one window pane.
+    fn pane_for(&self, id: WindowId, rect: Rect, tabstop: usize, active: bool) -> PaneView {
+        let ed = &self.session.editor;
+        let Some(win) = ed.windows.get(id) else {
+            return PaneView::default();
+        };
+        let bufnr = win.bufnr;
+        let line_count = ed.buffer(bufnr).map(|b| b.line_count()).unwrap_or(1);
+        let number = ed.wopt_for_bool(id, "number", false);
+        let number_width = if number {
+            gutter_width(true, line_count)
+        } else {
+            0
+        };
+        let foldcolumn = self.foldcolumn_width(id);
+        let (signcolumn, sign_text) = self.sign_column(id, bufnr, line_count);
+        let mut signs: Vec<String> = Vec::new();
+        let mut foldcol: Vec<String> = Vec::new();
+        let text_rows = rect.text_rows().max(1);
+        let mut content = Vec::with_capacity(text_rows);
+        let mut cursor_row = None;
+        let mut row = 0usize;
+        let mut line = win.top_line;
+        while row < text_rows {
+            if line >= line_count {
+                content.push(RowView::Eob);
+                foldcol.push(self.fold_column_text(id, line, foldcolumn));
+                signs.push(String::new());
+                row += 1;
+                continue;
+            }
+            // Diff filler rows keep both sides aligned (diff.c diff_check_fill).
+            let (fillers, _changed) = ed.diff_filler(id, line);
+            for _ in 0..fillers {
+                if row >= text_rows {
+                    break;
+                }
+                foldcol.push(self.fold_column_text(id, line, foldcolumn));
+                signs.push(String::new());
+                content.push(RowView::Filler("^".to_string()));
+                row += 1;
+            }
+            if row >= text_rows {
+                break;
+            }
+            if let Some((end, label)) = self.fold_row(id, line) {
+                if line == win.cursor.line {
+                    cursor_row = Some(row);
+                }
+                foldcol.push(self.fold_column_text(id, line, foldcolumn));
+                signs.push(sign_text.get(line).cloned().unwrap_or_default());
+                content.push(RowView::Fold {
+                    start: line,
+                    end,
+                    label,
+                });
+                row += 1;
+                line = end + 1;
+                continue;
+            }
+            let text = ed
+                .buffer(bufnr)
+                .ok()
+                .and_then(|b| b.line_str(line).ok())
+                .unwrap_or("")
+                .to_string();
+            if line == win.cursor.line {
+                cursor_row = Some(row);
+            }
+            foldcol.push(self.fold_column_text(id, line, foldcolumn));
+            signs.push(sign_text.get(line).cloned().unwrap_or_default());
+            content.push(RowView::Text { line, text });
+            row += 1;
+            line += 1;
+        }
+
+        let cursor = if active {
+            let line = ed
+                .buffer(bufnr)
+                .ok()
+                .and_then(|b| b.line_str(win.cursor.line).ok())
+                .unwrap_or("")
+                .to_string();
+            cursor_row.map(|row| (row, display_col(&line, win.cursor.col, tabstop)))
+        } else {
+            None
+        };
+
+        PaneView {
+            row: rect.row,
+            col: rect.col,
+            rows: rect.rows.max(2),
+            cols: rect.cols,
+            content,
+            cursor,
+            left: win.left,
+            status: self.statusline_for(id, rect.cols, text_rows),
+            number_width,
+            foldcolumn,
+            signcolumn,
+            signs,
+            foldcol,
+            tabstop,
+            selection: self.selection_for(
+                id,
+                rect,
+                number_width + foldcolumn + signcolumn,
+                tabstop,
+            ),
+            active,
+        }
+    }
+
+    /// The closed fold starting at line in window id: (last line, label).
+    fn fold_row(&self, id: WindowId, line: usize) -> Option<(usize, String)> {
+        let ed = &self.session.editor;
+        if !ed.wopt_for_bool(id, "foldenable", true) {
+            return None;
+        }
+        let fold = ed
+            .folds_for(id)
+            .iter()
+            .find(|f| f.closed && f.start == line)?;
+        let bufnr = ed.windows.get(id).map(|w| w.bufnr)?;
+        let text = ed
+            .buffer(bufnr)
+            .ok()
+            .and_then(|b| b.line_str(fold.start).ok())
+            .unwrap_or("");
+        Some((fold.end, ed.fold_text(text, fold.end - fold.start + 1)))
+    }
+
+    /// Render the 'foldcolumn' cells for one displayed line.
+    fn fold_column_text(&self, id: WindowId, line: usize, width: usize) -> String {
+        if width == 0 {
+            return String::new();
+        }
+        let ed = &self.session.editor;
+        let folds = ed.folds_for(id);
+        let mut marker = " ";
+        if let Some(fold) = folds.iter().find(|f| f.start == line) {
+            marker = if fold.closed { "+" } else { "-" };
+        } else if folds
+            .iter()
+            .any(|f| !f.closed && f.start < line && line <= f.end)
+        {
+            marker = "|";
+        }
+        format!("{:>width$}", marker, width = width)
+    }
+
+    /// The sign column of one window: (width, text per buffer line).
+    ///
+    /// 'signcolumn' "auto" only reserves cells when the buffer has signs, which
+    /// is what vim does by default (optionstr.c).
+    fn sign_column(&self, id: WindowId, bufnr: i32, line_count: usize) -> (usize, Vec<String>) {
+        let meta = &self.session.viml.state.meta;
+        let mut per_line = vec![String::new(); line_count];
+        let mut any = false;
+        for place in &meta.sign_places {
+            if place.bufnr != bufnr as i64 {
+                continue;
+            }
+            let line = (place.lnum.max(1) - 1) as usize;
+            if line >= line_count {
+                continue;
+            }
+            let text = meta
+                .sign_defs
+                .iter()
+                .find(|def| def.name == place.name)
+                .and_then(|def| def.text.clone())
+                .or_else(|| Some(">".to_string()))
+                .unwrap_or_default();
+            per_line[line] = text.chars().take(2).collect();
+            any = true;
+        }
+        let mode = self
+            .session
+            .editor
+            .wopt_for(id, "signcolumn")
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| "auto".to_string());
+        let width = match mode.as_str() {
+            "no" => 0,
+            "auto" => usize::from(any) * 2,
+            "number" => 2,
+            other => other
+                .strip_prefix("auto:")
+                .and_then(|n| n.parse::<usize>().ok())
+                .map(|n| n * 2)
+                .unwrap_or(2),
+        };
+        (width, per_line)
+    }
+
+    /// Visible popups as overlay rectangles (host_meta computes the geometry).
+    fn popup_overlays(&self) -> Vec<(Vec<String>, rvim_term::pane::PopupRect)> {
+        let mut out = Vec::new();
+        for popup in &self.session.viml.state.meta.popups {
+            if !popup.visible() {
+                continue;
+            }
+            let rect = rvim_term::pane::PopupRect {
+                row: (popup.line.max(1) - 1) as usize,
+                col: (popup.col.max(1) - 1) as usize,
+                rows: popup.height.max(1) as usize,
+                cols: popup.width.max(1) as usize,
+            };
+            out.push((popup.text.clone(), rect));
+        }
+        out
+    }
+
+    /// 'foldcolumn' width in cells ("auto", "0", "3", ...).
+    fn foldcolumn_width(&self, id: WindowId) -> usize {
+        let value = self
+            .session
+            .editor
+            .wopt_for(id, "foldcolumn")
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| "0".to_string());
+        if value == "auto" {
+            return 1;
+        }
+        value.parse::<usize>().unwrap_or(0).min(12)
+    }
+
+    /// Feed one key while a visual selection is active.
+    fn handle_visual_key(&mut self, key: Key) -> VimResult<()> {
+        if let Some(pending) = self.pending_op.take() {
+            return self.finish_pending_command(pending, key);
+        }
+        match &key {
+            Key::Char(':') => {
+                // vim writes the visual range into the command line.
+                let prefix = rvim_normal::visual::ex_range_prefix(self.editor());
+                self.cmdline = Some(Cmdline {
+                    prompt: ':',
+                    text: prefix.clone(),
+                    cursor: prefix.chars().count(),
+                });
+                self.session.editor.mode = Mode::CommandLine;
+                self.wildmenu = None;
+                Ok(())
+            }
+            Key::Char(ch) => {
+                let ch = *ch;
+                match ch {
+                    'd' | 'x' => {
+                        let _ = rvim_normal::visual::apply_operator(self.editor(), 'd', None)?;
+                    }
+                    'y' => {
+                        let _ = rvim_normal::visual::apply_operator(self.editor(), 'y', None)?;
+                    }
+                    'c' | 's' => {
+                        let _ = rvim_normal::visual::apply_operator(self.editor(), 'c', None)?;
+                    }
+                    'p' | 'P' => self.paste_over_selection(ch)?,
+                    '>' | '<' | '~' | 'u' | 'U' | 'J' => {
+                        let _ = rvim_normal::visual::apply_operator(self.editor(), ch, None)?;
+                    }
+                    'o' | 'O' => rvim_normal::visual::swap_ends(self.editor())?,
+                    'i' | 'a' => {
+                        self.pending_op = Some(Pending::TextObject(' ', ch == 'a'));
+                    }
+                    'g' => self.pending_op = Some(Pending::VisualG),
+                    'z' => self.pending_op = Some(Pending::Fold),
+                    _ => {
+                        if let Some(motion) = visual_motion(ch) {
+                            let mut engine =
+                                std::mem::replace(&mut self.session.normal, NormalEngine::new());
+                            let count = engine.take_pending_count();
+                            self.session.normal = engine;
+                            let pos = visual_move(self.editor(), motion, count)?;
+                            self.session.editor.set_cursor(pos);
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Key::Special(name) => {
+                let motion = match name.as_str() {
+                    "LEFT" => 'h',
+                    "RIGHT" => 'l',
+                    "UP" => 'k',
+                    "DOWN" => 'j',
+                    "HOME" => '0',
+                    "END" => '$',
+                    _ => return Ok(()),
+                };
+                let pos = visual_move(self.editor(), motion, 1)?;
+                self.session.editor.set_cursor(pos);
+                Ok(())
+            }
+            Key::Nop => Ok(()),
+        }
+    }
+
+    /// ]c / [c: jump to the next/previous changed line of the current window.
+    fn diff_jump(&mut self, forward: bool) -> VimResult<()> {
+        let ed = &mut self.session.editor;
+        let win = ed.windows.current_id();
+        let line = ed.cursor().line;
+        let Some(target) = ed.diff_next_change(win, line, forward) else {
+            ed.echo("No diff changes");
+            return Ok(());
+        };
+        let col = ed.cursor().col;
+        let pos = ed.current_buffer().clamp_pos(Pos::new(target, col));
+        ed.set_cursor(pos);
+        Ok(())
+    }
+
+    /// Apply an operator to a text object (diw, yap, ...).
+    fn apply_text_object(&mut self, op: char, object: char, around: bool) -> VimResult<()> {
+        let which = if around {
+            rvim_normal::textobjects::Which::Around
+        } else {
+            rvim_normal::textobjects::Which::Inner
+        };
         let lines: Vec<String> = (0..self.session.editor.line_count())
             .filter_map(|i| {
                 self.session
@@ -802,65 +1343,194 @@ impl Tui {
             })
             .collect();
         let cursor = self.session.editor.cursor();
-        let text_rows = rows.saturating_sub(2).max(1);
+        let Some(found) =
+            rvim_normal::textobjects::text_object(&lines, (cursor.line, cursor.col), object, which)
+        else {
+            self.session.editor.mode = Mode::Normal;
+            return Ok(());
+        };
+        // Text objects report the byte offset of their last character; the
+        // operators take an exclusive end (a linewise object covers whole lines).
+        let range = if found.linewise {
+            rvim_normal::operators::line_range(
+                found.start_line,
+                found.end_line,
+                self.session.editor.line_count(),
+            )
+        } else {
+            let text = self
+                .session
+                .editor
+                .current_buffer()
+                .line_str(found.end_line)
+                .unwrap_or("")
+                .to_string();
+            let end_col = if found.end_col >= text.len() {
+                text.len()
+            } else {
+                rvim_core::text::snap_byte(&text, found.end_col)
+                    + text[rvim_core::text::snap_byte(&text, found.end_col)..]
+                        .chars()
+                        .next()
+                        .map(char::len_utf8)
+                        .unwrap_or(0)
+            };
+            rvim_normal::operators::OpRange {
+                start: Pos::new(found.start_line, found.start_col),
+                end: Pos::new(found.end_line, end_col),
+                linewise: false,
+            }
+        };
+        match op {
+            // In visual mode the object extends the selection instead of being
+            // consumed by an operator.
+            ' ' => {
+                rvim_normal::visual::select_object(self.editor(), object, which)?;
+            }
+            'd' => {
+                rvim_normal::operators::delete_range(self.editor(), range, None)?;
+                self.session.editor.mode = Mode::Normal;
+            }
+            'y' => {
+                rvim_normal::operators::yank_range(self.editor(), range, None)?;
+                self.session.editor.mode = Mode::Normal;
+            }
+            'c' => {
+                self.session.editor.begin_undo_block();
+                rvim_normal::operators::change_range(self.editor(), range, None)?;
+                self.session.editor.mode = Mode::Insert;
+            }
+            _ => self.session.editor.mode = Mode::Normal,
+        }
+        // A visual-mode object keeps the selection; operators end it.
+        if op != 'c' && op != ' ' {
+            self.session.editor.visual = None;
+        }
+        Ok(())
+    }
+
+    /// p/P over a visual selection: replace the selection with the register.
+    fn paste_over_selection(&mut self, key: char) -> VimResult<()> {
+        let Some(range) = rvim_normal::visual::range(&self.session.editor) else {
+            return Ok(());
+        };
+        let data = self
+            .session
+            .editor
+            .registers
+            .unnamed()
+            .cloned()
+            .or_else(|| self.session.editor.registers.get('"').cloned());
+        let Some(data) = data else {
+            return Ok(());
+        };
+        self.session.editor.begin_undo_block();
+        rvim_normal::operators::delete_range(&mut self.session.editor, range, None).ok();
+        self.session.editor.end_undo_block();
+        self.session.editor.visual = None;
+        self.session.editor.mode = Mode::Normal;
+        self.session.editor.registers.yank(None, data);
+        rvim_normal::operators::paste(self.editor(), key, None)?;
+        Ok(())
+    }
+
+    /// Visual selection of window id, in pane cell coordinates.
+    fn selection_for(
+        &self,
+        id: WindowId,
+        _rect: Rect,
+        _gutter: usize,
+        tabstop: usize,
+    ) -> Option<SelectionView> {
+        let ed = &self.session.editor;
+        let state = ed.visual?;
+        let win = ed.windows.get(id)?;
+        if win.id != ed.windows.current_id() {
+            return None;
+        }
+        let cursor = ed.cursor();
+        let (start, end) = if (state.anchor.line, state.anchor.col) <= (cursor.line, cursor.col) {
+            (state.anchor, cursor)
+        } else {
+            (cursor, state.anchor)
+        };
+        let line_col = |line: usize, col: usize| -> usize {
+            let text = ed
+                .buffer(win.bufnr)
+                .ok()
+                .and_then(|b| b.line_str(line).ok())
+                .unwrap_or("");
+            display_col(text, col, tabstop)
+        };
+        Some(SelectionView {
+            start_row: start.line.saturating_sub(win.top_line),
+            start_col: line_col(start.line, start.col).saturating_sub(0),
+            end_row: end.line.saturating_sub(win.top_line),
+            end_col: line_col(end.line, end.col).saturating_sub(0),
+            block: state.mode == Mode::VisualBlock,
+        })
+    }
+
+    pub fn grid(&mut self, cols: usize, rows: usize) -> Grid {
+        let cols = cols.max(1);
+        let rows = rows.max(1);
+        let tabpages = self.session.editor.tabpage_count();
+        let tabline_rows = usize::from(tabpages > 1);
+        let avail = rows.saturating_sub(1 + tabline_rows).max(2);
+        // Fold levels depend on the buffer and the window options, so they are
+        // recomputed once per frame (O(lines) for indent/marker folds).
+        let _ = self.session.editor.refresh_folds_for_current_window();
+        // Changed lines of diff windows are cached per changedtick; refresh the
+        // cache once per frame (vim's tp_diff_invalid path).
+        let _ = self.session.editor.diff_update();
+        self.session.editor.layout_windows(avail, cols);
+        self.scroll_windows(cols);
         let tabstop = self.tabstop();
-
-        // Vertical scroll follows the cursor.
-        if cursor.line < self.top {
-            self.top = cursor.line;
-        } else if cursor.line >= self.top + text_rows {
-            self.top = cursor.line + 1 - text_rows;
+        let current = self.session.editor.windows.current_id();
+        let ids = self.session.editor.windows.ids();
+        let rects = self.session.editor.windows.rects().clone();
+        let mut panes = Vec::with_capacity(ids.len());
+        for id in ids {
+            let rect = rects.get(&id).copied().unwrap_or_default();
+            panes.push(self.pane_for(id, rect, tabstop, id == current));
         }
-        // Horizontal scroll follows the cursor. The 'number' gutter is not part
-        // of the scrollable text area, so it is subtracted from the width.
-        let number = self.session.editor.options.bool_or("number", false);
-        let gutter = gutter_width(number, lines.len());
-        let text_cols = cols.saturating_sub(gutter).max(1);
-        let cursor_text = lines.get(cursor.line).map(String::as_str).unwrap_or("");
-        let cursor_col = display_col(cursor_text, cursor.col, tabstop);
-        if cursor_col < self.left {
-            self.left = cursor_col;
-        } else if cursor_col >= self.left + text_cols {
-            self.left = cursor_col + 1 - text_cols;
-        }
-
-        let status = self.statusline(cols, rows);
         let message = self.message.clone();
-        let cmdline = self.cmdline.as_ref().map(|c| CmdlineView {
+        let cmdline = self.cmdline.as_ref().map(|c| CmdlineText {
             prompt: c.prompt,
-            text: &c.text,
+            text: c.text.clone(),
             cursor: c.cursor,
         });
         let wildmenu = self
             .wildmenu
             .as_ref()
-            .map(|(items, selected, _)| WildmenuView {
-                items,
+            .map(|(items, selected, _)| WildmenuItems {
+                items: items.clone(),
                 selected: *selected,
             });
-        let model = ScreenModel {
-            lines: &lines,
-            cursor: (cursor.line, cursor.col),
-            top: self.top,
-            left: self.left,
-            status: &status,
-            message: &message,
+        let tabline = if tabline_rows > 0 {
+            Some(self.tabline(cols))
+        } else {
+            None
+        };
+        let model = ScreenLayout {
+            panes,
+            tabline,
+            message,
             cmdline,
             wildmenu,
-            show_eob: true,
-            number,
-            tabstop,
             more: !self.message_queue.is_empty(),
+            tabstop,
+            popups: self.popup_overlays(),
         };
-        render(&model, cols, rows, &self.theme)
+        render_layout(&model, cols, rows, &self.theme)
     }
 
-    /// Screen as plain text — used by the `--script` driver and the tests.
+    /// Screen as plain text - used by the `--script` driver and the tests.
     pub fn screen_text(&mut self, cols: usize, rows: usize) -> String {
         self.grid(cols, rows).text()
     }
 
-    /// 'tabstop' as a cell stride (option validation keeps it >= 1).
+    /// `'tabstop'` as a cell stride (option validation keeps it >= 1).
     fn tabstop(&self) -> usize {
         self.session
             .editor
@@ -869,30 +1539,29 @@ impl Tui {
             .clamp(1, 1000) as usize
     }
 
-    /// Statusline: file name on the left, `line,col  percent  [MODE]` on the
-    /// right (vim right-aligns the ruler so it stays visible in narrow windows).
-    pub fn statusline(&mut self, cols: usize, rows: usize) -> String {
-        let name = self
-            .session
-            .editor
-            .current_buffer()
-            .display_name()
-            .to_string();
-        let modified = if self.session.editor.current_buffer().is_changed() {
+    /// Statusline of one window: file name and flags on the left, the ruler on
+    /// the right (vim right-aligns it so it stays visible in narrow windows).
+    pub fn statusline_for(&self, id: WindowId, cols: usize, text_rows: usize) -> String {
+        let ed = &self.session.editor;
+        let Some(win) = ed.windows.get(id) else {
+            return String::new();
+        };
+        let buffer = ed.buffer(win.bufnr).ok();
+        let name = buffer
+            .map(|b| b.display_name().to_string())
+            .unwrap_or_default();
+        let modified = if buffer.is_some_and(|b| b.is_changed()) {
             " [+]"
         } else {
             ""
         };
         let left = format!("{name}{modified}");
-        let line = self.session.editor.cursor().line + 1;
-        let col = self.session.editor.cursor().col + 1;
-        let mode = self.session.editor.mode.vim_name();
-        let total = self.session.editor.line_count().max(1);
-        // get_rel_pos() (buffer.c): "All" when the whole buffer fits, "Top"/"Bot"
-        // at the ends, otherwise the percentage of lines above the window.
-        let text_rows = rows.saturating_sub(2).max(1);
-        let above = self.top as i64;
-        let below = total as i64 - self.top as i64 - text_rows as i64;
+        let line = win.cursor.line + 1;
+        let col = win.cursor.col + 1;
+        let mode = ed.mode.vim_name();
+        let total = buffer.map(|b| b.line_count()).unwrap_or(1).max(1);
+        let above = win.top_line as i64;
+        let below = total as i64 - win.top_line as i64 - text_rows as i64;
         let percent = if below <= 0 {
             if above == 0 { "All" } else { "Bot" }.to_string()
         } else if above <= 0 {
@@ -904,11 +1573,17 @@ impl Tui {
         let left_len = left.chars().count();
         let right_len = right.chars().count();
         if left_len + right_len + 1 > cols {
-            // Too narrow: keep the position/mode visible and clip the name.
             return right;
         }
         let pad = cols - left_len - right_len;
         format!("{left}{}{right}", " ".repeat(pad))
+    }
+
+    /// Statusline of the current window (kept for the `--script` driver).
+    pub fn statusline(&mut self, cols: usize, rows: usize) -> String {
+        let id = self.session.editor.windows.current_id();
+        let text_rows = self.text_rows().max(rows.saturating_sub(2)).min(rows);
+        self.statusline_for(id, cols, text_rows)
     }
 
     /// Put a message on the message line, queueing it when one is showing.
@@ -1049,6 +1724,32 @@ fn motion_key(key: &Key) -> Option<char> {
             _ => None,
         },
         Key::Nop => None,
+    }
+}
+
+/// Motions that extend a visual selection.
+fn visual_motion(ch: char) -> Option<char> {
+    match ch {
+        'h' | 'j' | 'k' | 'l' | 'w' | 'W' | 'b' | 'B' | 'e' | 'E' | '0' | '$' | '^' | 'G' => {
+            Some(ch)
+        }
+        _ => None,
+    }
+}
+
+/// Move the cursor for a visual-mode motion.
+fn visual_move(ed: &mut rvim_editor::Editor, motion: char, count: u64) -> VimResult<Pos> {
+    match motion {
+        'w' | 'W' | 'b' | 'B' | 'e' | 'E' => rvim_normal::motions::word_motion(ed, motion, count),
+        '$' => rvim_normal::motions::line_end(ed, count),
+        'G' => rvim_normal::motions::goto_line(ed, count, true),
+        '0' => Ok(Pos::new(ed.cursor().line, 0)),
+        '^' => {
+            let line = ed.cursor().line;
+            let col = ed.current_buffer().first_nonblank_byte(line)?;
+            Ok(Pos::new(line, col))
+        }
+        other => rvim_normal::motions::move_cursor(ed, other, count),
     }
 }
 

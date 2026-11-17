@@ -9,26 +9,57 @@ use rvim_core::{Pos, VimError, VimResult};
 use rvim_undo::UndoHistory;
 
 use crate::autocmd::AutocmdStore;
+use crate::fold::FoldStore;
 use crate::maps::MapStore;
 use crate::mark::{MAXLNUM, MarkSnapshot, MarkStore};
 use crate::message::MessageLog;
 use crate::mode::Mode;
-use crate::options::Options;
+use crate::options::{OptValue, Options};
 use crate::register::{RegType, Register, RegisterStore};
 use crate::usercmd::UserCommandStore;
+use crate::window::{Dir, Rect, TabpageId, WindowId, Windows};
 
-/// One viewport onto a buffer. M1 ships a single window; the struct already
-/// carries the fields required by split windows in M5.
-#[derive(Clone, Debug)]
-pub struct Window {
-    pub id: i32,
-    pub bufnr: i32,
-    pub cursor: Pos,
-    /// Top line of the viewport (zero-based), used by the future TUI.
-    pub top_line: usize,
+/// Visual mode selection (normal.c VIsual): the anchor stays put while the
+/// cursor moves, so the selection is always anchor..cursor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VisualState {
+    /// Visual, VisualLine or VisualBlock.
+    pub mode: Mode,
+    /// The fixed end of the selection.
+    pub anchor: Pos,
 }
 
-/// State of the most recent `:substitute`, for `:&`, `:~` and the `'~'`
+/// One jump-list entry (mark.c setpcmark / getpcmark).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JumpPos {
+    pub bufnr: i32,
+    pub pos: Pos,
+}
+
+/// One change-list entry (:changes): the buffer and 1-based line of a change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChangePos {
+    pub bufnr: i32,
+    pub lnum: usize,
+}
+
+/// One repeatable change, replayed by "." (normal.c nv_dot / u_save_cursor).
+///
+/// Vim records the *command* rather than the text, so a repeat re-executes the
+/// same operator with the same count at the new cursor position.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RepeatChange {
+    /// An insert session: the entry key (i/a/A/o/O/I/c/s/C) and typed text.
+    Insert { entry: char, text: String },
+    /// An operator with its motion key and total count (dd, dw, d2w, ...).
+    Operator { op: char, motion: char, count: u64 },
+    /// x / X / D / C with their count.
+    Simple { key: char, count: u64 },
+    /// p / P with the register.
+    Paste { key: char, reg: Option<char> },
+}
+
+/// State of the most recent `:substitute`, for `:`&, `:`~ and the `'`~`'`
 /// special register (ex_cmds.c last substitute state).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LastSubstitute {
@@ -74,8 +105,10 @@ struct SnapshotHistory {
 
 pub struct Editor {
     buffers: Vec<Buffer>,
-    windows: Vec<Window>,
-    current_win: usize,
+    /// Windows, tabpages and the split layout (see [`crate::window`]).
+    pub windows: Windows,
+    /// Per-window fold state (see [`crate::fold`]).
+    pub fold_store: FoldStore,
     next_bufnr: i32,
     undo: std::collections::HashMap<i32, UndoHistory>,
     pub mode: Mode,
@@ -87,9 +120,23 @@ pub struct Editor {
     pub abbrevs: crate::abbrev::AbbrevStore,
     pub autocmds: AutocmdStore,
     pub usercmds: UserCommandStore,
+    /// Quickfix and location-list state (M5).
+    pub(crate) quickfix: crate::quickfix::QuickfixState,
     pub search_pattern: String,
     /// Most recent successful `:substitute`, for `:&` / `:~`.
     pub last_sub: Option<LastSubstitute>,
+    /// Active visual selection, if any.
+    pub visual: Option<VisualState>,
+    /// Last visual selection (state plus the cursor end), restored by `gv`.
+    pub last_visual: Option<(VisualState, Pos)>,
+    /// The last change, replayed by ".".
+    pub last_change: Option<RepeatChange>,
+    /// Jump list (:jumps, CTRL-O/CTRL-I), oldest first.
+    pub jumplist: Vec<JumpPos>,
+    /// Index of the current position inside jumplist.
+    pub jumplist_idx: usize,
+    /// Change list (:changes, g;/g,), oldest first.
+    pub changelist: Vec<ChangePos>,
     /// `:source` nesting depth (guards runaway recursion).
     pub script_depth: usize,
     /// `:filetype on/detect` state (actual detection is M3/M6 work in progress).
@@ -114,6 +161,9 @@ pub struct Editor {
     /// Every error path funnels through [`Editor::emsg`], so batch sessions can
     /// derive their exit status from this single counter (main.c:1575).
     pub error_count: usize,
+    /// `:vertical` seen earlier on the same Ex line: the next split or resize
+    /// uses it up (ex_docmd.c `EX_VERTSPLIT`).
+    pub ex_vertical: bool,
     /// `-e`/`-es` Ex mode (vim's `exmode_active`), which changes what a range
     /// without a command does (`:1,3` prints in Ex mode, jumps otherwise).
     pub exmode: bool,
@@ -137,18 +187,12 @@ pub struct Editor {
 impl Editor {
     pub fn new() -> Self {
         let buffers = vec![Buffer::new(1)];
-        let win = Window {
-            id: 1,
-            bufnr: 1,
-            cursor: Pos::new(0, 0),
-            top_line: 0,
-        };
         let mut undo = std::collections::HashMap::new();
         undo.insert(1, UndoHistory::new());
         Self {
             buffers,
-            windows: vec![win],
-            current_win: 0,
+            windows: Windows::new(),
+            fold_store: FoldStore::new(),
             next_bufnr: 2,
             undo,
             mode: Mode::Normal,
@@ -160,8 +204,15 @@ impl Editor {
             abbrevs: crate::abbrev::AbbrevStore::new(),
             autocmds: AutocmdStore::new(),
             usercmds: UserCommandStore::new(),
+            quickfix: crate::quickfix::QuickfixState::default(),
             search_pattern: String::new(),
             last_sub: None,
+            visual: None,
+            last_visual: None,
+            last_change: None,
+            jumplist: Vec::new(),
+            jumplist_idx: 0,
+            changelist: Vec::new(),
             script_depth: 0,
             filetype_detection: false,
             filetype_plugin: false,
@@ -174,6 +225,7 @@ impl Editor {
             pending_count: 0,
             error_count: 0,
             exmode: false,
+            ex_vertical: false,
             autocmd_busy: false,
             autocmd_nested: false,
             autocmd_depth: 0,
@@ -190,7 +242,7 @@ impl Editor {
     }
 
     pub fn current_bufnr(&self) -> i32 {
-        self.windows[self.current_win].bufnr
+        self.windows.current().bufnr
     }
 
     fn index_of(&self, bufnr: i32) -> VimResult<usize> {
@@ -287,11 +339,15 @@ impl Editor {
 
     pub fn switch_buffer(&mut self, bufnr: i32) -> VimResult<()> {
         self.index_of(bufnr)?;
-        // remember cursor on the old window (single window M1)
-        self.windows[self.current_win].bufnr = bufnr;
         let remembered = self.buffer(bufnr)?.last_cursor;
         let clamped = self.buffer(bufnr)?.clamp_pos(remembered);
-        self.windows[self.current_win].cursor = clamped;
+        let win = self.windows.current_mut();
+        win.bufnr = bufnr;
+        win.cursor = clamped;
+        win.curswant = clamped.col;
+        // The viewport follows the cursor of the buffer being shown (M5 keeps no
+        // per-buffer window position yet; see compat_deviations §9).
+        win.top_line = clamped.line;
         // 'fileformat' is a buffer-local option in vim; the buffer's own field
         // is authoritative, so mirror it into the option table on switch.
         self.sync_fileformat_option(bufnr);
@@ -311,16 +367,551 @@ impl Editor {
             .set("fileformat", crate::OptValue::Str(name.to_string()));
     }
 
+    // --- windows / tabpages (M5) ------------------------------------------
+
+    /// Number of windows in the current tabpage.
+    pub fn window_count(&self) -> usize {
+        self.windows.wincount()
+    }
+
+    /// Number of tabpages.
+    pub fn tabpage_count(&self) -> usize {
+        self.windows.tab_count()
+    }
+
+    pub fn current_win_id(&self) -> WindowId {
+        self.windows.current_id()
+    }
+
+    /// Compute the screen layout: `rows` excludes the command/message rows.
+    pub fn layout_windows(&mut self, rows: usize, cols: usize) -> Rect {
+        let id = self.windows.current_id();
+        let rects = self.windows.layout(rows, cols);
+        *rects.get(&id).unwrap_or(&Rect::default())
+    }
+
+    /// `:split` / `:vsplit` on the current buffer.
+    ///
+    /// The new window inherits the cursor and window-local options of the one it
+    /// was split from, like vim`s `win_split()`.
+    pub fn split_window(&mut self, vertical: bool) -> VimResult<WindowId> {
+        let bufnr = self.current_bufnr();
+        let id = self.windows.split(vertical, bufnr, true)?;
+        self.sync_fileformat_option(bufnr);
+        Ok(id)
+    }
+
+    /// `:split {file}` / `:vsplit {file}`: split first, then edit in the new window.
+    pub fn split_and_open(&mut self, vertical: bool, path: &Path) -> VimResult<WindowId> {
+        let id = self.split_window(vertical)?;
+        self.open_file(path)?;
+        Ok(id)
+    }
+
+    /// `:close` on the current window. A modified buffer refuses unless `force` or
+    /// `hidden` is set (E37, ex_docmd.c ex_close).
+    pub fn close_current_window(&mut self, force: bool) -> VimResult<()> {
+        let id = self.windows.current_id();
+        let modified = self.current_buffer().is_changed();
+        let hidden = self.options.bool_or("hidden", false);
+        if modified && !force && !hidden {
+            return Err(VimError::no_write_since_change());
+        }
+        self.windows.close(id)
+    }
+
+    /// `:only` / <C-w>o`: close every other window of the current tabpage.
+    pub fn only_current_window(&mut self) -> VimResult<()> {
+        let id = self.windows.current_id();
+        self.windows.only(id)
+    }
+
+    /// Make `id` the current window, syncing the buffer state it shows.
+    pub fn goto_window(&mut self, id: WindowId) -> VimResult<()> {
+        self.windows.goto(id)?;
+        let bufnr = self.current_bufnr();
+        let remembered = self.buffer(bufnr)?.last_cursor;
+        let clamped = self.buffer(bufnr)?.clamp_pos(remembered);
+        self.windows.current_mut().cursor = clamped;
+        self.sync_fileformat_option(bufnr);
+        Ok(())
+    }
+
+    pub fn goto_window_dir(&mut self, dir: Dir) -> VimResult<()> {
+        self.windows.goto_dir(dir)
+    }
+
+    pub fn goto_window_cycle(&mut self, forward: bool, count: usize) -> VimResult<()> {
+        self.windows.cycle(forward, count)
+    }
+
+    /// `:wincmd {key}` / <C-w>{key}`.
+    ///
+    /// Supported keys: h j k l w W t b p c q o n s v x r = + - _ &#124; and the
+    /// move commands H J K L. Unknown keys are ignored the way vim ignores them.
+    pub fn wincmd(&mut self, key: char, count: u64) -> VimResult<()> {
+        let count = count.max(1);
+        match key {
+            'h' | 'j' | 'k' | 'l' => {
+                let dir = Dir::from_key(key).expect("direction key");
+                for _ in 0..count {
+                    self.goto_window_dir(dir)?;
+                }
+                Ok(())
+            }
+            'w' => self.goto_window_cycle(true, count as usize),
+            'W' => self.goto_window_cycle(false, count as usize),
+            't' => self.windows.goto_edge(false),
+            'b' => self.windows.goto_edge(true),
+            'p' => self.windows.goto_prev(),
+            'c' | 'q' => self.windows.close(self.windows.current_id()),
+            'o' => self.only_current_window(),
+            'n' => {
+                let id = self.split_window(false)?;
+                self.goto_window(id)?;
+                let bufnr = self.new_buffer();
+                self.switch_buffer(bufnr)
+            }
+            's' => {
+                self.split_window(false)?;
+                Ok(())
+            }
+            'v' => {
+                self.split_window(true)?;
+                Ok(())
+            }
+            'x' => self.exchange_windows(),
+            'r' => self.rotate_windows(),
+            'H' | 'J' | 'K' | 'L' => self.move_window(key),
+            '=' => self.equalize_windows(),
+            '+' => self.windows.resize(count as i64, false),
+            '-' => self.windows.resize(-(count as i64), false),
+            '>' => self.windows.resize(count as i64, true),
+            '<' => self.windows.resize(-(count as i64), true),
+            '_' => self.windows.set_size(count as usize, false),
+            '|' => self.windows.set_size(count as usize, true),
+            _ => Ok(()),
+        }
+    }
+
+    /// Swap the contents of the current window with the next one
+    /// (<C-w>x). The frames stay where they are, so the effect is the same
+    /// two-window exchange vim performs.
+    fn exchange_windows(&mut self) -> VimResult<()> {
+        let ids = self.windows.ids();
+        if ids.len() < 2 {
+            return Err(VimError::new("E11", "Only one window"));
+        }
+        let cur = self.windows.current_id();
+        let pos = ids.iter().position(|w| *w == cur).unwrap_or(0);
+        let other = ids[(pos + 1) % ids.len()];
+        self.swap_window_state(cur, other);
+        Ok(())
+    }
+
+    /// Rotate the window contents by one (<C-w>r).
+    ///
+    /// Vim rotates the *frames*; rotating everything a window shows has the same
+    /// observable effect for the two-window case and keeps the layout stable for
+    /// larger ones (documented in compat_deviations §9).
+    fn rotate_windows(&mut self) -> VimResult<()> {
+        let ids = self.windows.ids();
+        if ids.len() < 2 {
+            return Err(VimError::new("E11", "Only one window"));
+        }
+        let states: Vec<crate::window::Window> = ids
+            .iter()
+            .filter_map(|id| self.windows.get(*id).cloned())
+            .collect();
+        for (index, id) in ids.iter().enumerate() {
+            let src = &states[(index + states.len() - 1) % states.len()];
+            if let Some(win) = self.windows.get_mut(*id) {
+                win.bufnr = src.bufnr;
+                win.cursor = src.cursor;
+                win.top_line = src.top_line;
+                win.left = src.left;
+                win.curswant = src.curswant;
+                win.local = src.local.clone();
+                win.quickfix = src.quickfix;
+            }
+        }
+        Ok(())
+    }
+
+    /// <C-w>H/J/K/L: move the current window to an edge by exchanging it with the
+    /// window that is already there.
+    fn move_window(&mut self, key: char) -> VimResult<()> {
+        let ids = self.windows.ids();
+        if ids.len() < 2 {
+            return Err(VimError::new("E11", "Only one window"));
+        }
+        let cur = self.windows.current_id();
+        let target = match key {
+            'H' | 'K' => ids[0],
+            _ => *ids.last().expect("non-empty"),
+        };
+        if target == cur {
+            return Ok(());
+        }
+        self.swap_window_state(cur, target);
+        self.goto_window(target)?;
+        Ok(())
+    }
+
+    /// Swap everything a window shows (buffer, cursor, viewport, local options).
+    fn swap_window_state(&mut self, a: WindowId, b: WindowId) {
+        let (Some(wa), Some(wb)) = (self.windows.get(a).cloned(), self.windows.get(b).cloned())
+        else {
+            return;
+        };
+        if let Some(win) = self.windows.get_mut(a) {
+            win.bufnr = wb.bufnr;
+            win.cursor = wb.cursor;
+            win.top_line = wb.top_line;
+            win.left = wb.left;
+            win.curswant = wb.curswant;
+            win.local = wb.local;
+            win.quickfix = wb.quickfix;
+        }
+        if let Some(win) = self.windows.get_mut(b) {
+            win.bufnr = wa.bufnr;
+            win.cursor = wa.cursor;
+            win.top_line = wa.top_line;
+            win.left = wa.left;
+            win.curswant = wa.curswant;
+            win.local = wa.local;
+            win.quickfix = wa.quickfix;
+        }
+    }
+
+    /// <C-w>=: give every window of the current tabpage the same size.
+    fn equalize_windows(&mut self) -> VimResult<()> {
+        let ids = self.windows.ids();
+        let count = ids.len();
+        if count < 2 {
+            return Ok(());
+        }
+        let rows: usize = ids
+            .iter()
+            .filter_map(|id| self.windows.get(*id).map(|w| w.height + 1))
+            .sum();
+        let cols: usize = ids
+            .iter()
+            .filter_map(|id| self.windows.get(*id).map(|w| w.width))
+            .sum();
+        let each_h = (rows / count).saturating_sub(1).max(1);
+        let each_w = (cols / count).max(10);
+        for id in ids {
+            if let Some(win) = self.windows.get_mut(id) {
+                win.height = each_h;
+                win.width = each_w;
+            }
+        }
+        Ok(())
+    }
+
+    /// `:tabnew` / `:tabedit`: a new tabpage showing `bufnr` (or a fresh buffer).
+    pub fn new_tabpage(&mut self, bufnr: Option<i32>) -> VimResult<TabpageId> {
+        let bufnr = match bufnr {
+            Some(id) => {
+                self.index_of(id)?;
+                id
+            }
+            None => self.new_buffer(),
+        };
+        let id = self.windows.new_tabpage(bufnr, 20, 80);
+        self.sync_fileformat_option(bufnr);
+        Ok(id)
+    }
+
+    /// `:tabclose` the current tabpage.
+    pub fn close_current_tabpage(&mut self, force: bool) -> VimResult<()> {
+        let modified = self.current_buffer().is_changed();
+        let hidden = self.options.bool_or("hidden", false);
+        if modified && !force && !hidden {
+            return Err(VimError::no_write_since_change());
+        }
+        let n = self.windows.current_tab_index() + 1;
+        self.windows.close_tabpage(n)
+    }
+
+    /// `:tabnext`/`:tabprevious`/`:tabfirst`/`:tablast`.
+    pub fn goto_tabpage(&mut self, n: usize) -> VimResult<()> {
+        self.windows.goto_tabpage(n)
+    }
+
+    pub fn cycle_tabpage(&mut self, forward: bool, count: usize) -> VimResult<()> {
+        let total = self.windows.tab_count();
+        if total < 2 {
+            return Ok(());
+        }
+        let cur = self.windows.current_tab_index() as i64;
+        let step = count.max(1) as i64;
+        let next = if forward {
+            (cur + step).rem_euclid(total as i64)
+        } else {
+            (cur - step).rem_euclid(total as i64)
+        };
+        self.windows.goto_tabpage(next as usize + 1)
+    }
+
+    pub fn tabonly(&mut self) -> VimResult<()> {
+        let n = self.windows.current_tab_index() + 1;
+        self.windows.tabonly(n)
+    }
+
+    pub fn move_tabpage(&mut self, to: usize) -> VimResult<()> {
+        self.windows.move_tabpage(to)
+    }
+
+    // --- window-local options -------------------------------------------
+
+    /// Read an option, preferring the window-local value for a P_WIN option.
+    pub fn wopt(&self, name: &str) -> VimResult<OptValue> {
+        let canon = Options::canonical(name)?;
+        if crate::options::is_window_local(&canon) {
+            if let Some(value) = self.windows.current().get_local(&canon) {
+                return Ok(value.clone());
+            }
+        }
+        Ok(self.options.get(&canon)?.clone())
+    }
+
+    /// Read a boolean option, preferring the window-local value.
+    pub fn bool_option(&self, name: &str, default: bool) -> bool {
+        self.wopt_bool(name, default)
+    }
+
+    // --- jump list / change list (M5) ------------------------------------
+
+    /// Record the current position before a jump (mark.c setpcmark()).
+    ///
+    /// Repeating the jump from the same line collapses into one entry, like
+    /// vim's "the last entry already is the current position" check.
+    pub fn push_jump(&mut self) {
+        let entry = JumpPos {
+            bufnr: self.current_bufnr(),
+            pos: self.cursor(),
+        };
+        if self.jumplist.last() == Some(&entry) {
+            return;
+        }
+        self.jumplist.truncate(self.jumplist_idx.saturating_add(1));
+        self.jumplist.push(entry);
+        if self.jumplist.len() > 100 {
+            self.jumplist.remove(0);
+        }
+        self.jumplist_idx = self.jumplist.len().saturating_sub(1);
+    }
+
+    /// CTRL-O: jump to the previous position in the jump list.
+    pub fn jump_back(&mut self) -> VimResult<()> {
+        if self.jumplist.is_empty() || self.jumplist_idx == 0 {
+            return Err(VimError::new("E662", "No previous position"));
+        }
+        let current = JumpPos {
+            bufnr: self.current_bufnr(),
+            pos: self.cursor(),
+        };
+        if self.jumplist_idx + 1 >= self.jumplist.len() {
+            self.jumplist.push(current);
+        }
+        self.jumplist_idx -= 1;
+        let target = self.jumplist[self.jumplist_idx];
+        self.goto_jump(target)
+    }
+
+    /// CTRL-I: jump forward again.
+    pub fn jump_forward(&mut self) -> VimResult<()> {
+        if self.jumplist.is_empty() || self.jumplist_idx + 1 >= self.jumplist.len() {
+            return Err(VimError::new("E663", "No next position"));
+        }
+        self.jumplist_idx += 1;
+        let target = self.jumplist[self.jumplist_idx];
+        self.goto_jump(target)
+    }
+
+    fn goto_jump(&mut self, target: JumpPos) -> VimResult<()> {
+        if target.bufnr != self.current_bufnr() {
+            self.switch_buffer(target.bufnr)?;
+        }
+        let pos = self.buffer(target.bufnr)?.clamp_pos(target.pos);
+        self.set_cursor(pos);
+        Ok(())
+    }
+
+    /// True when CTRL-O (backward) or CTRL-I (forward) can move.
+    pub fn has_jump(&self, forward: bool) -> bool {
+        if forward {
+            self.jumplist_idx + 1 < self.jumplist.len()
+        } else {
+            !self.jumplist.is_empty() && self.jumplist_idx > 0
+        }
+    }
+
+    /// :jumps output.
+    pub fn jumps_report(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (index, entry) in self.jumplist.iter().enumerate() {
+            let marker = if index == self.jumplist_idx { ">" } else { " " };
+            let name = self
+                .buffer(entry.bufnr)
+                .map(|b| b.display_name().to_string())
+                .unwrap_or_default();
+            out.push(format!(
+                "{marker} {:>3} {:>4} {:>3}  {}",
+                index + 1,
+                entry.pos.line + 1,
+                entry.pos.col + 1,
+                name
+            ));
+        }
+        if out.is_empty() {
+            out.push("Jump list is empty".to_string());
+        }
+        out
+    }
+
+    /// :changes output, newest first like vim.
+    pub fn changes_report(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (index, entry) in self.changelist.iter().enumerate().rev() {
+            let marker = if index + 1 == self.changelist.len() {
+                ">"
+            } else {
+                " "
+            };
+            let name = self
+                .buffer(entry.bufnr)
+                .map(|b| b.display_name().to_string())
+                .unwrap_or_default();
+            out.push(format!(
+                "{marker} {:>3} {:>4}    1  {}",
+                index + 1,
+                entry.lnum,
+                name
+            ));
+        }
+        if out.is_empty() {
+            out.push("No changes".to_string());
+        }
+        out
+    }
+
+    /// Read an option in the context of a specific window (used by the TUI and
+    /// by the window builtins).
+    pub fn wopt_for(&self, id: WindowId, name: &str) -> VimResult<OptValue> {
+        let canon = Options::canonical(name)?;
+        if crate::options::is_window_local(&canon) {
+            if let Some(value) = self.windows.get(id).and_then(|w| w.get_local(&canon)) {
+                return Ok(value.clone());
+            }
+        }
+        Ok(self.options.get(&canon)?.clone())
+    }
+
+    pub fn wopt_for_bool(&self, id: WindowId, name: &str, default: bool) -> bool {
+        self.wopt_for(id, name)
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(default)
+    }
+
+    pub fn wopt_for_num(&self, id: WindowId, name: &str, default: i64) -> i64 {
+        self.wopt_for(id, name)
+            .ok()
+            .and_then(|v| v.as_num())
+            .unwrap_or(default)
+    }
+
+    pub fn wopt_bool(&self, name: &str, default: bool) -> bool {
+        self.wopt(name)
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(default)
+    }
+
+    pub fn wopt_num(&self, name: &str, default: i64) -> i64 {
+        self.wopt(name)
+            .ok()
+            .and_then(|v| v.as_num())
+            .unwrap_or(default)
+    }
+
+    pub fn wopt_str(&self, name: &str, default: &str) -> String {
+        self.wopt(name)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| default.to_string())
+    }
+
+    /// `:set` / `:setlocal` / `:setglobal` routing.
+    ///
+    /// `All` (plain `:set`) writes the global value and, for a window option, the
+    /// current window`s value too — exactly what option.c does, which is why
+    /// `:set nu` affects new splits while `:setlocal nu` does not.
+    pub fn set_option(&mut self, name: &str, value: OptValue, scope: SetScope) -> VimResult<()> {
+        let canon = Options::canonical(name)?;
+        let checked = Options::validate_value(&canon, value)?;
+        let window_local = crate::options::is_window_local(&canon);
+        match scope {
+            // `:set`: the global value is the default for new windows and the
+            // current window gets the value too (option.c do_set).
+            SetScope::All => {
+                self.options.set(&canon, checked.clone())?;
+                if window_local {
+                    self.windows.current_mut().set_local(&canon, checked);
+                }
+            }
+            // `:setlocal` must not touch the global value.
+            SetScope::Local => {
+                if window_local {
+                    self.windows.current_mut().set_local(&canon, checked);
+                } else {
+                    self.options.set(&canon, checked)?;
+                }
+            }
+            SetScope::Global => {
+                self.options.set(&canon, checked)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `:setlocal {opt}&`: drop the window-local override.
+    pub fn reset_local_option(&mut self, name: &str) -> VimResult<()> {
+        let canon = Options::canonical(name)?;
+        self.windows.current_mut().local.remove(&canon);
+        Ok(())
+    }
+
+    /// Set a window-local option on a specific window (`win_execute()` support).
+    pub fn set_window_option(
+        &mut self,
+        id: WindowId,
+        name: &str,
+        value: OptValue,
+    ) -> VimResult<()> {
+        let canon = Options::canonical(name)?;
+        let checked = Options::validate_value(&canon, value)?;
+        if let Some(win) = self.windows.get_mut(id) {
+            win.set_local(&canon, checked);
+        }
+        Ok(())
+    }
+
     // --- cursor / window -------------------------------------------------
 
     pub fn cursor(&self) -> Pos {
-        self.windows[self.current_win].cursor
+        self.windows.current().cursor
     }
 
     pub fn set_cursor(&mut self, pos: Pos) {
         let bufnr = self.current_bufnr();
         let clamped = self.current_buffer().clamp_pos(pos);
-        self.windows[self.current_win].cursor = clamped;
+        let win = self.windows.current_mut();
+        win.cursor = clamped;
+        win.curswant = clamped.col;
         if let Ok(buf) = self.buffer_mut(bufnr) {
             buf.last_cursor = clamped;
         }
@@ -421,6 +1012,14 @@ impl Editor {
         hist.before.push(snapshot_before);
         hist.after.push(snapshot_after);
         hist.pos += 1;
+        // Vim keeps the last 100 changes for :changes and g;/g, (mark.c).
+        self.changelist.push(ChangePos {
+            bufnr,
+            lnum: cursor_before.line + 1,
+        });
+        if self.changelist.len() > 100 {
+            self.changelist.remove(0);
+        }
         self.history_mut(bufnr)
             .record(edit, cursor_before, cursor_after);
     }
@@ -824,6 +1423,17 @@ impl Default for Editor {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Which set of option values `:set` writes (option.c P_GLOBAL/P_LOCAL).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetScope {
+    /// Plain `:set`: global value plus the current window`s local value.
+    All,
+    /// `:setlocal`: only the current window`s value.
+    Local,
+    /// `:setglobal`: only the global value.
+    Global,
 }
 
 /// Cursor position after inserting `text` at byte offset `start`: Vim leaves

@@ -438,6 +438,64 @@ fn counted_insert_repeats_text_in_the_tui() {
 }
 
 #[test]
+fn counted_insert_repeats_the_typed_line_break() {
+    let session = open(&["seed"]);
+    let mut tui = Tui::new(session);
+    // 3i%<CR><Esc>: vim repeats the whole typed text, newline included, so the
+    // result is three "%" lines followed by the original line (regression: the
+    // TUI used to split the line itself, so the repeat kept only "%").
+    let rows = screen(&mut tui, "3i%<CR><Esc>", 30, 8);
+    assert_eq!(rows[0], "%");
+    assert_eq!(rows[1], "%");
+    assert_eq!(rows[2], "%");
+    assert_eq!(rows[3], "seed");
+    assert_eq!(tui.session.editor.line_count(), 4);
+    // The insert register holds the newline too (it is what "." replays).
+    assert!(
+        tui.session
+            .editor
+            .registers
+            .get('.')
+            .is_some_and(|r| r.text.contains(char::from(10))),
+        "the last-insert register keeps the <CR>"
+    );
+}
+
+#[test]
+fn large_counted_insert_with_a_newline_stays_consistent() {
+    let session = open(&["seed"]);
+    let mut tui = Tui::new(session);
+    // The reported repro: 1000i%<CR><Esc> must produce 1000 "%" lines plus the
+    // original line, not one line with 1000 percent signs.
+    let rows = screen(&mut tui, "1000i%<CR><Esc>", 20, 6);
+    assert_eq!(rows[0], "%");
+    assert_eq!(tui.session.editor.line_count(), 1001);
+    let all_percent = (0..1000).all(|i| {
+        tui.session
+            .editor
+            .current_buffer()
+            .line_str(i)
+            .map(|l| l == "%")
+            .unwrap_or(false)
+    });
+    assert!(all_percent, "every repeated copy is its own line");
+    assert_eq!(
+        tui.session.editor.current_buffer().line_str(1000).unwrap(),
+        "seed"
+    );
+}
+
+#[test]
+fn dot_repeats_an_insert_that_contains_a_newline() {
+    let session = open(&["seed"]);
+    let mut tui = Tui::new(session);
+    screen(&mut tui, "i%<CR><Esc>", 30, 8);
+    screen(&mut tui, "j.", 30, 8);
+    let text = tui.session.editor.current_buffer().full_text();
+    assert_eq!(text, format!("%{nl}%{nl}seed", nl = char::from(10)));
+}
+
+#[test]
 fn counted_open_inserts_multiple_lines() {
     let session = open(&["x"]);
     let mut tui = Tui::new(session);
@@ -693,7 +751,11 @@ fn horizontal_scroll_leaves_room_for_the_number_gutter() {
     let mut tui = Tui::new(session);
     let rows = screen(&mut tui, ":set number<CR>19l", 12, 4);
     // 12 columns minus the two-cell gutter leaves ten text cells.
-    assert_eq!(tui.left, 10, "cursor cell 19, ten text cells");
+    assert_eq!(
+        tui.session.editor.windows.current().left,
+        10,
+        "cursor cell 19, ten text cells"
+    );
     assert_eq!(
         rows[0].chars().count(),
         12,

@@ -54,9 +54,10 @@ impl MarkStore {
         self.global.get(&name).copied()
     }
 
-    /// Resolve any mark name, local first then global.
+    /// Resolve any mark name: local marks (a-z and the special '<', '>', '.',
+    /// '^', '[' ', ']', '"' marks vim keeps per buffer) first, then global ones.
     pub fn resolve(&self, bufnr: i32, name: char) -> Option<Pos> {
-        if name.is_ascii_lowercase() {
+        if name.is_ascii_lowercase() || matches!(name, '<' | '>' | '.' | '^' | '[' | ']' | '"') {
             self.get_local(bufnr, name)
         } else {
             self.get_global(name).map(|g| g.pos)

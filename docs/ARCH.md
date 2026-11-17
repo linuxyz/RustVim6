@@ -53,7 +53,7 @@
 | `change.c` `ops.c` `edit.c` `indent.c` `textformat.c` | 文本变更/操作符/插入/缩进/排版 | **rvim-buffer** + **rvim-normal** |
 | `undo.c` | 撤销树 | **rvim-undo** |
 | `register.c` `mark.c` | 寄存器/标记 | **rvim-register** / **rvim-mark**（先并入 rvim-editor） |
-| `window.c` `move.c` `textobject.c` | 窗口/移动/文本对象 | **rvim-window** / **rvim-normal** |
+| `window.c` `move.c` `textobject.c` | 窗口/移动/文本对象 | **rvim-editor::window**（M5 frame 树）/ **rvim-normal**（含 M5 `visual` + `textobjects`） |
 | `normal.c` `nv_cmds.h` `nv_cmdidxs.h` | 普通模式命令分发 | **rvim-normal** |
 | `ex_docmd.c` `ex_cmds.c` `ex_cmds.h` `ex_cmdidxs.h` `ex_cmds2.c` | Ex 解析/分发/589 条命令 | **rvim-ex** |
 | `ex_getln.c` `cmdexpand.c` `cmdhist.c` | 命令行/补全/历史 | **rvim-cmdline** |
@@ -70,7 +70,8 @@
 | `term.c` `termlib.c` `termdefs.h` `libvterm/` | termcap/内置终端 | **rvim-termio** / **rvim-term** |
 | `message.c` | 消息/回显/错误 | **rvim-termio::message** + rvim-app |
 | `fileio.c` `bufwrite.c` `filepath.c` `findfile.c` | 文件读写/路径/通配 | **rvim-app::fs**（std::fs） |
-| `fold.c` `diff.c`(`xdiff/`) `sign.c` `textprop.c` `popupwin.c` `quickfix.c` | 折叠/diff/标志/文本属性/弹窗/qf | 后置 crate（M5+） |
+| `fold.c` `diff.c`(`xdiff/`) `quickfix.c` | 折叠/diff/quickfix | **rvim-editor::fold** / **rvim-diff** + **rvim-editor::diff** / **rvim-ex::errorformat** + **rvim-editor::quickfix**（M5） |
+| `sign.c` `textprop.c` `popupwin.c` | 标志/文本属性/弹窗 | **rvim-ex::host_meta** 数据面（M5，TUI 渲染 sign 列与 popup 覆盖层） |
 | `syntax.c` `spell*.c` `tag.c` `cindent.c` | 语法/拼写/标签/C 缩进 | 后置（M5-M7） |
 | `channel.c` `job.c` `terminal.c` `pty.c` | 通道/作业/终端 | 后置（M7，std::process + 自研协议） |
 | `os_win32.c` `os_unix.c` | 平台层 | `cfg(windows)`/`cfg(unix)` 条件编译 |
@@ -93,6 +94,7 @@ RustVim6/
 │  ├─ rvim-core/             # L1 无依赖基础库（编码、位置、错误、字符）
 │  ├─ rvim-buffer/           # L2 文档模型：Buffer/Line/变更/文件格式
 │  ├─ rvim-undo/             # L2 撤销树
+│  ├─ rvim-diff/            # L2 行级 diff（对齐 src/xdiff，M5）
 │  ├─ rvim-editor/           # L2/L4 聚合：Editor/Window/Option/Register/Mark/Mode
 │  ├─ rvim-regex/            # L2 正则（先字面量子集，后 BT/NFA）
 │  ├─ rvim-search/           # L2 搜索替换
@@ -115,6 +117,8 @@ RustVim6/
 
 ```
 rvim-core ◄── rvim-buffer ◄── rvim-undo
+     ▲              ▲
+     └── rvim-diff ─┘（纯函数，无依赖，仅用 std）
      ▲              ▲
      ├──────────────┴── rvim-editor ◄── rvim-ex ◄── rvim-normal
      │                     ▲  ▲  ▲         ▲
@@ -171,9 +175,9 @@ pub struct Buffer {
 ```rust
 pub struct Editor {
     pub buffers: Slab<Buffer>,        // 句柄化缓冲池（buflisted/bufhidden 语义）
-    pub windows: Vec<Window>,         // 窗口（split/tab 后置；M1 单窗口）
-    pub current_buf: BufferId,
-    pub current_win: WindowId,
+    pub windows: Windows,             // 窗口/标签页/frame 树（M5）
+    pub current_buf: BufferId,        // 由 current_win.bufnr 派生
+    pub current_win: WindowId,        // 见 window.rs（>= 1000）
     pub mode: Mode,                   // Normal/Insert/Visual/Cmdline/Select/OperatorPending/...
     pub options: GlobalOptions,       // 全局选项，对齐 429 项 optiondefs 表
     pub registers: RegisterStore,     // "0-"9, a-z, "", -, ., :, %, #, =, /, _
@@ -295,6 +299,25 @@ M2 已落地**完整 589 条声明表**：`crates/rvim-ex/src/cmd_table.rs` 由 
 - 输出：ANSI writer（备用屏 `?1049h/l`、光标定位、SGR、256/真彩）；`Grid` 行级差量刷新（`diff_ansi`），resize 时清屏并按新几何全量重绘。
 - 屏幕单元：缓冲区文本先展开成显示单元——<Tab> 按 `'tabstop'` 补齐、控制字符显示为 `^X`（`transchar`）——再按 `left`/`top` 取视口，因此终端收到的永远是可打印字符；光标列同样按显示单元计算，行号栏宽度从可用列数里扣除。
 - 消息行与搜索：`:echo` 的瞬时消息（`MessageLog::last_status`）与历史错误同屏显示，放不下时 `-- More --` 分页、任一键翻页；`/` `?` `n` `N` 由 `Tui` 自己实现（字面量子串 + `ignorecase` + 环绕，正则留 M6）。
+
+### 5.8 窗口、标签页与折叠（rvim-editor::window / fold，M5）
+
+窗口模型对齐 `window.c` 的 frame 树，全部是纯逻辑（不碰终端）：
+
+\\\text
+TabPage { id, layout: Layout, current, prev }
+Layout  = Leaf(WindowId) | Row([Layout])   // :vsplit 并排，中间一列分隔符
+                        | Col([Layout])   // :split 上下堆叠，每窗自带状态行
+Window  { id (>=1000), tabpage, bufnr, cursor, top_line, left, curswant,
+          local: HashMap<name, OptValue>, height, width, rect, quickfix }
+\\\
+
+- **布局**：`Windows::layout(rows, cols)` 按每个窗口的 `height/width` 期望值递归分配矩形；富余空间给最后一个子框（`win_equal()` 行为），不足时按比例压缩且不低于 `MIN_WIDTH/MIN_HEIGHT`。并排窗口之间留一列 `|`（VertSplit），堆叠窗口之间靠各自的状态行分隔，因此 `rect.rows` 含状态行。
+- **窗口局部选项**：`Options::WINDOW_LOCAL` 声明 `number/relativenumber/list/wrap/scrolloff/foldmethod/foldlevel/foldcolumn/foldenable/diff/signcolumn/...`；`:set` 同时写全局与当前窗口，`:setlocal` 只写窗口，`&opt` 读窗口值（option.c 的 P_GLOBAL/P_LOCAL 语义）。
+- **移动**：`<C-w>h/j/k/l` 按矩形几何找邻居（要求垂直/水平方向重叠、按距离取最近），没有邻居报 E11；`<C-w>w/W/t/b/p` 走窗口列表；`<C-w>x/r/H/J/K/L` 交换/轮转窗口内容。
+- **折叠**：每个窗口一份折叠列表 `{start, end, level, closed}`，`'foldmethod'` 支持 manual（`zf`）、indent（缩进/ `'shiftwidth'`，`'shiftwidth'=0` 时用 `'tabstop'`）、marker（`{{{ }}}`，含 `{{{1` 层级）、diff（diff 模式自动）；`syntax/expr` 明确报告不支持。折叠行由 TUI 渲染为 `+-- N lines: text`，`'foldcolumn'` 显示层级。
+- **diff**：`rvim-diff` 给出最短编辑脚本的变更块，编辑器据此计算每侧的 filler 行与变更行标记，`'foldmethod=diff'` 把连续变更行折起来；`]c`/`[c` 跳转变更，`:diffget`/`:diffput` 拷贝单个变更块。`vimdiff` 由 `rvim -d a b` 启动（每个文件一窗，全部 `:diffthis`）。
+- **quickfix/location list**：全局栈最多 10 份列表，`:cexpr`/`:cgetexpr`/`:cfile` 用 `rvim-ex::errorformat` 把文本解析成条目；`:copen` 把列表画成一个 `buftype=quickfix` 的窗口。
 
 ### 5.7 线程模型
 - **单主线程 + 事件循环**：所有缓冲/模式状态只在主线程可变，避免重入锁——这与 Vim 单线程模型一致，保证 VimL 语义（`textlock`、定时器回调）简单正确。

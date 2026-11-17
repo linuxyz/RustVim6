@@ -304,7 +304,14 @@ impl Buffer {
         let byte = snap_byte(&line, pos.col);
         let merged = format!("{}{}{}", &line[..byte], text, &line[byte..]);
         let pieces = split_lines(&merged);
-        let after: Vec<String> = pieces.iter().map(|(t, _)| t.clone()).collect();
+        let mut after: Vec<String> = pieces.iter().map(|(t, _)| t.clone()).collect();
+        // split_lines() follows the *file* convention, where a trailing newline
+        // does not start another line. Inserting text is different: typing
+        // <CR> at the end of a line must leave an empty line after the split
+        // (edit.c ins_eol), so the trailing empty piece is added back here.
+        if merged.ends_with('\n') {
+            after.push(String::new());
+        }
         self.replace_line_range(pos.line, pos.line + 1, after)
     }
 

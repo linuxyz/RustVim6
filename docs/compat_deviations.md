@@ -277,3 +277,49 @@
 | 行号栏与横向滚动 | 横滚宽度按整屏列数算，`'number'` 打开后光标会被行号栏盖住 | `gutter_width()` 统一计算行号栏宽度，`grid()` 用 `cols - gutter` 作为文本列数 |
 | 翻页键 | `<C-f>`/`<C-b>` 未绑定；`<PageDown>` 直接跳末行、`<PageUp>` 只挪 `top` 不动光标 | 翻一屏并保持光标屏幕行；`<C-f>`/`<C-b>`/`<PageDown>`/`<PageUp>` 同一实现 |
 | 插入模式 `<Esc>` 误移光标 | `<Esc>` 取消挂起操作符时也走 `finish_insert_mode()`，光标左移一格并触发 `end_undo_block()` | 只有插入类模式才收尾插入会话；操作符挂起时只清状态 |
+
+## 9. M5 复核轮（review round 4）已修复
+
+> 复核方式：对照 `reference/vim/src` 的 `window.c`（frame 树、`win_split`、`win_equal`、`win_vert_neighbor`）、
+> `fold.c`（`foldUpdate`/`foldOpen`/`foldClose`/`foldtext`）、`diff.c`/`xdiff`、
+> `quickfix.c`（`efm_to_regpat`/`qf_parse_line`）、`textobject.c`、`normal.c`（`nv_dot`/`nv_visual`）
+> 逐条重写并用 `--keys` 逐帧验证。回归用例：`crates/rvim-app/tests/m5_windows.rs`（21）、
+> `m5_folds.rs`（9）、`m5_diff.rs`（6）、`m5_quickfix.rs`（7）、`m5_signs.rs`（6），
+> 加上 crate 内单测（rvim-diff 18、fold 18、foldcmd 10、handlers_fold 9、errorformat 31、
+> quickfix 17、handlers_qf 28、diff 16、handlers_diff 12、textobjects 21、viminfo 17、
+> window 12、handlers_win 6、host_win 30）。
+
+| 主题 | 问题 | 修正 |
+|---|---|---|
+| 插入模式 `<CR>` 丢换行 | ① `Buffer::insert_text` 复用 `split_lines` 的**文件**约定（尾部换行不产生新行），所以行尾 `<CR>` 不分行、光标被钳回行首；② TUI 自己用 `replace_lines` 处理 `<CR>`，没有记入插入会话，导致 `3i%<CR><Esc>` 与 `.` 重复时换行被吞掉（只剩 `%`） | `insert_text` 在合并文本以换行结尾时补回空行（`edit.c ins_eol` 语义），`<CR>` 统一走 `insert::type_char('\n')` 记入插入会话；新增 `1000i%<CR><Esc>`、`3i%<CR>`、`. ` 重复换行与 `insert_text` 行尾换行的回归用例 |
+| 单窗口假设 | M1–M4 的 `Editor` 只有一个 `Window`，`winnr()`/`winheight()`/`getwininfo()` 等内置函数硬编码 1 和 -1 | 新增 `rvim-editor::window`（`TabPage`/`Layout` frame 树/`Window`/`Windows`），`Editor.windows` 取代单窗口字段；`host_win.rs` 全部窗口/标签内置函数改查真实模型 |
+| 窗口局部选项 | 选项表只有全局模型，`:setlocal` 等同 `:set` | 新增 `WINDOW_LOCAL` 表与 `Window.local`：`:set` 写全局+当前窗口、`:setlocal` 只写窗口、`:setglobal` 只写全局，`&opt` 读生效值；`w:` 变量按窗口 id 分隔 |
+| `<C-w>` 邻居判定 | 初版把“垂直重叠”用在左右方向，相切的两窗互不可达 | 按 `window.c` 重写：左右移动要求行重叠、上下移动要求列重叠，允许相切 |
+| `:vertical` 修饰符 | 只置标志，不执行后续命令（`:vertical split` 什么都不做） | 修饰符解析参数并把后续命令交给同一执行器，之后清除标志 |
+| 文本对象范围 | 对象返回“最后一个字节”的包含式终点，操作符要半开区间，导致少删/多删一个字符 | 把含端点转成开区间，行级对象走 `line_range` |
+| 视觉模式文本对象 | `viw` 选中后被清空选区，`d` 变成普通 `d` | 视觉模式的对象只扩展选区，不结束选择 |
+| `.` 重复 | 只注册了句点寄存器，`.` 无操作 | 新增 `RepeatChange`（插入会话/操作符+动作/`x D C`/`p P`），`.` 按 vim 语义重放 |
+| 可视区标记 | `MarkStore::resolve` 只认 a-z/A-Z，`:'<,'>d` 报 E20 | `resolve` 支持可视区起点/终点/上次修改等缓冲区局部特殊标记 |
+| diff 模式 | 缺失 | `rvim-diff`（Myers + 变更块滑动归并）、`Editor::diff_*`（filler/变更行/`]c`/`[c`/`:diffget`/`:diffput`）、`rvim -d` 即 vimdiff |
+| quickfix | 缺失（`setqflist()` 返回空、`:copen` 未实现） | `rvim-ex::errorformat` + `rvim-editor::quickfix`（10 层栈、qflist/loclist、qf 窗口）+ `c*`/`l*` 全族命令与 4 个内置函数 |
+| 折叠 | M2 占位（`MoreState.folds` 从未填充，`foldclosed()` 永远 -1） | 新增 `rvim-editor::fold`（每窗口一份折叠表、manual/indent/marker/diff）、`rvim-normal::foldcmd`（z 系列）、`:fold*` 命令；TUI 渲染折叠摘要与 `'foldcolumn'` |
+| 跳转/change list | `jumplist` 只有空结构，`:jumps` 未实现 | `Editor` 新增真实 jump/change list，`<C-o>`/`<C-i>`、`:jumps`、`:changes` 可用；viminfo 读写（`:wviminfo`/`:rviminfo`/`-i`/`'viminfo'`） |
+| sign/textprop/popup | 数据面完整但不可见 | TUI 新增 sign 列（`'signcolumn'=auto` 时按需占位）与 popup 覆盖层；`prop_*` 仍只做数据面 |
+
+### 9.1 本轮登记但未实现的偏差（显式记录，不静默）
+
+| 主题 | Vim | RustVim | 收口 |
+|---|---|---|---|
+| `'foldtext'` 自定义表达式 | 支持表达式/函数 | 只实现默认 `foldtext()` 文本 | M6 随表达式求值接线 |
+| `foldmethod=expr`/`syntax` | 求值/语法驱动 | 保留手动折叠并显式报告不支持 | M6 |
+| `:diffpatch` | 从 patch 生成对照缓冲 | 未实现 | 收口时评估 |
+| `'diffopt'` | icase/iwhite/context 等 | 固定行为（filler + 6 行上下文），不接受选项 | 收口时补 |
+| quickfix 多窗口 | 每标签页可各开一个 qf 窗口 | 只建模一个 qf 窗口，`:lopen` 复用 | 收口时补 |
+| `'buftype'` | qf 窗口 `buftype=quickfix` | 选项表无该项，用 `Window.quickfix` 标记 | 随选项表扩充 |
+| textprop 高亮 | `prop_add` 影响显示 | 只存数据，渲染忽略 | M6 随 syntax 一起接 |
+| popup filter/回调 | `filter`/`callback` 可选 | 仅数据面 + 静态覆盖层 | M7 |
+| viminfo 字段 | 全字段（含 jumplist/搜索模式） | marks/registers/history/cwd/global 子集，UTF-8 文本 | 收口时补 |
+| `w:`/`t:` 变量 | 写穿透真实窗口/标签 | 按窗口/标签字典存放，外部切换在下一次内置函数调用时同步 | M6 |
+| `<C-w>r`/`x`/`H J K L` | 调整 frame 树位置 | 交换/轮转窗口“内容”（几何不变），两窗口情形等价 | 收口时按 frame 重写 |
+| 每缓冲窗口位置 | 每个窗口记住每个缓冲的光标/视口 | 换缓冲时视口跟随该缓冲最后光标 | 收口时补 `b_wininfo` |
+

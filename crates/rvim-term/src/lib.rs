@@ -11,6 +11,7 @@
 
 pub mod grid;
 pub mod key;
+pub mod pane;
 pub mod render;
 pub mod style;
 

@@ -395,7 +395,181 @@ fn defs() -> Vec<OptDef> {
             kind: OptKind::Bool,
             default: OptValue::Bool(true),
         },
+        // ---- M5 window-local options (optiondefs.h P_WIN) -------------------
+        OptDef {
+            name: "foldmethod",
+            short: "fdm",
+            kind: OptKind::Str,
+            default: OptValue::Str("manual".into()),
+        },
+        OptDef {
+            name: "foldlevel",
+            short: "fdl",
+            kind: OptKind::Num,
+            default: OptValue::Num(0),
+        },
+        OptDef {
+            name: "foldcolumn",
+            short: "fdc",
+            kind: OptKind::Str,
+            default: OptValue::Str("0".into()),
+        },
+        OptDef {
+            name: "foldminlines",
+            short: "fml",
+            kind: OptKind::Num,
+            default: OptValue::Num(1),
+        },
+        OptDef {
+            name: "foldtext",
+            short: "fdt",
+            kind: OptKind::Str,
+            default: OptValue::Str("foldtext()".into()),
+        },
+        OptDef {
+            name: "diff",
+            short: "diff",
+            kind: OptKind::Bool,
+            default: OptValue::Bool(false),
+        },
+        OptDef {
+            name: "cursorline",
+            short: "cul",
+            kind: OptKind::Bool,
+            default: OptValue::Bool(false),
+        },
+        OptDef {
+            name: "cursorcolumn",
+            short: "cuc",
+            kind: OptKind::Bool,
+            default: OptValue::Bool(false),
+        },
+        OptDef {
+            name: "sidescrolloff",
+            short: "siso",
+            kind: OptKind::Num,
+            default: OptValue::Num(0),
+        },
+        OptDef {
+            name: "signcolumn",
+            short: "scl",
+            kind: OptKind::Str,
+            default: OptValue::Str("auto".into()),
+        },
+        OptDef {
+            name: "colorcolumn",
+            short: "cc",
+            kind: OptKind::Str,
+            default: OptValue::Str("".into()),
+        },
+        OptDef {
+            name: "spell",
+            short: "spell",
+            kind: OptKind::Bool,
+            default: OptValue::Bool(false),
+        },
+        OptDef {
+            name: "previewwindow",
+            short: "pvw",
+            kind: OptKind::Bool,
+            default: OptValue::Bool(false),
+        },
+        OptDef {
+            name: "linebreak",
+            short: "lbr",
+            kind: OptKind::Bool,
+            default: OptValue::Bool(false),
+        },
+        OptDef {
+            name: "breakindent",
+            short: "bri",
+            kind: OptKind::Bool,
+            default: OptValue::Bool(false),
+        },
+        OptDef {
+            name: "numberwidth",
+            short: "nuw",
+            kind: OptKind::Num,
+            default: OptValue::Num(4),
+        },
+        OptDef {
+            name: "winfixheight",
+            short: "wfh",
+            kind: OptKind::Bool,
+            default: OptValue::Bool(false),
+        },
+        OptDef {
+            name: "winfixwidth",
+            short: "wfw",
+            kind: OptKind::Bool,
+            default: OptValue::Bool(false),
+        },
+        OptDef {
+            name: "winminheight",
+            short: "wmh",
+            kind: OptKind::Num,
+            default: OptValue::Num(1),
+        },
+        OptDef {
+            name: "winminwidth",
+            short: "wmw",
+            kind: OptKind::Num,
+            default: OptValue::Num(1),
+        },
+        OptDef {
+            name: "scrollbind",
+            short: "scb",
+            kind: OptKind::Bool,
+            default: OptValue::Bool(false),
+        },
+        OptDef {
+            name: "cursorbind",
+            short: "crb",
+            kind: OptKind::Bool,
+            default: OptValue::Bool(false),
+        },
     ]
+}
+
+/// Options with window scope (`optiondefs.h` P_WIN): `:setlocal` stores them on
+/// the current window, and every window keeps its own value (M5).
+pub const WINDOW_LOCAL: &[&str] = &[
+    "breakindent",
+    "colorcolumn",
+    "cursorbind",
+    "cursorcolumn",
+    "cursorline",
+    "diff",
+    "foldcolumn",
+    "foldenable",
+    "foldlevel",
+    "foldmethod",
+    "foldminlines",
+    "foldtext",
+    "linebreak",
+    "list",
+    "number",
+    "numberwidth",
+    "previewwindow",
+    "relativenumber",
+    "scrollbind",
+    "scrolloff",
+    "sidescrolloff",
+    "signcolumn",
+    "spell",
+    "winfixheight",
+    "winfixwidth",
+    "winminheight",
+    "winminwidth",
+    "wrap",
+];
+
+/// True when `name` (canonical or short) names a window-local option.
+pub fn is_window_local(name: &str) -> bool {
+    match Options::canonical(name) {
+        Ok(canon) => WINDOW_LOCAL.contains(&canon.as_str()),
+        Err(_) => false,
+    }
 }
 
 /// Enforce Vim's per-option value constraints, keeping the old value on error.
@@ -415,6 +589,35 @@ fn validate(canon: &str, value: OptValue) -> VimResult<OptValue> {
             rvim_buffer::FileFormat::parse(s)
                 .map_err(|_| VimError::invalid_option_argument(&format!("fileformat={s}")))?;
             Ok(value)
+        }
+        // option.c: 'foldmethod' only accepts the documented methods.
+        ("foldmethod", OptValue::Str(s)) => match s.as_str() {
+            "manual" | "indent" | "marker" | "syntax" | "expr" | "diff" => Ok(value),
+            other => Err(VimError::new("E474", format!("Invalid argument: {other}"))),
+        },
+        // 'foldcolumn' is a number 0-12 or "auto" (optionstr.c).
+        ("foldcolumn", OptValue::Str(s)) => {
+            let ok = s == "auto"
+                || s.parse::<i64>()
+                    .map(|n| (0..=12).contains(&n))
+                    .unwrap_or(false);
+            if ok {
+                Ok(value)
+            } else {
+                Err(VimError::new("E474", format!("Invalid argument: {s}")))
+            }
+        }
+        // 'signcolumn' accepts auto/yes/no/number/auto:N (optionstr.c).
+        ("signcolumn", OptValue::Str(s)) => {
+            let ok = matches!(s.as_str(), "auto" | "yes" | "no" | "number")
+                || s.strip_prefix("auto:")
+                    .and_then(|n| n.parse::<i64>().ok())
+                    .is_some_and(|n| (1..=9).contains(&n));
+            if ok {
+                Ok(value)
+            } else {
+                Err(VimError::new("E474", format!("Invalid argument: {s}")))
+            }
         }
         _ => Ok(value),
     }
@@ -507,6 +710,10 @@ impl Options {
             (OptKind::Bool, v @ OptValue::Bool(_)) => v,
             (OptKind::Num, OptValue::Num(n)) => OptValue::Num(n),
             (OptKind::Str, OptValue::Str(s)) => OptValue::Str(s),
+            // `:set fdc=1` parses the value as a number; string options take it
+            // as text (option.c checks the type but accepts either spelling for
+            // numeric-looking strings).
+            (OptKind::Str, OptValue::Num(n)) => OptValue::Str(n.to_string()),
             (OptKind::Num, OptValue::Str(s)) => OptValue::Num(
                 s.trim()
                     .parse()
@@ -567,6 +774,18 @@ impl Options {
             OptValue::Num(n) => format!("{canon}={n}"),
             OptValue::Str(s) => format!("{canon}={s:?}"),
         })
+    }
+
+    /// Validate and coerce a value for `name` without storing it.
+    ///
+    /// Window-local options live on [`crate::window::Window`] and are validated
+    /// through the same path as global ones, so `:setlocal fdm=indent` reports
+    /// E474 for a bad method exactly like `:set` does.
+    pub fn validate_value(name: &str, value: OptValue) -> VimResult<OptValue> {
+        let mut scratch = Options::new();
+        let canon = Options::canonical(name)?;
+        scratch.set(&canon, value)?;
+        Ok(scratch.get(&canon)?.clone())
     }
 
     /// Number of options in the M1 table (coverage reporting hook).

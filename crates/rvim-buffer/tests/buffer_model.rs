@@ -166,3 +166,15 @@ fn readonly_requires_bang() {
     assert!(buf.save(&path, true).is_ok());
     let _ = std::fs::remove_file(&path);
 }
+#[test]
+fn insert_text_newline_at_end_of_line_creates_an_empty_line() {
+    let mut buf = Buffer::from_text(1, "ab!");
+    buf.insert_text(Pos::new(0, 3), "\n").unwrap();
+    assert_eq!(buf.line_count(), 2, "typing <CR> at EOL splits the line");
+    assert_eq!(buf.line_str(0).unwrap(), "ab!");
+    assert_eq!(buf.line_str(1).unwrap(), "");
+    buf.insert_text(Pos::new(0, 1), "\n").unwrap();
+    assert_eq!(buf.line_count(), 3, "<CR> in the middle splits too");
+    assert_eq!(buf.line_str(0).unwrap(), "a");
+    assert_eq!(buf.line_str(1).unwrap(), "b!");
+}

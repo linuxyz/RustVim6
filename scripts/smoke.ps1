@@ -166,3 +166,43 @@ Write-Host '--- 23. TUI: mapping, dd and message line ---'
 Write-Host ('tui keys exit=' + $LASTEXITCODE)
 & $exe --keys ':boguscmd<CR>' --cols 40 --rows 5 $f9
 Write-Host ('tui error exit=' + $LASTEXITCODE + ' (expect 1)')
+
+# --- M5: windows, tabs, folds, diff and quickfix --------------------------
+
+Write-Host '--- 24. M5: :split / :vsplit / <C-w> move ---'
+$f10 = Join-Path $work 'm5.txt'
+Write-NoBom $f10 "alpha`nbeta`ngamma`ndelta"
+& $exe --keys ':split<CR>:vsplit<CR><C-w>w<C-w>w<C-w>c<C-w>c' --cols 40 --rows 10 $f10
+Write-Host ('m5 windows exit=' + $LASTEXITCODE)
+
+Write-Host '--- 25. M5: tabpages and tabline ---'
+& $exe --keys ':tabnew<CR>:tabnext 1<CR>:tabprevious<CR>' --cols 60 --rows 8 $f10
+Write-Host ('m5 tabs exit=' + $LASTEXITCODE)
+
+Write-Host '--- 26. M5: folds (zf, zo, zR, zM) ---'
+& $exe --keys 'Vjzfzo:set foldcolumn=1<CR>zM' --cols 40 --rows 10 $f10
+Write-Host ('m5 folds exit=' + $LASTEXITCODE)
+
+Write-Host '--- 27. M5: visual mode and text objects ---'
+& $exe --keys 'viwd' --cols 30 --rows 6 $f10
+Write-Host ('m5 visual exit=' + $LASTEXITCODE)
+
+Write-Host '--- 28. M5: dot repeat ---'
+& $exe --keys 'ihello<Esc>.x' --cols 30 --rows 6 $f10
+Write-Host ('m5 repeat exit=' + $LASTEXITCODE)
+
+Write-Host '--- 29. M5: vimdiff (-d) with a changed line ---'
+$f11 = Join-Path $work 'm5b.txt'
+Write-NoBom $f11 "alpha`nBETA`ngamma`ndelta"
+& $exe -d --keys ']c[c' --cols 70 --rows 10 $f10 $f11
+Write-Host ('m5 vimdiff exit=' + $LASTEXITCODE)
+
+Write-Host '--- 30. M5: quickfix (:cexpr, :copen, :cnext) ---'
+& $exe --keys (":cexpr ['" + ($f10 -replace '\\','/') + ":2:1: m5 error']<CR>:copen<CR>:cnext<CR>:cclose<CR>") --cols 70 --rows 12 $f10
+Write-Host ('m5 quickfix exit=' + $LASTEXITCODE)
+
+Write-Host '--- 31. M5: jumps/changes and viminfo round trip ---'
+$vifile = Join-Path $work 'viminfo.txt'
+& $exe -es -c 'call setline(1, "x")' -c ('wviminfo ' + $vifile) -c 'q!' $f10
+& $exe -es -c 'jumps' -c 'changes' -c 'q' $f10
+Write-Host ('m5 session exit=' + $LASTEXITCODE)

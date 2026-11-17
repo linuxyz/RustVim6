@@ -4,12 +4,15 @@
 //! prefix, motions, operators and insert-mode entry. The TUI (M4) will feed raw
 //! key codes into the same engine; everything here is UI-free and deterministic.
 
+pub mod foldcmd;
 pub mod insert;
 pub mod motions;
 pub mod operators;
+pub mod textobjects;
+pub mod visual;
 
 use rvim_core::{Pos, VimError, VimResult};
-use rvim_editor::{Editor, Mode, RegType};
+use rvim_editor::{Editor, Mode, RegType, RepeatChange};
 
 /// Sentinel stored while waiting for the mark name after the "m" key.
 const MARK_PENDING: char = '\u{0000}';
@@ -131,7 +134,12 @@ impl NormalEngine {
                 let pos = motions::word_motion(ed, key, count)?;
                 ed.set_cursor(pos);
             }
-            'x' => operators::delete_char(ed, count, reg)?,
+            'x' => {
+                operators::delete_char(ed, count, reg)?;
+                ed.last_change = Some(RepeatChange::Simple { key: 'x', count });
+            }
+            // "." repeats the last change (normal.c nv_dot).
+            '.' => self.repeat_last_change(ed, count)?,
             'd' | 'y' | 'c' => return self.operator_prefix(ed, key, count, reg),
             // D/C/Y are the one-key forms of d$/c$/yy (normal.c nv_D/nv_C/nv_Y).
             'D' | 'C' => {
@@ -146,6 +154,7 @@ impl NormalEngine {
                 };
                 let op = if key == 'D' { 'd' } else { 'c' };
                 self.apply_operator(ed, op, range, reg)?;
+                ed.last_change = Some(RepeatChange::Simple { key, count });
                 return Ok(true);
             }
             'Y' => {
@@ -155,7 +164,10 @@ impl NormalEngine {
                 ed.mode = Mode::Normal;
                 return Ok(true);
             }
-            'p' | 'P' => operators::paste(ed, key, reg)?,
+            'p' | 'P' => {
+                operators::paste(ed, key, reg)?;
+                ed.last_change = Some(RepeatChange::Paste { key, reg });
+            }
             'u' => ed.undo()?,
             'm' => {
                 ed.mode = Mode::RegisterPending;
@@ -256,6 +268,11 @@ impl NormalEngine {
             }
         };
         self.apply_operator(ed, op, range, reg)?;
+        ed.last_change = Some(RepeatChange::Operator {
+            op,
+            motion: if motion == op { op } else { motion },
+            count,
+        });
         Ok(true)
     }
 
@@ -268,8 +285,14 @@ impl NormalEngine {
             Mode::MotionPending { count, reg, .. } => (count.max(1), reg),
             _ => (1, self.take_register()),
         };
-        let range = operators::gg_range(ed, op_count.saturating_mul(count.max(1)))?;
+        let total = op_count.saturating_mul(count.max(1));
+        let range = operators::gg_range(ed, total)?;
         self.apply_operator(ed, op, range, reg)?;
+        ed.last_change = Some(RepeatChange::Operator {
+            op,
+            motion: 'g',
+            count: total,
+        });
         Ok(true)
     }
 
@@ -366,8 +389,80 @@ impl NormalEngine {
         if repeat > 1 && !text.is_empty() {
             let _ = Self::repeat_insert_text(ed, &text, repeat - 1, entry);
         }
+        if !text.is_empty() {
+            ed.last_change = Some(RepeatChange::Insert {
+                entry,
+                text: text.clone(),
+            });
+        }
         ed.end_undo_block();
         ed.mode = Mode::Normal;
+    }
+
+    /// Replay the last change `count` times (".").
+    ///
+    /// Vim stores the command, not the resulting text, so the repeat runs the
+    /// same operator at the new cursor position (normal.c nv_dot).
+    pub fn repeat_last_change(&mut self, ed: &mut Editor, count: u64) -> VimResult<()> {
+        let Some(change) = ed.last_change.clone() else {
+            // Nothing to repeat is not an error in vim; the key is just ignored.
+            return Ok(());
+        };
+        for _ in 0..count.max(1) {
+            match change.clone() {
+                RepeatChange::Insert { entry, text } => {
+                    ed.begin_undo_block();
+                    insert::enter_insert(ed, entry)?;
+                    for ch in text.chars() {
+                        insert::type_char(ed, self, ch)?;
+                    }
+                    self.finish_insert(ed);
+                    ed.last_change = Some(RepeatChange::Insert { entry, text });
+                }
+                RepeatChange::Operator { op, motion, count } => {
+                    if motion == 'g' {
+                        ed.mode = Mode::MotionPending {
+                            op,
+                            count,
+                            reg: None,
+                        };
+                        self.feed_operator_gg(ed, op, 1)?;
+                    } else {
+                        ed.mode = Mode::MotionPending {
+                            op,
+                            count,
+                            reg: None,
+                        };
+                        self.feed_operator_key(ed, op, motion)?;
+                    }
+                }
+                RepeatChange::Simple { key, count } => match key {
+                    'x' => {
+                        operators::delete_char(ed, count, None)?;
+                        ed.last_change = Some(RepeatChange::Simple { key, count });
+                    }
+                    'D' | 'C' => {
+                        let start = ed.cursor();
+                        let last = (start.line + count as usize - 1).min(ed.line_count() - 1);
+                        let end = ed.current_buffer().line_str(last)?.len();
+                        let range = operators::OpRange {
+                            start,
+                            end: Pos::new(last, end),
+                            linewise: false,
+                        };
+                        let op = if key == 'D' { 'd' } else { 'c' };
+                        self.apply_operator(ed, op, range, None)?;
+                        ed.last_change = Some(RepeatChange::Simple { key, count });
+                    }
+                    _ => {}
+                },
+                RepeatChange::Paste { key, reg } => {
+                    operators::paste(ed, key, reg)?;
+                    ed.last_change = Some(RepeatChange::Paste { key, reg });
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn jump_mark(&mut self, ed: &mut Editor, name: char) -> VimResult<bool> {

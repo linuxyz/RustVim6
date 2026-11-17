@@ -58,6 +58,18 @@ pub struct Theme {
     pub wildmenu: Style,
     pub wildmenu_selected: Style,
     pub eob: Style,
+    /// Inactive window status line (M5: highlight group StatusLineNC).
+    pub status_nc: Style,
+    /// Window separator column (VertSplit).
+    pub separator: Style,
+    /// Text of a closed fold.
+    pub fold: Style,
+    /// Diff filler line.
+    pub filler: Style,
+    /// Visual selection (Visual).
+    pub selection: Style,
+    /// Popup window background (Pmenu).
+    pub popup: Style,
 }
 
 impl Default for Theme {
@@ -75,6 +87,28 @@ impl Default for Theme {
             },
             eob: Style {
                 fg: Color::Ansi(4),
+                ..Style::NORMAL
+            },
+            status_nc: Style {
+                fg: Color::Ansi(0),
+                bg: Color::Ansi(7),
+                ..Style::NORMAL
+            },
+            separator: Style {
+                fg: Color::Ansi(4),
+                ..Style::NORMAL
+            },
+            fold: Style {
+                fg: Color::Ansi(6),
+                ..Style::NORMAL
+            },
+            filler: Style {
+                fg: Color::Ansi(4),
+                ..Style::NORMAL
+            },
+            selection: Style::REVERSE,
+            popup: Style {
+                bg: Color::Ansi(7),
                 ..Style::NORMAL
             },
         }

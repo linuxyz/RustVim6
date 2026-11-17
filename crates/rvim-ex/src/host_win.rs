@@ -1,28 +1,77 @@
-//! Host builtins for the single-window/tab model, tags, mappings, screen
-//! geometry, undo/state introspection and the remaining window/tab/misc
-//! builtins of the M3 batch.
+//! Host builtins for windows and tab pages, tags, mappings, screen geometry,
+//! undo/state introspection and the remaining window/tab/misc builtins of the
+//! M3 batch.
 //!
 //! # Model and honest limitations
 //!
-//! RustVim (M1-M3) has exactly one window and one tab page, no TUI and no
-//! display layer.  These builtins describe that model honestly instead of
-//! pretending a multi-window editor exists:
+//! RustVim has a real multi-window/multi-tabpage model: `Editor::windows` owns
+//! the split layout tree, window IDs start at 1000 (vim's numbering), and every
+//! window carries its own buffer, cursor, viewport, screen rectangle and
+//! window-local options.  This module maps vim's window/tab builtins onto that
+//! model:
 //!
-//! * window numbers **and** window IDs are both `1`; `0` means "current
-//!   window" wherever Vim accepts a window number.
-//! * `getwininfo()` / `gettabinfo()` describe that single window/tab, and
-//!   `winlayout()` is the leaf layout `["leaf", 1]`.
-//! * screen/terminal geometry is unknown: `winheight()`, `winwidth()`,
-//!   `wincol()` and `winline()` return `-1` and the geometry entries of
-//!   `getwininfo()` (`height`, `width`, `textoff`) are `-1`; the logical
-//!   viewport always starts at line 1 because no scroll layer exists yet.
-//!   `win_screenpos()` returns `[1, 1]` (the only window is anchored at the
-//!   logical top-left corner) and `getwinpos()`/`getwinposx()`/`getwinposy()`
-//!   use Vim's own no-display fallback of `-1`.
-//! * `winrestcmd()` returns an empty string (there is no layout to restore),
-//!   `win_move_separator()`/`win_move_statusline()` return `0` (there is no
-//!   separator/status line to drag) and `win_splitmove()` always fails with
-//!   `E957` because its two window arguments can only name the one window.
+//! * `0` means "current window" wherever vim accepts a window number and a
+//!   value of 1000 or more is a window ID, exactly like
+//!   `find_win_by_nr_or_id()`.  Window numbers are 1-based and per tab page;
+//!   tab page numbers are 1-based (and `0` means "current tab page").
+//! * `winheight()`, `winwidth()`, `win_screenpos()` and `getwininfo()` report
+//!   the rectangles of the last `Editor::layout_windows()` pass.  Before that
+//!   pass (headless `-es` batch mode) no screen geometry exists: the size
+//!   entries are `-1`, while `win_screenpos()` reports `[rect.row + 1,
+//!   rect.col + 1]` of the default (all zero) rectangle, i.e. `[1, 1]`.
+//! * `wincol()`/`winline()` are 1-based positions inside the window, computed
+//!   from the window's own cursor, `top_line` and `left`: tabs expand to
+//!   'tabstop' and control characters take two cells (std has no `wcwidth`, so
+//!   double-width characters count as one).  'wrap' is not modelled, so
+//!   `winline()` counts buffer lines rather than wrapped screen rows.
+//! * `getwininfo()` reports `height` as the buffer area (`w_height`, the
+//!   frame's rows without its status line) and `winrow`/`wincol` as the 1-based
+//!   top-left corner; `textoff` only counts the 'number'/'relativenumber'
+//!   gutter (the digits of the buffer's line count plus one, the same width
+//!   `rvim-term` draws).  The sign and fold columns are not modelled, so
+//!   'signcolumn' adds nothing.  `loclist`, `winbar` and `terminal` are always
+//!   `0`: there are no location lists, toolbars or terminal windows yet.
+//!   `quickfix` is `1` for the quickfix window.
+//! * `winlayout()` returns the real nested layout and `winrestcmd()` restores
+//!   the requested `height`/`width` of every window of the current tab page.
+//!   `win_move_separator()`/`win_move_statusline()` resize a window that really
+//!   has a neighbour in that direction: `0` on success and `-1` when there is
+//!   no separator/status line to move (a window on the tab page edge, or a
+//!   window without a layout pass yet).
+//! * `win_splitmove()` exchanges the two windows' contents (buffer, cursor,
+//!   viewport, window-local options and the quickfix flag) instead of moving
+//!   the frame node; `:splitmove`'s `{options}` ("vertical", "rightbelow",
+//!   "bottomright") are accepted and ignored.  Unknown windows still raise
+//!   `E957`.
+//! * `win_execute()` runs the commands in the target window and restores the
+//!   previous one; a failing command aborts the remaining list and is
+//!   reported.  Its return value is the empty string because RustVim has no
+//!   command-output capture (`:redir`) layer, so the output vim returns does
+//!   not exist.
+//! * `w:`/`t:` dictionaries are per window/tab page: rvim-viml keeps one live
+//!   dictionary per scope in `ScriptState`, so this module mirrors the current
+//!   window's/tab page's dictionary there and parks all others in
+//!   [`WinState`]; it swaps them whenever a builtin runs or `win_gotoid()`/
+//!   `win_execute()` switch.  A window or tab page created behind the
+//!   builtins' back (`:split`, `:tabnew`) therefore starts with an empty
+//!   dictionary once the next builtin runs.
+//! * the jump list and the tag stack still live in [`WinState`] as one list
+//!   for the whole editor instead of one per window; `getjumplist()` and
+//!   `gettagstack()` validate their window argument but always report that
+//!   shared list.
+//! * `tabpagenr('#')` uses the tab page that was current on the previous
+//!   builtin call (vim tracks every tab switch); it is only approximate when
+//!   several switches happen between two calls.
+//! * `winnr()` is not implemented in this module: `script.rs`'s
+//!   `HOST_BUILTINS` answers it with a hardcoded `1`, so it keeps claiming a
+//!   single window.  Fixing that needs a one-line change in `script.rs`
+//!   (reported, not done here because only this file may be edited).
+//! * `gettabinfo()` nests the same window dictionaries in its `windows` entry
+//!   (vim 9 behaviour; the pinned reference vim returns bare window IDs there).
+//!   `getwininfo()`'s `height` is the buffer area (`w_height` in vim's
+//!   `get_win_info()`), so it agrees with `winheight()`.
+//! * `getwinpos()`/`getwinposx()`/`getwinposy()` keep vim's no-terminal
+//!   fallback of `-1`: nothing at this layer can query the terminal.
 //! * `interrupt()` returns `0` and does **not** interrupt `:while`/`:for`:
 //!   honouring the flag needs the M4 input layer to poll it inside the loop
 //!   executor in `script.rs`.  It is deliberately not claimed to work.
@@ -35,16 +84,16 @@
 //!   `UndoHistory` sequence numbers but no `entries` list, and `seq_cur` is
 //!   only exact when no redo is available (the public undo API exposes no head
 //!   index).
-//! * the jump list and tag stack live in [`WinState`].  Nothing records jumps
-//!   yet, but `settagstack()`/`gettagstack()` are fully functional.
 //! * `lispindent()` computes leading whitespace columns like `indent()`; the
 //!   real Lisp indenter is not implemented.
 //! * `virtcol()`/`virtcol2col()` use a simple display width: tabs expand with
 //!   'tabstop', control characters occupy two cells and every other character
 //!   one cell (std has no `wcwidth`, so double-width characters are counted as
 //!   one).
-//! * `winsaveview()`/`winrestview()` store character columns (RustVim's cursor
-//!   columns are character based) and there is no scroll offset to save.
+//! * `winsaveview()`/`winrestview()` save and restore the cursor, `curswant`,
+//!   `topline` and `leftcol` of the current window, per window; the columns are
+//!   character based because RustVim's cursor columns are.  `skipcol` is
+//!   reported but has no display effect ('wrap' is not modelled).
 //! * tags: `tagfiles()`/`taglist()` read real `tags` files.  The `'tags'`
 //!   option is not part of the M1 option table, so Vim's default `./tags,tags`
 //!   is used when it is unset (a file reachable through several entries is
@@ -61,17 +110,20 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use rvim_core::{Pos, VimError, VimResult};
-use rvim_editor::{Editor, MapEntry, MapMode, MapOptions, Mode, OptValue};
+use rvim_editor::options::{WINDOW_LOCAL, is_window_local};
+use rvim_editor::window::{FIRST_WIN_ID, MIN_HEIGHT, MIN_WIDTH};
+use rvim_editor::{
+    Editor, Layout, MapEntry, MapMode, MapOptions, Mode, OptValue, Options, SetScope, TabpageId,
+    Window, WindowId,
+};
 use rvim_viml::Env;
 use rvim_viml::value::{Value, VimDict};
 
 use crate::script::ScriptState;
 
-/// The single window number.
-const WINNR: i64 = 1;
-/// The single window ID.  M1 window IDs are small (1) instead of Vim's
-/// >= 1000 range; every accessor accepts `0` for "current window" as well.
-const WINID: i64 = 1;
+/// Lowest number that is a window ID rather than a window number (vim's
+/// `LOWEST_WIN_ID`); mirrors [`rvim_editor::window::FIRST_WIN_ID`].
+const LOWEST_WIN_ID: i64 = FIRST_WIN_ID as i64;
 
 /// A saved window view (`winsaveview()`); cursor columns are character based.
 #[derive(Debug, Clone, Default)]
@@ -79,7 +131,7 @@ pub struct SavedView {
     pub lnum: i64,
     pub col: i64,
     pub curswant: i64,
-    /// Logical first displayed line; the M1 viewport never scrolls.
+    /// 1-based first displayed line (`w_topline`).
     pub topline: i64,
     pub leftcol: i64,
     pub skipcol: i64,
@@ -108,11 +160,27 @@ pub struct TagStackEntry {
     pub user_data: Option<String>,
 }
 
-/// State for the (single) window/tab model: saved views, jump list, tag stack.
+/// Builtin-level window/tab state: saved views, scoped variables, jump list,
+/// tag stack.
 #[derive(Debug, Default)]
 pub struct WinState {
-    /// Cursor/scroll state saved by `winsaveview()`.
-    pub saved_view: Option<SavedView>,
+    /// Cursor/scroll state saved by `winsaveview()`, per window.
+    pub saved_views: HashMap<WindowId, SavedView>,
+    /// `w:` dictionaries of every window that is *not* the current one.  The
+    /// current window's dictionary lives in [`ScriptState::winvars`] and is
+    /// swapped in and out by [`sync_scopes`].
+    pub winvars: HashMap<WindowId, HashMap<String, Value>>,
+    /// `t:` dictionaries of every tab page that is *not* the current one, for
+    /// the same reason ([`ScriptState::tabvars`]).
+    pub tabvars: HashMap<TabpageId, HashMap<String, Value>>,
+    /// Window whose dictionary is mirrored in [`ScriptState::winvars`].
+    pub winvars_owner: Option<WindowId>,
+    /// Tab page whose dictionary is mirrored in [`ScriptState::tabvars`].
+    pub tabvars_owner: Option<TabpageId>,
+    /// Current tab page index seen on the previous builtin call.
+    pub last_tab: Option<usize>,
+    /// Tab page index that was current before that (vim's `tabpagenr('#')`).
+    pub prev_tab: Option<usize>,
     /// Jump list entries (`getjumplist()` returns it together with the index).
     pub jump_list: Vec<JumpEntry>,
     /// Current jump list index (`w:jumplistidx` equivalent, 0-based).
@@ -145,6 +213,7 @@ pub const FUNCS: &[&str] = &[
     "maplist",
     "mapset",
     "settabvar",
+    "settabwinvar",
     "settagstack",
     "setwinvar",
     "state",
@@ -190,6 +259,9 @@ pub fn call(
     if !FUNCS.contains(&name) {
         return None;
     }
+    // `w:`/`t:` are read and written through `ScriptState` by rvim-viml, so keep
+    // its live dictionaries in step with the window/tab page the editor is on.
+    sync_scopes(ed, state);
     Some((|| {
         check_arity(name, args)?;
         dispatch(name, args, ed, env, state)
@@ -236,51 +308,31 @@ fn dispatch(
         "gettabvar" => f_gettabvar(args, ed, state),
         "settabvar" => f_settabvar(args, ed, state),
         "gettabwinvar" => f_gettabwinvar(args, ed, state),
-        "tabpagenr" => f_tabpagenr(args),
-        "tabpagewinnr" => f_tabpagewinnr(args),
+        "settabwinvar" => f_settabwinvar(args, ed, state),
+        "tabpagenr" => f_tabpagenr(args, ed, state),
+        "tabpagewinnr" => f_tabpagewinnr(args, ed),
         "tabpagebuflist" => f_tabpagebuflist(args, ed),
         // -------------------------------------------------- window identity
-        "winbufnr" => Ok(Value::Number(if win_ref_valid(narg(args, 0)) {
-            ed.current_bufnr() as i64
-        } else {
-            -1
-        })),
-        "wincol" | "winline" => Ok(Value::Number(-1)),
-        "winheight" | "winwidth" => Ok(Value::Number(-1)),
+        "winbufnr" => f_winbufnr(args, ed),
+        "wincol" => f_wincol(ed),
+        "winline" => f_winline(ed),
+        "winheight" => f_win_size(args, ed, false),
+        "winwidth" => f_win_size(args, ed, true),
         "win_execute" => f_win_execute(args, ed, env, state),
         "win_findbuf" => f_win_findbuf(args, ed),
-        "win_getid" => f_win_getid(args),
-        "win_gettype" => f_win_gettype(args),
-        "win_gotoid" => Ok(Value::Number(i64::from(narg(args, 0) == WINID))),
-        "win_id2tabwin" => Ok(Value::list(vec![
-            Value::Number(if narg(args, 0) == WINID { 1 } else { 0 }),
-            Value::Number(if narg(args, 0) == WINID { 1 } else { 0 }),
-        ])),
-        "win_id2win" => Ok(Value::Number(if narg(args, 0) == WINID {
-            WINNR
-        } else {
-            0
-        })),
-        "winlayout" => f_winlayout(args),
-        "winrestcmd" => Ok(Value::string("")),
+        "win_getid" => f_win_getid(args, ed),
+        "win_gettype" => f_win_gettype(args, ed),
+        "win_gotoid" => f_win_gotoid(args, ed, state),
+        "win_id2tabwin" => f_win_id2tabwin(args, ed),
+        "win_id2win" => f_win_id2win(args, ed),
+        "winlayout" => f_winlayout(args, ed),
+        "winrestcmd" => f_winrestcmd(ed),
         "winrestview" => f_winrestview(args, ed, state),
         "winsaveview" => f_winsaveview(ed, state),
-        "win_screenpos" => Ok(Value::list(vec![
-            Value::Number(if win_ref_valid(narg(args, 0)) { 1 } else { 0 }),
-            Value::Number(if win_ref_valid(narg(args, 0)) { 1 } else { 0 }),
-        ])),
-        "win_move_separator" | "win_move_statusline" => {
-            // There is no window layout to move: report failure without lying
-            // about a successful resize.
-            Ok(Value::Number(0))
-        }
-        "win_splitmove" => Err(err(
-            "E957",
-            format!(
-                "Invalid window number: RustVim has a single window, so {} cannot be split-moved",
-                WINID
-            ),
-        )),
+        "win_screenpos" => f_win_screenpos(args, ed),
+        "win_move_separator" => f_win_move(args, ed, true),
+        "win_move_statusline" => f_win_move(args, ed, false),
+        "win_splitmove" => f_win_splitmove(args, ed),
         // ------------------------------------------------------------ tags
         "tagfiles" => Ok(Value::list(
             tag_files(ed)
@@ -289,10 +341,10 @@ fn dispatch(
                 .collect(),
         )),
         "taglist" => f_taglist(args, ed),
-        "gettagstack" => f_gettagstack(args, state),
-        "settagstack" => f_settagstack(args, state),
+        "gettagstack" => f_gettagstack(args, ed, state),
+        "settagstack" => f_settagstack(args, ed, state),
         // -------------------------------------------------- jump/changelist
-        "getjumplist" => f_getjumplist(args, state),
+        "getjumplist" => f_getjumplist(args, ed, state),
         "getchangelist" => f_getchangelist(args, ed),
         "getmarklist" => f_getmarklist(args, ed),
         // ----------------------------------------------------- state/undo
@@ -399,20 +451,222 @@ fn vars_to_dict(vars: &HashMap<String, Value>) -> VimDict {
 // Window/tab model helpers
 // ---------------------------------------------------------------------------
 
-/// True for the values Vim's `find_win_by_nr_or_id()` accepts: `0` (current)
-/// or the single window's number/id.
-fn win_ref_valid(nr: i64) -> bool {
-    nr == 0 || nr == WINNR
+/// Resolve a window number the way vim's `find_win_by_nr()` does: `0` is the
+/// current window and a positive value is a 1-based window number in the
+/// current tab page.  Out-of-range values resolve to `None` without an error.
+fn win_by_nr(ed: &Editor, nr: i64) -> Option<WindowId> {
+    if nr < 0 {
+        return None;
+    }
+    if nr == 0 {
+        return Some(ed.windows.current_id());
+    }
+    usize::try_from(nr)
+        .ok()
+        .and_then(|number| ed.windows.ids().get(number - 1).copied())
 }
 
-/// True for the values Vim's `win_id2wp()` accepts: the single window's ID.
-fn win_id_valid(id: i64) -> bool {
-    id == WINID
+/// Resolve a window ID (never a number: ids start at 1000).
+fn win_by_id(ed: &Editor, id: i64) -> Option<WindowId> {
+    i32::try_from(id)
+        .ok()
+        .and_then(|id| ed.windows.get(id).map(|window| window.id))
 }
 
-/// True for a valid tab page number (`0` means the current tab page).
-fn tab_ref_valid(nr: i64) -> bool {
-    nr == 0 || nr == 1
+/// Vim's `find_win_by_nr_or_id()`: a value at or above `LOWEST_WIN_ID` is a
+/// window ID, anything else a window number.
+fn win_by_nr_or_id(ed: &Editor, nr: i64) -> Option<WindowId> {
+    if nr >= LOWEST_WIN_ID {
+        win_by_id(ed, nr)
+    } else {
+        win_by_nr(ed, nr)
+    }
+}
+
+/// Resolve a tab page argument: `0` is the current tab page, a positive value
+/// is the 1-based tab page number.
+fn tab_index(ed: &Editor, tabnr: i64) -> Option<usize> {
+    if tabnr < 0 {
+        return None;
+    }
+    if tabnr == 0 {
+        return Some(ed.windows.current_tab_index());
+    }
+    let index = usize::try_from(tabnr).ok()? - 1;
+    (index < ed.windows.tab_count()).then_some(index)
+}
+
+/// One window of tab page `index`; `winnr` is `0` for that tab page's current
+/// window and otherwise a 1-based window number.
+fn win_of_tab(ed: &Editor, index: usize, winnr: i64) -> Option<WindowId> {
+    if winnr < 0 {
+        return None;
+    }
+    if winnr == 0 {
+        return ed.windows.tabs.get(index).map(|tab| tab.current);
+    }
+    usize::try_from(winnr)
+        .ok()
+        .and_then(|number| ed.windows.ids_of_tab(index + 1).get(number - 1).copied())
+}
+
+/// A window argument that must name a window of tab page `index`, accepting
+/// both window numbers and window IDs (as vim's `gettabwinvar()` does).
+fn win_of_tab_arg(ed: &Editor, index: usize, nr: i64) -> Option<WindowId> {
+    let id = if nr >= LOWEST_WIN_ID {
+        win_by_id(ed, nr)?
+    } else {
+        win_of_tab(ed, index, nr)?
+    };
+    (ed.windows.tab_of(id) == Some(index)).then_some(id)
+}
+
+/// The window ids of the tab page that holds `id`.
+fn ids_of_window_tab(ed: &Editor, id: WindowId) -> Vec<WindowId> {
+    ed.windows
+        .tab_of(id)
+        .map(|index| ed.windows.ids_of_tab(index + 1))
+        .unwrap_or_default()
+}
+
+/// Read one window-local option of `id`, falling back to the global value (the
+/// same rule as `Editor::wopt`, but for any window).  `None` for an option the
+/// option table does not know.
+fn window_option(ed: &Editor, id: WindowId, name: &str) -> Option<OptValue> {
+    let canon = Options::canonical(name).ok()?;
+    if is_window_local(&canon) {
+        if let Some(value) = ed
+            .windows
+            .get(id)
+            .and_then(|window| window.get_local(&canon))
+        {
+            return Some(value.clone());
+        }
+    }
+    ed.options.get(&canon).ok().cloned()
+}
+
+fn window_option_bool(ed: &Editor, id: WindowId, name: &str) -> bool {
+    window_option(ed, id, name)
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
+/// Every window-local option of `id` (`getwinvar(nr, '&')`).
+fn window_option_dict(ed: &Editor, id: WindowId) -> VimDict {
+    let mut dict = VimDict::new();
+    for name in WINDOW_LOCAL {
+        if let Some(value) = window_option(ed, id, name) {
+            dict.insert(*name, opt_value_to_value(&value));
+        }
+    }
+    dict
+}
+
+/// The live `w:` dictionary of one window: the current window's dictionary is
+/// the one [`ScriptState::winvars`] holds, every other one is parked in
+/// [`WinState::winvars`].
+fn window_vars<'a>(
+    ed: &Editor,
+    state: &'a ScriptState,
+    id: WindowId,
+) -> Option<&'a HashMap<String, Value>> {
+    if id == ed.windows.current_id() {
+        Some(&state.winvars)
+    } else {
+        state.win.winvars.get(&id)
+    }
+}
+
+fn window_vars_mut<'a>(
+    ed: &Editor,
+    state: &'a mut ScriptState,
+    id: WindowId,
+) -> &'a mut HashMap<String, Value> {
+    if id == ed.windows.current_id() {
+        &mut state.winvars
+    } else {
+        state.win.winvars.entry(id).or_default()
+    }
+}
+
+/// The live `t:` dictionary of tab page `index`, with the same mirroring rule.
+fn tab_vars<'a>(
+    ed: &Editor,
+    state: &'a ScriptState,
+    index: usize,
+) -> Option<&'a HashMap<String, Value>> {
+    if index == ed.windows.current_tab_index() {
+        Some(&state.tabvars)
+    } else {
+        ed.windows
+            .tabs
+            .get(index)
+            .and_then(|tab| state.win.tabvars.get(&tab.id))
+    }
+}
+
+fn tab_vars_mut<'a>(
+    ed: &Editor,
+    state: &'a mut ScriptState,
+    index: usize,
+) -> &'a mut HashMap<String, Value> {
+    if index == ed.windows.current_tab_index() {
+        &mut state.tabvars
+    } else {
+        let id = ed.windows.tabs[index].id;
+        state.win.tabvars.entry(id).or_default()
+    }
+}
+
+/// Keep `ScriptState`'s live `w:`/`t:` dictionaries in step with the window and
+/// tab page the editor is on, recording tab page switches for
+/// `tabpagenr('#')`.
+///
+/// rvim-viml reads and writes `w:`/`t:` through the single dictionaries
+/// `ScriptState::winvars`/`tabvars`, so the current window's/tab page's
+/// dictionary lives there and all others are parked in [`WinState`] keyed by
+/// id.
+fn sync_scopes(ed: &Editor, state: &mut ScriptState) {
+    let window = ed.windows.current_id();
+    if state.win.winvars_owner != Some(window) {
+        if let Some(previous) = state.win.winvars_owner {
+            let vars = std::mem::take(&mut state.winvars);
+            state.win.winvars.insert(previous, vars);
+        }
+        state.winvars = state.win.winvars.remove(&window).unwrap_or_default();
+        state.win.winvars_owner = Some(window);
+    }
+    let tab = ed.windows.current_tab().id;
+    if state.win.tabvars_owner != Some(tab) {
+        if let Some(previous) = state.win.tabvars_owner {
+            let vars = std::mem::take(&mut state.tabvars);
+            state.win.tabvars.insert(previous, vars);
+        }
+        state.tabvars = state.win.tabvars.remove(&tab).unwrap_or_default();
+        state.win.tabvars_owner = Some(tab);
+    }
+    let index = ed.windows.current_tab_index();
+    if state.win.last_tab != Some(index) {
+        if state.win.last_tab.is_some() {
+            state.win.prev_tab = state.win.last_tab;
+        }
+        state.win.last_tab = Some(index);
+    }
+}
+
+/// Display column (0-based cells) of the byte column `byte_col` in `text`,
+/// expanding tabs to `tabstop` and giving control characters two cells.  This
+/// mirrors `rvim_term::display_col()`; rvim-ex does not depend on rvim-term.
+fn display_col(text: &str, byte_col: usize, tabstop: usize) -> usize {
+    let mut col = 0;
+    for (offset, ch) in text.char_indices() {
+        if offset >= byte_col {
+            break;
+        }
+        col += char_width(ch, col, tabstop);
+    }
+    col
 }
 
 /// Vim's `line()`/`tv_get_lnum()` translation: a Number is used as-is, a
@@ -501,25 +755,12 @@ fn opt_tabstop(ed: &Editor) -> usize {
 // Window variables / tab variables
 // ---------------------------------------------------------------------------
 
-/// The window-local options modelled by the M1 option table.  RustVim stores
-/// every option globally, but with a single window the window-local value is
-/// exactly the stored value, so exposing these is honest.
-const WINDOW_LOCAL_OPTIONS: &[&str] = &["foldenable", "list", "number", "relativenumber", "wrap"];
-
-fn window_option_dict(ed: &Editor) -> VimDict {
-    let mut dict = VimDict::new();
-    for name in WINDOW_LOCAL_OPTIONS {
-        if let Ok(value) = ed.options.get(name) {
-            dict.insert(*name, opt_value_to_value(value));
-        }
-    }
-    dict
-}
-
-/// `get_var_from()` semantics: `&opt` reads an option, an empty name returns
-/// all variables, anything else is a variable lookup with a default.
+/// `get_var_from()` semantics: `&opt` reads an option of window `id`, an empty
+/// name returns all of its variables, anything else is a variable lookup with a
+/// default.
 fn get_scoped_var(
     ed: &Editor,
+    id: WindowId,
     vars: &HashMap<String, Value>,
     name: &str,
     default: Value,
@@ -528,11 +769,11 @@ fn get_scoped_var(
     if window_options {
         if let Some(option) = name.strip_prefix('&') {
             if option.is_empty() {
-                return Value::dict(window_option_dict(ed));
+                return Value::dict(window_option_dict(ed, id));
             }
-            return match ed.options.get(option) {
-                Ok(value) => opt_value_to_value(value),
-                Err(_) => default,
+            return match window_option(ed, id, option) {
+                Some(value) => opt_value_to_value(&value),
+                None => default,
             };
         }
     }
@@ -542,9 +783,13 @@ fn get_scoped_var(
     vars.get(name).cloned().unwrap_or(default)
 }
 
-/// `setwinvar()`/`settabvar()` semantics.
+/// `setwinvar()`/`settabvar()`/`settabwinvar()` semantics.
+///
+/// `&`-names set the option of window `id`: window-local options stay local to
+/// that window (like vim's `OPT_LOCAL`), anything else is a global option.
 fn set_scoped_var(
     ed: &mut Editor,
+    id: WindowId,
     vars: &mut HashMap<String, Value>,
     name: &str,
     value: Value,
@@ -553,9 +798,10 @@ fn set_scoped_var(
         if option.is_empty() {
             return Err(err("E518", "Unknown option: "));
         }
+        let canon = Options::canonical(option)?;
         // Coerce to the option's own type, like Vim's `set_option_from_tv()`;
         // Options::set() itself parses strings for Bool/Num options.
-        let coerced = match ed.options.get(option) {
+        let coerced = match ed.options.get(&canon) {
             Ok(OptValue::Bool(_)) => match &value {
                 Value::String(text) => OptValue::Str(text.clone()),
                 other => OptValue::Bool(other.to_number() != 0),
@@ -567,7 +813,10 @@ fn set_scoped_var(
             Ok(OptValue::Str(_)) => OptValue::Str(value.to_string_value()),
             Err(_) => value_to_opt(&value),
         };
-        return ed.options.set(option, coerced);
+        if is_window_local(&canon) {
+            return ed.set_window_option(id, &canon, coerced);
+        }
+        return ed.set_option(&canon, coerced, SetScope::Local);
     }
     if name.is_empty() {
         return Err(err("E461", "Illegal variable name: "));
@@ -580,18 +829,21 @@ fn f_getwinvar(args: &[Value], ed: &mut Editor, state: &mut ScriptState) -> VimR
     let nr = narg(args, 0);
     let name = sarg(args, 1);
     let default = args.get(2).cloned().unwrap_or_else(|| Value::string(""));
-    if !win_ref_valid(nr) {
+    let Some(id) = win_by_nr_or_id(ed, nr) else {
         return Ok(default);
-    }
-    Ok(get_scoped_var(ed, &state.winvars, &name, default, true))
+    };
+    let empty = HashMap::new();
+    let vars = window_vars(ed, state, id).unwrap_or(&empty);
+    Ok(get_scoped_var(ed, id, vars, &name, default, true))
 }
 
 fn f_setwinvar(args: &[Value], ed: &mut Editor, state: &mut ScriptState) -> VimResult<Value> {
     let nr = narg(args, 0);
     let name = sarg(args, 1);
     let value = arg(args, 2);
-    if win_ref_valid(nr) {
-        set_scoped_var(ed, &mut state.winvars, &name, value)?;
+    if let Some(id) = win_by_nr_or_id(ed, nr) {
+        let vars = window_vars_mut(ed, state, id);
+        set_scoped_var(ed, id, vars, &name, value)?;
     }
     Ok(Value::Number(0))
 }
@@ -600,24 +852,27 @@ fn f_gettabvar(args: &[Value], ed: &mut Editor, state: &mut ScriptState) -> VimR
     let nr = narg(args, 0);
     let name = sarg(args, 1);
     let default = args.get(2).cloned().unwrap_or_else(|| Value::string(""));
-    if !tab_ref_valid(nr) {
+    let Some(index) = tab_index(ed, nr) else {
         return Ok(default);
-    }
+    };
     // Tab pages have no local options, so `&name` is a plain variable lookup.
-    Ok(get_scoped_var(ed, &state.tabvars, &name, default, false))
+    let current = ed.windows.current_id();
+    let empty = HashMap::new();
+    let vars = tab_vars(ed, state, index).unwrap_or(&empty);
+    Ok(get_scoped_var(ed, current, vars, &name, default, false))
 }
 
-fn f_settabvar(args: &[Value], _ed: &mut Editor, state: &mut ScriptState) -> VimResult<Value> {
+fn f_settabvar(args: &[Value], ed: &mut Editor, state: &mut ScriptState) -> VimResult<Value> {
     let nr = narg(args, 0);
     let name = sarg(args, 1);
     let value = arg(args, 2);
-    if tab_ref_valid(nr) {
+    if let Some(index) = tab_index(ed, nr) {
         // Tab pages have no local options, and Vim writes `t:{varname}`; an
         // empty name or an option-style name is therefore illegal.
         if name.is_empty() || name.starts_with('&') {
             return Err(err("E461", format!("Illegal variable name: {name}")));
         }
-        state.tabvars.insert(name, value);
+        tab_vars_mut(ed, state, index).insert(name, value);
     }
     Ok(Value::Number(0))
 }
@@ -627,102 +882,292 @@ fn f_gettabwinvar(args: &[Value], ed: &mut Editor, state: &mut ScriptState) -> V
     let winnr = narg(args, 1);
     let name = sarg(args, 2);
     let default = args.get(3).cloned().unwrap_or_else(|| Value::string(""));
-    if !tab_ref_valid(tabnr) || !win_ref_valid(winnr) {
+    let Some(index) = tab_index(ed, tabnr) else {
         return Ok(default);
+    };
+    let Some(id) = win_of_tab_arg(ed, index, winnr) else {
+        return Ok(default);
+    };
+    let empty = HashMap::new();
+    let vars = window_vars(ed, state, id).unwrap_or(&empty);
+    Ok(get_scoped_var(ed, id, vars, &name, default, true))
+}
+
+fn f_settabwinvar(args: &[Value], ed: &mut Editor, state: &mut ScriptState) -> VimResult<Value> {
+    let tabnr = narg(args, 0);
+    let winnr = narg(args, 1);
+    let name = sarg(args, 2);
+    let value = arg(args, 3);
+    if let Some(index) = tab_index(ed, tabnr) {
+        if let Some(id) = win_of_tab_arg(ed, index, winnr) {
+            let vars = window_vars_mut(ed, state, id);
+            set_scoped_var(ed, id, vars, &name, value)?;
+        }
     }
-    Ok(get_scoped_var(ed, &state.winvars, &name, default, true))
+    Ok(Value::Number(0))
 }
 
 // ---------------------------------------------------------------------------
 // Window/tab information
 // ---------------------------------------------------------------------------
 
-fn win_info_dict(ed: &Editor, state: &ScriptState) -> VimDict {
+/// Width in cells of the 'number'/'relativenumber' gutter `window` draws (the
+/// same `digits + 1` rule `rvim-term` uses).  The sign and fold columns are not
+/// modelled, so they add nothing to `textoff`.
+fn text_offset(ed: &Editor, id: WindowId, lines: usize) -> i64 {
+    let numbered =
+        window_option_bool(ed, id, "number") || window_option_bool(ed, id, "relativenumber");
+    if numbered {
+        (lines.max(1).to_string().len() + 1) as i64
+    } else {
+        0
+    }
+}
+
+/// One `getwininfo()` entry.  `height` is the buffer area (`w_height` in
+/// vim's `get_win_info()`), i.e. the frame's rows without its status line.
+fn win_info_dict(
+    ed: &Editor,
+    state: &ScriptState,
+    id: WindowId,
+    tabnr: usize,
+    winnr: usize,
+) -> VimDict {
     let mut dict = VimDict::new();
-    dict.insert("tabnr", Value::Number(1));
-    dict.insert("winnr", Value::Number(WINNR));
-    dict.insert("winid", Value::Number(WINID));
-    // No display/terminal: sizes are unknown, the logical viewport starts at
-    // line 1 and shows the whole (never scrolled) buffer.
-    dict.insert("height", Value::Number(-1));
-    dict.insert("width", Value::Number(-1));
-    dict.insert("winrow", Value::Number(1));
-    dict.insert("wincol", Value::Number(1));
-    dict.insert("textoff", Value::Number(-1));
-    dict.insert("topline", Value::Number(1));
-    dict.insert("botline", Value::Number(ed.line_count() as i64));
-    dict.insert("bufnr", Value::Number(ed.current_bufnr() as i64));
+    let Some(window) = ed.windows.get(id) else {
+        return dict;
+    };
+    let lines = ed
+        .buffer(window.bufnr)
+        .map(|buffer| buffer.line_count())
+        .unwrap_or(1)
+        .max(1);
+    let laid_out = window.rect.rows > 0 && window.rect.cols > 0;
+    let text_rows = window.rect.text_rows();
+    let topline = window.top_line + 1;
+    let botline = if laid_out {
+        (window.top_line + text_rows).clamp(1, lines) as i64
+    } else {
+        lines as i64
+    };
+    dict.insert("tabnr", Value::Number(tabnr as i64));
+    dict.insert("winnr", Value::Number(winnr as i64));
+    dict.insert("winid", Value::Number(id as i64));
+    dict.insert(
+        "height",
+        Value::Number(if laid_out { text_rows as i64 } else { -1 }),
+    );
+    dict.insert(
+        "width",
+        Value::Number(if laid_out {
+            window.rect.cols as i64
+        } else {
+            -1
+        }),
+    );
+    dict.insert("winrow", Value::Number(window.rect.row as i64 + 1));
+    dict.insert("wincol", Value::Number(window.rect.col as i64 + 1));
+    dict.insert("textoff", Value::Number(text_offset(ed, id, lines)));
+    dict.insert("topline", Value::Number(topline as i64));
+    dict.insert("botline", Value::Number(botline));
+    dict.insert("bufnr", Value::Number(window.bufnr as i64));
     dict.insert("winbar", Value::Number(0));
     dict.insert("terminal", Value::Number(0));
-    dict.insert("quickfix", Value::Number(0));
+    dict.insert("quickfix", Value::Number(i64::from(window.quickfix)));
     dict.insert("loclist", Value::Number(0));
-    dict.insert("variables", Value::dict(vars_to_dict(&state.winvars)));
+    let empty = HashMap::new();
+    let vars = window_vars(ed, state, id).unwrap_or(&empty);
+    dict.insert("variables", Value::dict(vars_to_dict(vars)));
     dict
 }
 
+/// All windows of every tab page, or the one window with the given ID.
 fn f_getwininfo(args: &[Value], ed: &mut Editor, state: &mut ScriptState) -> VimResult<Value> {
-    if let Some(value) = args.first() {
-        if !win_id_valid(value.to_number()) {
-            return Ok(Value::list(Vec::new()));
+    let mut out = Vec::new();
+    match args.first() {
+        Some(value) => {
+            let Some(id) = win_by_id(ed, value.to_number()) else {
+                return Ok(Value::list(Vec::new()));
+            };
+            let Some(index) = ed.windows.tab_of(id) else {
+                return Ok(Value::list(Vec::new()));
+            };
+            let winnr = ed.windows.winnr(id);
+            out.push(Value::dict(win_info_dict(ed, state, id, index + 1, winnr)));
+        }
+        None => {
+            for tabnr in 1..=ed.windows.tab_count() {
+                for id in ed.windows.ids_of_tab(tabnr) {
+                    let winnr = ed.windows.winnr(id);
+                    out.push(Value::dict(win_info_dict(ed, state, id, tabnr, winnr)));
+                }
+            }
         }
     }
-    Ok(Value::list(vec![Value::dict(win_info_dict(ed, state))]))
+    Ok(Value::list(out))
 }
 
-fn f_gettabinfo(args: &[Value], _ed: &mut Editor, state: &mut ScriptState) -> VimResult<Value> {
-    if let Some(value) = args.first() {
-        if !tab_ref_valid(value.to_number()) {
-            return Ok(Value::list(Vec::new()));
-        }
+/// One `gettabinfo()` entry per tab page (or only the requested one), whose
+/// `windows` entry holds the same dictionaries `getwininfo()` returns.
+fn f_gettabinfo(args: &[Value], ed: &mut Editor, state: &mut ScriptState) -> VimResult<Value> {
+    let indexes: Vec<usize> = match args.first() {
+        Some(value) => match tab_index(ed, value.to_number()) {
+            Some(index) => vec![index],
+            None => return Ok(Value::list(Vec::new())),
+        },
+        None => (0..ed.windows.tab_count()).collect(),
+    };
+    let mut out = Vec::new();
+    for index in indexes {
+        let tabnr = index + 1;
+        let mut dict = VimDict::new();
+        dict.insert("tabnr", Value::Number(tabnr as i64));
+        let windows = ed
+            .windows
+            .ids_of_tab(tabnr)
+            .into_iter()
+            .map(|id| {
+                let winnr = ed.windows.winnr(id);
+                Value::dict(win_info_dict(ed, state, id, tabnr, winnr))
+            })
+            .collect();
+        dict.insert("windows", Value::list(windows));
+        let empty = HashMap::new();
+        let vars = tab_vars(ed, state, index).unwrap_or(&empty);
+        dict.insert("variables", Value::dict(vars_to_dict(vars)));
+        dict.insert("winbar", Value::Number(0));
+        out.push(Value::dict(dict));
     }
-    let mut dict = VimDict::new();
-    dict.insert("tabnr", Value::Number(1));
-    dict.insert("windows", Value::list(vec![Value::Number(WINID)]));
-    dict.insert("variables", Value::dict(vars_to_dict(&state.tabvars)));
-    Ok(Value::list(vec![Value::dict(dict)]))
+    Ok(Value::list(out))
 }
 
-fn f_tabpagenr(args: &[Value]) -> VimResult<Value> {
+fn f_tabpagenr(args: &[Value], ed: &Editor, state: &ScriptState) -> VimResult<Value> {
+    let current = (ed.windows.current_tab_index() + 1) as i64;
     let Some(value) = args.first() else {
-        return Ok(Value::Number(1));
+        return Ok(Value::Number(current));
     };
     match value.to_string_value().as_str() {
-        "$" => Ok(Value::Number(1)),
-        // The last accessed tab page is the only tab page.
-        "#" => Ok(Value::Number(1)),
+        "$" => Ok(Value::Number(ed.windows.tab_count() as i64)),
+        // The tab page that was current on the previous builtin call; vim
+        // reports the current tab page while there is no other one.
+        "#" => Ok(Value::Number(
+            state
+                .win
+                .prev_tab
+                .map(|index| index + 1)
+                .unwrap_or(ed.windows.current_tab_index() + 1) as i64,
+        )),
         other => Err(err("E15", format!("Invalid expression: {other}"))),
     }
 }
 
-fn f_tabpagewinnr(args: &[Value]) -> VimResult<Value> {
+fn f_tabpagewinnr(args: &[Value], ed: &Editor) -> VimResult<Value> {
     let tabnr = narg(args, 0);
-    if !tab_ref_valid(tabnr) {
+    let Some(index) = tab_index(ed, tabnr) else {
         return Ok(Value::Number(0));
-    }
+    };
+    let ids = ed.windows.ids_of_tab(index + 1);
     let Some(value) = args.get(1) else {
-        return Ok(Value::Number(WINNR));
+        let current = ed.windows.tabs.get(index).map(|tab| tab.current);
+        let winnr = current
+            .and_then(|id| ids.iter().position(|other| *other == id))
+            .map(|position| position + 1)
+            .unwrap_or(0);
+        return Ok(Value::Number(winnr as i64));
     };
     match value.to_string_value().as_str() {
-        "$" => Ok(Value::Number(1)),
-        // No window has been left yet, so there is no previous window.
-        "#" => Ok(Value::Number(0)),
+        "$" => Ok(Value::Number(ids.len() as i64)),
+        "#" => {
+            let previous = ed.windows.tabs.get(index).map(|tab| tab.prev);
+            let winnr = previous
+                .and_then(|id| ids.iter().position(|other| *other == id))
+                .map(|position| position + 1)
+                .unwrap_or(0);
+            Ok(Value::Number(winnr as i64))
+        }
         other => Err(err("E15", format!("Invalid expression: {other}"))),
     }
 }
 
 fn f_tabpagebuflist(args: &[Value], ed: &mut Editor) -> VimResult<Value> {
-    if let Some(value) = args.first() {
-        if !tab_ref_valid(value.to_number()) {
+    let index = match args.first() {
+        Some(value) => match tab_index(ed, value.to_number()) {
+            Some(index) => index,
             // Vim returns the number zero for an invalid tab page here.
-            return Ok(Value::Number(0));
-        }
-    }
-    Ok(Value::list(vec![Value::Number(ed.current_bufnr() as i64)]))
+            None => return Ok(Value::Number(0)),
+        },
+        None => ed.windows.current_tab_index(),
+    };
+    let buffers = ed
+        .windows
+        .ids_of_tab(index + 1)
+        .into_iter()
+        .filter_map(|id| {
+            ed.windows
+                .get(id)
+                .map(|window| Value::Number(window.bufnr as i64))
+        })
+        .collect();
+    Ok(Value::list(buffers))
 }
 
 // ---------------------------------------------------------------------------
 // Window identity / layout
 // ---------------------------------------------------------------------------
+
+/// `winbufnr({nr})`: `-1` when the window does not exist.
+fn f_winbufnr(args: &[Value], ed: &Editor) -> VimResult<Value> {
+    match win_by_nr_or_id(ed, narg(args, 0)).and_then(|id| ed.windows.get(id)) {
+        Some(window) => Ok(Value::Number(window.bufnr as i64)),
+        None => Ok(Value::Number(-1)),
+    }
+}
+
+/// `wincol()`: 1-based screen column of the cursor inside the current
+/// window, counting from the window's left edge ('leftcol').
+fn f_wincol(ed: &Editor) -> VimResult<Value> {
+    let window = ed.windows.current();
+    if window.rect.cols == 0 {
+        return Ok(Value::Number(-1));
+    }
+    let text = ed
+        .current_buffer()
+        .line_str(window.cursor.line)
+        .unwrap_or("")
+        .to_string();
+    let column = display_col(&text, window.cursor.col, opt_tabstop(ed));
+    Ok(Value::Number(column.saturating_sub(window.left) as i64 + 1))
+}
+
+/// `winline()`: 1-based screen line of the cursor inside the current
+/// window.  'wrap' is not modelled, so this counts buffer lines from
+/// `top_line` rather than wrapped screen rows.
+fn f_winline(ed: &Editor) -> VimResult<Value> {
+    let window = ed.windows.current();
+    if window.rect.rows == 0 {
+        return Ok(Value::Number(-1));
+    }
+    Ok(Value::Number(
+        (window.cursor.line.saturating_sub(window.top_line) + 1) as i64,
+    ))
+}
+
+/// `winheight()`/`winwidth()`: buffer-area size from the last layout pass,
+/// `-1` when there is no layout yet or the window does not exist.
+fn f_win_size(args: &[Value], ed: &Editor, width: bool) -> VimResult<Value> {
+    let Some(window) = win_by_nr_or_id(ed, narg(args, 0)).and_then(|id| ed.windows.get(id)) else {
+        return Ok(Value::Number(-1));
+    };
+    if window.rect.rows == 0 || window.rect.cols == 0 {
+        return Ok(Value::Number(-1));
+    }
+    let size = if width {
+        window.rect.cols
+    } else {
+        window.rect.text_rows()
+    };
+    Ok(Value::Number(size as i64))
+}
 
 fn f_win_execute(
     args: &[Value],
@@ -730,81 +1175,302 @@ fn f_win_execute(
     env: &mut Env,
     state: &mut ScriptState,
 ) -> VimResult<Value> {
-    let id = narg(args, 0);
-    if win_id_valid(id) {
-        match args.get(1) {
-            Some(Value::List(commands)) => {
-                for command in commands.borrow().iter() {
-                    crate::exec::run_line_with(ed, env, state, &command.to_string_value())?;
-                }
-            }
-            Some(command) => {
-                crate::exec::run_line_with(ed, env, state, &command.to_string_value())?;
-            }
-            None => {}
+    let Some(id) = win_by_id(ed, narg(args, 0)) else {
+        return Ok(Value::string(""));
+    };
+    let previous = ed.windows.current_id();
+    ed.goto_window(id)?;
+    sync_scopes(ed, state);
+    // Run the commands with the editor on the target window.  A failing command
+    // aborts the rest (like vim's win_execute()), but the previous window is
+    // restored in every case.
+    let outcome = match args.get(1) {
+        Some(Value::List(commands)) => commands.borrow().iter().try_for_each(|command| {
+            crate::exec::run_line_with(ed, env, state, &command.to_string_value()).map(|_| ())
+        }),
+        Some(command) => {
+            crate::exec::run_line_with(ed, env, state, &command.to_string_value()).map(|_| ())
         }
-    }
-    // Vim returns the captured `:execute` output; RustVim has no command output
-    // capture/`:redir` layer yet, so the (honest) result is an empty string.
+        None => Ok(()),
+    };
+    ed.goto_window(previous)?;
+    sync_scopes(ed, state);
+    outcome?;
+    // Vim returns the captured `:execute` output; RustVim has no command
+    // output capture/`:redir` layer yet, so the (honest) result is an empty
+    // string.
     Ok(Value::string(""))
 }
 
 fn f_win_findbuf(args: &[Value], ed: &mut Editor) -> VimResult<Value> {
     let bufnr = narg(args, 0);
-    if bufnr == ed.current_bufnr() as i64 {
-        Ok(Value::list(vec![Value::Number(WINID)]))
+    let bufnr = if bufnr == 0 {
+        ed.current_bufnr()
     } else {
-        Ok(Value::list(Vec::new()))
+        bufnr as i32
+    };
+    let mut found = Vec::new();
+    for tabnr in 1..=ed.windows.tab_count() {
+        for id in ed.windows.ids_of_tab(tabnr) {
+            if ed
+                .windows
+                .get(id)
+                .is_some_and(|window| window.bufnr == bufnr)
+            {
+                found.push(Value::Number(id as i64));
+            }
+        }
     }
+    Ok(Value::list(found))
 }
 
-fn f_win_getid(args: &[Value]) -> VimResult<Value> {
+fn f_win_getid(args: &[Value], ed: &Editor) -> VimResult<Value> {
     if args.is_empty() {
-        return Ok(Value::Number(WINID));
+        return Ok(Value::Number(ed.windows.current_id() as i64));
     }
     let winnr = narg(args, 0);
-    if winnr <= 0 {
-        return Ok(Value::Number(0));
+    let index = if args.len() > 1 {
+        match tab_index(ed, narg(args, 1)) {
+            Some(index) => index,
+            // Vim reports -1 for a tab page that does not exist.
+            None => return Ok(Value::Number(-1)),
+        }
+    } else {
+        ed.windows.current_tab_index()
+    };
+    match win_of_tab(ed, index, winnr) {
+        Some(id) => Ok(Value::Number(id as i64)),
+        None => Ok(Value::Number(0)),
     }
-    if args.len() > 1 && narg(args, 1) != 1 {
-        // No such tab page.
-        return Ok(Value::Number(-1));
-    }
-    Ok(Value::Number(if winnr == WINNR { WINID } else { 0 }))
 }
 
-fn f_win_gettype(args: &[Value]) -> VimResult<Value> {
-    let Some(value) = args.first() else {
-        return Ok(Value::string(""));
+fn f_win_gettype(args: &[Value], ed: &Editor) -> VimResult<Value> {
+    let id = match args.first() {
+        None => Some(ed.windows.current_id()),
+        Some(value) => win_by_nr_or_id(ed, value.to_number()),
     };
-    // The single window is a regular editing window; anything else is unknown.
-    Ok(Value::string(if win_ref_valid(value.to_number()) {
-        ""
-    } else {
-        "unknown"
+    Ok(Value::string(match id {
+        Some(id) if ed.windows.get(id).is_some_and(|window| window.quickfix) => "quickfix",
+        Some(_) => "",
+        None => "unknown",
     }))
 }
 
-fn f_winlayout(args: &[Value]) -> VimResult<Value> {
-    if let Some(value) = args.first() {
-        if !tab_ref_valid(value.to_number()) {
-            return Ok(Value::list(Vec::new()));
-        }
-    }
+fn f_win_gotoid(args: &[Value], ed: &mut Editor, state: &mut ScriptState) -> VimResult<Value> {
+    let Some(id) = win_by_id(ed, narg(args, 0)) else {
+        return Ok(Value::Number(0));
+    };
+    ed.goto_window(id)?;
+    sync_scopes(ed, state);
+    Ok(Value::Number(1))
+}
+
+fn f_win_id2tabwin(args: &[Value], ed: &Editor) -> VimResult<Value> {
+    let id = narg(args, 0);
+    let pair = win_by_id(ed, id)
+        .and_then(|id| {
+            ed.windows
+                .tab_of(id)
+                .map(|index| (index + 1, ed.windows.winnr(id)))
+        })
+        .unwrap_or((0, 0));
     Ok(Value::list(vec![
-        Value::string("leaf"),
-        Value::Number(WINID),
+        Value::Number(pair.0 as i64),
+        Value::Number(pair.1 as i64),
     ]))
 }
 
+fn f_win_id2win(args: &[Value], ed: &Editor) -> VimResult<Value> {
+    let id = narg(args, 0);
+    // A window in another tab page has no number here: vim returns zero.
+    let number = win_by_id(ed, id)
+        .filter(|id| ed.windows.tab_of(*id) == Some(ed.windows.current_tab_index()))
+        .map(|id| ed.windows.winnr(id))
+        .unwrap_or(0);
+    Ok(Value::Number(number as i64))
+}
+
+/// `win_screenpos({nr})`: 1-based top-left corner from the last layout
+/// pass, `[0, 0]` when the window does not exist.
+fn f_win_screenpos(args: &[Value], ed: &Editor) -> VimResult<Value> {
+    let Some(rect) = win_by_nr_or_id(ed, narg(args, 0))
+        .and_then(|id| ed.windows.get(id))
+        .map(|window| window.rect)
+    else {
+        return Ok(Value::list(vec![Value::Number(0), Value::Number(0)]));
+    };
+    Ok(Value::list(vec![
+        Value::Number(rect.row as i64 + 1),
+        Value::Number(rect.col as i64 + 1),
+    ]))
+}
+
+/// `winlayout([{tabnr}])`: the real frame tree as nested lists
+/// (`["leaf", id]`, `["row", [..]]` side by side and
+/// `["col", [..]]` stacked), matching `Layout`.
+fn f_winlayout(args: &[Value], ed: &Editor) -> VimResult<Value> {
+    let index = match args.first() {
+        Some(value) => match tab_index(ed, value.to_number()) {
+            Some(index) => index,
+            None => return Ok(Value::list(Vec::new())),
+        },
+        None => ed.windows.current_tab_index(),
+    };
+    match ed.windows.tabs.get(index) {
+        Some(tab) => Ok(layout_value(&tab.layout)),
+        None => Ok(Value::list(Vec::new())),
+    }
+}
+
+fn layout_value(layout: &Layout) -> Value {
+    match layout {
+        Layout::Leaf(id) => Value::list(vec![Value::string("leaf"), Value::Number(*id as i64)]),
+        Layout::Row(children) => Value::list(vec![
+            Value::string("row"),
+            Value::list(children.iter().map(layout_value).collect()),
+        ]),
+        Layout::Col(children) => Value::list(vec![
+            Value::string("col"),
+            Value::list(children.iter().map(layout_value).collect()),
+        ]),
+    }
+}
+
+/// True when the frame tree contains a horizontal group, i.e. when there are
+/// vertical splits whose widths `winrestcmd()` has to restore.
+fn layout_has_vertical(layout: &Layout) -> bool {
+    match layout {
+        Layout::Leaf(_) => false,
+        Layout::Row(_) => true,
+        Layout::Col(children) => children.iter().any(layout_has_vertical),
+    }
+}
+
+/// `winrestcmd()`: the `:resize`/`:vertical resize` commands that
+/// restore the requested sizes of the current tab page's windows.  Vim's format
+/// is `{height}resize` per window plus `vert {width}resize` when there are
+/// vertical splits, separated by `|` and ending with one.
+fn f_winrestcmd(ed: &Editor) -> VimResult<Value> {
+    let vertical = layout_has_vertical(&ed.windows.current_tab().layout);
+    let mut command = String::new();
+    for (index, id) in ed.windows.ids().into_iter().enumerate() {
+        let Some(window) = ed.windows.get(id) else {
+            continue;
+        };
+        let number = index + 1;
+        command.push_str(&format!("{number}resize {}|", window.height));
+        if vertical {
+            command.push_str(&format!("vert {number}resize {}|", window.width));
+        }
+    }
+    Ok(Value::string(command))
+}
+
+/// The window next to `id` in the last layout pass: to its right (so a
+/// vertical separator sits between them) or directly below (so its status line
+/// separates them).
+fn frame_neighbour(ed: &Editor, id: WindowId, horizontal: bool) -> Option<WindowId> {
+    let rect = ed.windows.get(id)?.rect;
+    if rect.rows == 0 || rect.cols == 0 {
+        return None;
+    }
+    ids_of_window_tab(ed, id).into_iter().find(|other| {
+        if *other == id {
+            return false;
+        }
+        let Some(other) = ed.windows.get(*other).map(|window| window.rect) else {
+            return false;
+        };
+        let rows_overlap = other.row < rect.row + rect.rows && rect.row < other.row + other.rows;
+        let cols_overlap = other.col < rect.col + rect.cols && rect.col < other.col + other.cols;
+        if horizontal {
+            // The `|` separator column sits between the two frames.
+            other.col == rect.col + rect.cols + 1 && rows_overlap
+        } else {
+            // Stacked frames touch: the lower one starts right after the
+            // status line row of the upper one.
+            other.row == rect.row + rect.rows && cols_overlap
+        }
+    })
+}
+
+/// `win_move_separator()` (columns) and `win_move_statusline()` (rows).
+///
+/// Both return `0` on success and `-1` when there is no separator/status line
+/// to move (a window on the tab page edge, or a window without a layout pass
+/// yet), i.e. for a window that cannot be resized.
+fn f_win_move(args: &[Value], ed: &mut Editor, separator: bool) -> VimResult<Value> {
+    let Some(id) = win_by_nr_or_id(ed, narg(args, 0)) else {
+        return Ok(Value::Number(-1));
+    };
+    if frame_neighbour(ed, id, separator).is_none() {
+        return Ok(Value::Number(-1));
+    }
+    let offset = narg(args, 1);
+    if let Some(window) = ed.windows.get_mut(id) {
+        if separator {
+            window.width = (window.width as i64 + offset).max(MIN_WIDTH as i64) as usize;
+        } else {
+            window.height = (window.height as i64 + offset).max(MIN_HEIGHT as i64) as usize;
+        }
+    }
+    Ok(Value::Number(0))
+}
+
+/// Swap everything the two windows show; the frame tree (and therefore each
+/// window's rectangle) is left untouched.  This is the documented
+/// approximation of `:splitmove` for this model.
+fn swap_window_contents(ed: &mut Editor, a: WindowId, b: WindowId) {
+    let (Some(first), Some(second)) = (ed.windows.get(a).cloned(), ed.windows.get(b).cloned())
+    else {
+        return;
+    };
+    fn copy(target: &mut Window, source: &Window) {
+        target.bufnr = source.bufnr;
+        target.cursor = source.cursor;
+        target.top_line = source.top_line;
+        target.left = source.left;
+        target.curswant = source.curswant;
+        target.local = source.local.clone();
+        target.quickfix = source.quickfix;
+    }
+    if let Some(window) = ed.windows.get_mut(a) {
+        copy(window, &second);
+    }
+    if let Some(window) = ed.windows.get_mut(b) {
+        copy(window, &first);
+    }
+    let current = ed.windows.current().bufnr;
+    ed.sync_fileformat_option(current);
+}
+
+fn f_win_splitmove(args: &[Value], ed: &mut Editor) -> VimResult<Value> {
+    let source = win_by_nr_or_id(ed, narg(args, 0));
+    let target = win_by_nr_or_id(ed, narg(args, 1));
+    // Vim's E957 covers both "window does not exist" and "both arguments name
+    // the same window".
+    let (Some(source), Some(target)) = (source, target) else {
+        return Err(err("E957", "Invalid window number"));
+    };
+    if source == target {
+        return Err(err("E957", "Invalid window number"));
+    }
+    // The `{options}` argument ("vertical"/"rightbelow"/"bottomright") is
+    // accepted and ignored: this implementation exchanges the contents of the
+    // two windows instead of moving a frame node.
+    swap_window_contents(ed, source, target);
+    Ok(Value::Number(0))
+}
+
 fn f_winsaveview(ed: &mut Editor, state: &mut ScriptState) -> VimResult<Value> {
-    let cursor = ed.cursor();
+    let id = ed.windows.current_id();
+    let window = ed.windows.current();
     let view = SavedView {
-        lnum: cursor.line as i64 + 1,
-        col: cursor.col as i64,
-        curswant: cursor.col as i64,
-        topline: 1,
-        leftcol: 0,
+        lnum: window.cursor.line as i64 + 1,
+        col: window.cursor.col as i64,
+        curswant: window.curswant as i64,
+        topline: window.top_line as i64 + 1,
+        leftcol: window.left as i64,
         skipcol: 0,
     };
     let mut dict = VimDict::new();
@@ -816,34 +1482,49 @@ fn f_winsaveview(ed: &mut Editor, state: &mut ScriptState) -> VimResult<Value> {
     dict.insert("topfill", Value::Number(0));
     dict.insert("leftcol", Value::Number(view.leftcol));
     dict.insert("skipcol", Value::Number(view.skipcol));
-    state.win.saved_view = Some(view);
+    state.win.saved_views.insert(id, view);
     Ok(Value::dict(dict))
 }
 
 fn f_winrestview(args: &[Value], ed: &mut Editor, state: &mut ScriptState) -> VimResult<Value> {
     let dict = dict_clone(&arg(args, 0)).ok_or_else(|| err("E474", "Invalid argument"))?;
-    let cursor = ed.cursor();
-    let current_lnum = cursor.line as i64 + 1;
-    let current_col = cursor.col as i64;
-    let lnum = dict_number(&dict, "lnum").unwrap_or(current_lnum);
-    let col = dict_number(&dict, "col").unwrap_or(current_col);
-    let topline = dict_number(&dict, "topline").unwrap_or(1);
-    let leftcol = dict_number(&dict, "leftcol").unwrap_or(0);
-    let skipcol = dict_number(&dict, "skipcol").unwrap_or(0);
+    let id = ed.windows.current_id();
+    let window = ed.windows.current();
+    let current = SavedView {
+        lnum: window.cursor.line as i64 + 1,
+        col: window.cursor.col as i64,
+        curswant: window.curswant as i64,
+        topline: window.top_line as i64 + 1,
+        leftcol: window.left as i64,
+        skipcol: 0,
+    };
+    let lnum = dict_number(&dict, "lnum").unwrap_or(current.lnum);
+    let col = dict_number(&dict, "col").unwrap_or(current.col);
+    let topline = dict_number(&dict, "topline").unwrap_or(current.topline);
+    let leftcol = dict_number(&dict, "leftcol").unwrap_or(current.leftcol);
+    let skipcol = dict_number(&dict, "skipcol").unwrap_or(current.skipcol);
     let curswant = dict_number(&dict, "curswant").unwrap_or(col);
     let line = lnum.saturating_sub(1).max(0) as usize;
     let column = col.max(0) as usize;
     ed.set_cursor(Pos::new(line, column));
-    // The scroll offset ('topline'/'leftcol'/'skipcol') has no display layer to
-    // apply to yet; record the restored view so later M5 code can use it.
-    state.win.saved_view = Some(SavedView {
-        lnum: ed.cursor().line as i64 + 1,
-        col: ed.cursor().col as i64,
-        curswant,
-        topline,
-        leftcol,
-        skipcol,
-    });
+    // Windows own a real viewport now, so the scroll position is restored too.
+    let max_top = ed.line_count().saturating_sub(1);
+    if let Some(window) = ed.windows.get_mut(id) {
+        window.top_line = (topline.saturating_sub(1).max(0) as usize).min(max_top);
+        window.left = leftcol.max(0) as usize;
+        window.curswant = curswant.max(0) as usize;
+    }
+    state.win.saved_views.insert(
+        id,
+        SavedView {
+            lnum: ed.cursor().line as i64 + 1,
+            col: ed.cursor().col as i64,
+            curswant,
+            topline,
+            leftcol,
+            skipcol,
+        },
+    );
     Ok(Value::Number(0))
 }
 
@@ -1015,10 +1696,10 @@ fn tag_stack_item_dict(entry: &TagStackEntry) -> VimDict {
     dict
 }
 
-fn f_gettagstack(args: &[Value], state: &mut ScriptState) -> VimResult<Value> {
+fn f_gettagstack(args: &[Value], ed: &Editor, state: &mut ScriptState) -> VimResult<Value> {
     let mut dict = VimDict::new();
     if let Some(value) = args.first() {
-        if !win_ref_valid(value.to_number()) {
+        if win_by_nr_or_id(ed, value.to_number()).is_none() {
             return Ok(Value::dict(dict));
         }
     }
@@ -1038,9 +1719,9 @@ fn f_gettagstack(args: &[Value], state: &mut ScriptState) -> VimResult<Value> {
     Ok(Value::dict(dict))
 }
 
-fn f_settagstack(args: &[Value], state: &mut ScriptState) -> VimResult<Value> {
+fn f_settagstack(args: &[Value], ed: &Editor, state: &mut ScriptState) -> VimResult<Value> {
     let win = narg(args, 0);
-    if !win_ref_valid(win) {
+    if win_by_nr_or_id(ed, win).is_none() {
         return Ok(Value::Number(-1));
     }
     let dict = dict_clone(&arg(args, 1)).ok_or_else(|| err("E715", "Dictionary required"))?;
@@ -1116,13 +1797,13 @@ fn jump_entry_dict(entry: &JumpEntry) -> VimDict {
     dict
 }
 
-fn f_getjumplist(args: &[Value], state: &mut ScriptState) -> VimResult<Value> {
+fn f_getjumplist(args: &[Value], ed: &Editor, state: &mut ScriptState) -> VimResult<Value> {
     if let Some(value) = args.first() {
-        if !win_ref_valid(value.to_number()) {
+        if win_by_nr_or_id(ed, value.to_number()).is_none() {
             return Ok(Value::list(Vec::new()));
         }
     }
-    if args.len() > 1 && !tab_ref_valid(narg(args, 1)) {
+    if args.len() > 1 && tab_index(ed, narg(args, 1)).is_none() {
         return Ok(Value::list(Vec::new()));
     }
     let entries: Vec<Value> = state
@@ -1462,7 +2143,7 @@ fn f_virtcol(args: &[Value], ed: &mut Editor) -> VimResult<Value> {
 
 fn f_virtcol2col(args: &[Value], ed: &mut Editor) -> VimResult<Value> {
     let winid = narg(args, 0);
-    if winid != 0 && !win_id_valid(winid) {
+    if winid != 0 && win_by_id(ed, winid).is_none() {
         return Ok(Value::Number(-1));
     }
     let lnum = narg(args, 1);
@@ -2064,26 +2745,71 @@ mod tests {
         assert!(call("no_such_host_builtin", &[], &mut ed, &mut env, &mut state).is_none());
     }
 
+    /// Run one Ex command through the real dispatcher (windows and tab pages
+    /// are created the way a user creates them, not by poking the editor).
+    fn run_ex(ed: &mut Editor, env: &mut Env, state: &mut ScriptState, command: &str) {
+        crate::exec::run_line_with(ed, env, state, command).unwrap();
+    }
+
     #[test]
     fn window_info_and_variables() {
         let (mut ed, mut env, mut state) = setup();
         set_lines(&mut ed, &["one", "two", "three"]);
         let bufnr = ed.current_bufnr() as i64;
+        let current = ed.current_win_id() as i64;
 
         let info = run("getwininfo", vec![], &mut ed, &mut env, &mut state);
         assert_eq!(llen(&info), 1);
         let window = lget(&info, 0);
         assert_eq!(dnum(&window, "tabnr"), 1);
         assert_eq!(dnum(&window, "winnr"), 1);
-        assert_eq!(dnum(&window, "winid"), WINID);
+        assert_eq!(dnum(&window, "winid"), current);
         assert_eq!(dnum(&window, "bufnr"), bufnr);
-        // Unknown display geometry is reported as -1, not as a plausible size.
+        // No layout pass yet: the size is unknown, the position is the default
+        // top-left corner and the gutter width is already known.
         assert_eq!(dnum(&window, "height"), -1);
         assert_eq!(dnum(&window, "width"), -1);
-        assert_eq!(dnum(&window, "textoff"), -1);
+        assert_eq!(dnum(&window, "winrow"), 1);
+        assert_eq!(dnum(&window, "wincol"), 1);
+        assert_eq!(dnum(&window, "textoff"), 0, "'number' is off");
         assert_eq!(dnum(&window, "topline"), 1);
         assert_eq!(dnum(&window, "botline"), 3);
+        assert_eq!(dnum(&window, "loclist"), 0);
+        assert_eq!(dnum(&window, "quickfix"), 0);
+        assert_eq!(dnum(&window, "terminal"), 0);
+        assert_eq!(dnum(&window, "winbar"), 0);
         assert!(matches!(dget(&window, "variables"), Value::Dict(_)));
+
+        // After a layout pass the real geometry is reported; 'height' includes
+        // the window's own status line, like vim's getwininfo().
+        ed.layout_windows(23, 80);
+        let info = run("getwininfo", vec![], &mut ed, &mut env, &mut state);
+        let window = lget(&info, 0);
+        // 'height' is the buffer area, like vim's get_win_info().
+        assert_eq!(dnum(&window, "height"), 22);
+        assert_eq!(dnum(&window, "width"), 80);
+        assert_eq!(
+            run("winheight", vec![num(1)], &mut ed, &mut env, &mut state).to_number(),
+            22
+        );
+        // 'number' adds the number gutter to textoff: one digit for a three line
+        // buffer plus the separating space.
+        ed.set_option("number", OptValue::Bool(true), SetScope::Local)
+            .unwrap();
+        let info = run("getwininfo", vec![], &mut ed, &mut env, &mut state);
+        assert_eq!(dnum(&lget(&info, 0), "textoff"), 2);
+
+        // getwininfo() takes a window ID (not a window number).
+        assert_eq!(
+            llen(&run(
+                "getwininfo",
+                vec![num(current)],
+                &mut ed,
+                &mut env,
+                &mut state
+            )),
+            1
+        );
         assert_eq!(
             llen(&run(
                 "getwininfo",
@@ -2093,16 +2819,6 @@ mod tests {
                 &mut state
             )),
             0
-        );
-        assert_eq!(
-            llen(&run(
-                "getwininfo",
-                vec![num(WINID)],
-                &mut ed,
-                &mut env,
-                &mut state
-            )),
-            1
         );
 
         // Window variables: current window, by number and by ID alike.
@@ -2117,28 +2833,19 @@ mod tests {
             .to_number(),
             0
         );
-        assert_eq!(
-            run(
-                "getwinvar",
-                vec![num(1), text("myvar")],
-                &mut ed,
-                &mut env,
-                &mut state
-            )
-            .to_number(),
-            42
-        );
-        assert_eq!(
-            run(
-                "getwinvar",
-                vec![num(0), text("myvar")],
-                &mut ed,
-                &mut env,
-                &mut state
-            )
-            .to_number(),
-            42
-        );
+        for reference in [num(1), num(0), num(current)] {
+            assert_eq!(
+                run(
+                    "getwinvar",
+                    vec![reference, text("myvar")],
+                    &mut ed,
+                    &mut env,
+                    &mut state
+                )
+                .to_number(),
+                42
+            );
+        }
         assert_eq!(
             run(
                 "getwinvar",
@@ -2231,6 +2938,10 @@ mod tests {
             &mut state,
         );
         assert!(matches!(dget(&options, "list"), Value::Number(_)));
+        assert!(
+            matches!(dget(&options, "number"), Value::Number(_)),
+            "every window-local option is reported"
+        );
     }
 
     #[test]
@@ -2247,6 +2958,7 @@ mod tests {
             run("getwinposy", vec![], &mut ed, &mut env, &mut state).to_number(),
             -1
         );
+        // Without a layout pass there is no screen geometry.
         assert_eq!(
             run("wincol", vec![], &mut ed, &mut env, &mut state).to_number(),
             -1
@@ -2263,17 +2975,70 @@ mod tests {
             run("winwidth", vec![num(1)], &mut ed, &mut env, &mut state).to_number(),
             -1
         );
+        assert_eq!(
+            run("winheight", vec![num(7)], &mut ed, &mut env, &mut state).to_number(),
+            -1,
+            "an invalid window has no size either"
+        );
         let screenpos = run("win_screenpos", vec![num(1)], &mut ed, &mut env, &mut state);
         assert_eq!(lget(&screenpos, 0).to_number(), 1);
         assert_eq!(lget(&screenpos, 1).to_number(), 1);
         let invalid = run("win_screenpos", vec![num(2)], &mut ed, &mut env, &mut state);
         assert_eq!(lget(&invalid, 0).to_number(), 0);
         assert_eq!(lget(&invalid, 1).to_number(), 0);
-        // No layout to restore or drag.
+
+        // One window is 22 text rows in a 23 row frame.
+        set_lines(&mut ed, &["\tabc", "\u{1}xy", "plain"]);
+        ed.layout_windows(23, 80);
         assert_eq!(
-            run("winrestcmd", vec![], &mut ed, &mut env, &mut state).to_string_value(),
-            ""
+            run("winheight", vec![num(1)], &mut ed, &mut env, &mut state).to_number(),
+            22
         );
+        assert_eq!(
+            run("winwidth", vec![num(1)], &mut ed, &mut env, &mut state).to_number(),
+            80
+        );
+        // winline()/wincol() are 1-based positions inside the window; a tab
+        // expands to 'tabstop' (8) and a control character takes two cells.
+        ed.set_cursor(Pos::new(0, 1));
+        assert_eq!(
+            run("winline", vec![], &mut ed, &mut env, &mut state).to_number(),
+            1
+        );
+        assert_eq!(
+            run("wincol", vec![], &mut ed, &mut env, &mut state).to_number(),
+            9,
+            "the cursor after a tab is in column 9"
+        );
+        ed.set_cursor(Pos::new(1, 1));
+        assert_eq!(
+            run("winline", vec![], &mut ed, &mut env, &mut state).to_number(),
+            2
+        );
+        assert_eq!(
+            run("wincol", vec![], &mut ed, &mut env, &mut state).to_number(),
+            3,
+            "one control character occupies two cells"
+        );
+        // The window's own viewport is taken into account.
+        ed.windows.current_mut().top_line = 1;
+        ed.windows.current_mut().left = 2;
+        assert_eq!(
+            run("winline", vec![], &mut ed, &mut env, &mut state).to_number(),
+            1
+        );
+        assert_eq!(
+            run("wincol", vec![], &mut ed, &mut env, &mut state).to_number(),
+            1
+        );
+        ed.windows.current_mut().top_line = 0;
+        ed.windows.current_mut().left = 0;
+
+        // winrestcmd() always produces the command that restores the sizes.
+        let command = run("winrestcmd", vec![], &mut ed, &mut env, &mut state).to_string_value();
+        assert_eq!(command, "1resize 20|");
+        // A single window has neither a vertical separator nor a status line to
+        // drag: vim's -1 for "this window cannot be moved".
         assert_eq!(
             run(
                 "win_move_separator",
@@ -2283,7 +3048,7 @@ mod tests {
                 &mut state
             )
             .to_number(),
-            0
+            -1
         );
         assert_eq!(
             run(
@@ -2294,29 +3059,49 @@ mod tests {
                 &mut state
             )
             .to_number(),
-            0
+            -1
         );
-        let error = run_err(
-            "win_splitmove",
-            vec![num(1), num(1)],
-            &mut ed,
-            &mut env,
-            &mut state,
+        // With one window both arguments can only name the same window, which
+        // is vim's E957.
+        assert_eq!(
+            run_err(
+                "win_splitmove",
+                vec![num(1), num(1)],
+                &mut ed,
+                &mut env,
+                &mut state
+            )
+            .code,
+            "E957"
         );
-        assert_eq!(error.code, "E957");
+        assert_eq!(
+            run_err(
+                "win_splitmove",
+                vec![num(1), num(7)],
+                &mut ed,
+                &mut env,
+                &mut state
+            )
+            .code,
+            "E957"
+        );
     }
 
     #[test]
     fn tab_info_and_variables() {
         let (mut ed, mut env, mut state) = setup();
         let bufnr = ed.current_bufnr() as i64;
+        let current = ed.current_win_id() as i64;
         let info = run("gettabinfo", vec![], &mut ed, &mut env, &mut state);
         assert_eq!(llen(&info), 1);
         let tab = lget(&info, 0);
         assert_eq!(dnum(&tab, "tabnr"), 1);
         let windows = dget(&tab, "windows");
-        assert_eq!(llen(&windows), 1);
-        assert_eq!(lget(&windows, 0).to_number(), WINID);
+        assert_eq!(llen(&windows), 1, "windows holds window dictionaries");
+        assert_eq!(dnum(&lget(&windows, 0), "winid"), current);
+        assert_eq!(dnum(&lget(&windows, 0), "winnr"), 1);
+        assert_eq!(dnum(&lget(&windows, 0), "bufnr"), bufnr);
+        assert_eq!(dnum(&tab, "winbar"), 0);
         assert!(matches!(dget(&tab, "variables"), Value::Dict(_)));
         assert_eq!(
             llen(&run(
@@ -2433,7 +3218,8 @@ mod tests {
             "E461"
         );
 
-        // gettabwinvar() reaches window variables of a window in a tab page.
+        // gettabwinvar()/settabwinvar() reach window variables of a window in a
+        // tab page.
         run(
             "setwinvar",
             vec![num(1), text("wv"), num(11)],
@@ -2462,6 +3248,47 @@ mod tests {
             )
             .to_string_value(),
             "d"
+        );
+        assert_eq!(
+            run(
+                "settabwinvar",
+                vec![num(1), num(1), text("wv"), num(12)],
+                &mut ed,
+                &mut env,
+                &mut state
+            )
+            .to_number(),
+            0
+        );
+        assert_eq!(
+            run(
+                "getwinvar",
+                vec![num(1), text("wv")],
+                &mut ed,
+                &mut env,
+                &mut state
+            )
+            .to_number(),
+            12
+        );
+        // An option of that window is reachable through gettabwinvar() as well.
+        run(
+            "settabwinvar",
+            vec![num(1), num(1), text("&list"), num(1)],
+            &mut ed,
+            &mut env,
+            &mut state,
+        );
+        assert_eq!(
+            run(
+                "gettabwinvar",
+                vec![num(1), num(1), text("&list")],
+                &mut ed,
+                &mut env,
+                &mut state
+            )
+            .to_number(),
+            1
         );
 
         let buflist = run("tabpagebuflist", vec![], &mut ed, &mut env, &mut state);
@@ -2523,7 +3350,8 @@ mod tests {
                 &mut state
             )
             .to_number(),
-            0
+            1,
+            "the only window is also the previously used one"
         );
         assert_eq!(
             run("tabpagewinnr", vec![num(7)], &mut ed, &mut env, &mut state).to_number(),
@@ -2546,6 +3374,7 @@ mod tests {
     fn window_identity_builtins() {
         let (mut ed, mut env, mut state) = setup();
         let bufnr = ed.current_bufnr() as i64;
+        let current = ed.current_win_id() as i64;
         assert_eq!(
             run("winbufnr", vec![num(0)], &mut ed, &mut env, &mut state).to_number(),
             bufnr
@@ -2555,16 +3384,28 @@ mod tests {
             bufnr
         );
         assert_eq!(
+            run(
+                "winbufnr",
+                vec![num(current)],
+                &mut ed,
+                &mut env,
+                &mut state
+            )
+            .to_number(),
+            bufnr,
+            "winbufnr() takes a window ID too"
+        );
+        assert_eq!(
             run("winbufnr", vec![num(2)], &mut ed, &mut env, &mut state).to_number(),
             -1
         );
         assert_eq!(
             run("win_getid", vec![], &mut ed, &mut env, &mut state).to_number(),
-            WINID
+            current
         );
         assert_eq!(
             run("win_getid", vec![num(1)], &mut ed, &mut env, &mut state).to_number(),
-            WINID
+            current
         );
         assert_eq!(
             run(
@@ -2575,7 +3416,7 @@ mod tests {
                 &mut state
             )
             .to_number(),
-            WINID
+            current
         );
         assert_eq!(
             run("win_getid", vec![num(2)], &mut ed, &mut env, &mut state).to_number(),
@@ -2590,7 +3431,8 @@ mod tests {
                 &mut state
             )
             .to_number(),
-            -1
+            -1,
+            "an unknown tab page is -1"
         );
         assert_eq!(
             run("win_gettype", vec![], &mut ed, &mut env, &mut state).to_string_value(),
@@ -2607,7 +3449,7 @@ mod tests {
         assert_eq!(
             run(
                 "win_gotoid",
-                vec![num(WINID)],
+                vec![num(current)],
                 &mut ed,
                 &mut env,
                 &mut state
@@ -2621,7 +3463,7 @@ mod tests {
         );
         let tabwin = run(
             "win_id2tabwin",
-            vec![num(WINID)],
+            vec![num(current)],
             &mut ed,
             &mut env,
             &mut state,
@@ -2640,7 +3482,7 @@ mod tests {
         assert_eq!(
             run(
                 "win_id2win",
-                vec![num(WINID)],
+                vec![num(current)],
                 &mut ed,
                 &mut env,
                 &mut state
@@ -2660,7 +3502,7 @@ mod tests {
             &mut state,
         );
         assert_eq!(llen(&found), 1);
-        assert_eq!(lget(&found, 0).to_number(), WINID);
+        assert_eq!(lget(&found, 0).to_number(), current);
         assert_eq!(
             llen(&run(
                 "win_findbuf",
@@ -2673,7 +3515,7 @@ mod tests {
         );
         let layout = run("winlayout", vec![], &mut ed, &mut env, &mut state);
         assert_eq!(lget(&layout, 0).to_string_value(), "leaf");
-        assert_eq!(lget(&layout, 1).to_number(), WINID);
+        assert_eq!(lget(&layout, 1).to_number(), current);
         assert_eq!(
             llen(&run(
                 "winlayout",
@@ -2687,12 +3529,643 @@ mod tests {
     }
 
     #[test]
-    fn win_execute_runs_commands_in_the_window() {
+    fn split_creates_a_second_window_with_real_geometry() {
         let (mut ed, mut env, mut state) = setup();
+        set_lines(&mut ed, &["one", "two", "three"]);
+        let first = ed.current_win_id();
+        run_ex(&mut ed, &mut env, &mut state, "split");
+        assert_eq!(ed.window_count(), 2);
+        let second = ed.current_win_id();
+        assert_ne!(second, first);
+        // The new window is created above the old one and becomes current.
+        let ids = ed.windows.ids();
+        assert_eq!(ids, vec![second, first]);
+        assert_eq!(
+            run(
+                "win_id2win",
+                vec![num(ids[0] as i64)],
+                &mut ed,
+                &mut env,
+                &mut state
+            )
+            .to_number(),
+            1
+        );
+        assert_eq!(
+            run(
+                "win_id2win",
+                vec![num(ids[1] as i64)],
+                &mut ed,
+                &mut env,
+                &mut state
+            )
+            .to_number(),
+            2
+        );
+        // Both windows are in getwininfo(), numbered 1 and 2.
+        let info = run("getwininfo", vec![], &mut ed, &mut env, &mut state);
+        assert_eq!(llen(&info), 2);
+        assert_eq!(dnum(&lget(&info, 0), "winnr"), 1);
+        assert_eq!(dnum(&lget(&info, 0), "winid"), ids[0] as i64);
+        assert_eq!(dnum(&lget(&info, 1), "winnr"), 2);
+        assert_eq!(dnum(&lget(&info, 1), "winid"), ids[1] as i64);
+        assert_eq!(
+            dnum(&lget(&info, 1), "bufnr"),
+            dnum(&lget(&info, 0), "bufnr")
+        );
+        // No layout yet: the sizes stay unknown.
+        assert_eq!(
+            run("winheight", vec![num(1)], &mut ed, &mut env, &mut state).to_number(),
+            -1
+        );
+        ed.layout_windows(23, 80);
+        let top = run("winheight", vec![num(1)], &mut ed, &mut env, &mut state).to_number();
+        let bottom = run("winheight", vec![num(2)], &mut ed, &mut env, &mut state).to_number();
+        assert!(top >= 1 && bottom >= 1, "both windows keep a text row");
+        assert_eq!(
+            top + bottom + 2,
+            23,
+            "two buffer areas plus two status lines fill 23 rows"
+        );
+        assert_eq!(
+            run(
+                "winheight",
+                vec![num(second as i64)],
+                &mut ed,
+                &mut env,
+                &mut state
+            )
+            .to_number(),
+            top,
+            "a window ID names the same window as its number"
+        );
+        assert_eq!(
+            run("winwidth", vec![num(1)], &mut ed, &mut env, &mut state).to_number(),
+            80
+        );
+        // The screen positions really differ now (and an ID names the same
+        // window as its number).
+        let top_pos = run("win_screenpos", vec![num(1)], &mut ed, &mut env, &mut state);
+        let by_id = run(
+            "win_screenpos",
+            vec![num(second as i64)],
+            &mut ed,
+            &mut env,
+            &mut state,
+        );
+        assert_eq!(lget(&by_id, 0).to_number(), lget(&top_pos, 0).to_number());
+        assert_eq!(lget(&by_id, 1).to_number(), lget(&top_pos, 1).to_number());
+        let bottom_pos = run("win_screenpos", vec![num(2)], &mut ed, &mut env, &mut state);
+        assert_eq!(lget(&top_pos, 0).to_number(), 1);
+        assert_eq!(lget(&top_pos, 1).to_number(), 1);
+        assert_eq!(
+            lget(&bottom_pos, 0).to_number(),
+            top + 2,
+            "the lower window starts after the upper status line"
+        );
+        assert_eq!(lget(&bottom_pos, 1).to_number(), 1);
+        // winlayout() is a real "col" of two leaves.
+        let layout = run("winlayout", vec![], &mut ed, &mut env, &mut state);
+        assert_eq!(lget(&layout, 0).to_string_value(), "col");
+        let children = lget(&layout, 1);
+        assert_eq!(llen(&children), 2);
+        assert_eq!(lget(&lget(&children, 0), 0).to_string_value(), "leaf");
+        assert_eq!(lget(&lget(&children, 0), 1).to_number(), ids[0] as i64);
+        assert_eq!(lget(&lget(&children, 1), 0).to_string_value(), "leaf");
+        assert_eq!(lget(&lget(&children, 1), 1).to_number(), ids[1] as i64);
+        // gettabinfo() nests the same dictionaries, and each window has a real
+        // botline of its own.
+        let info = run("gettabinfo", vec![], &mut ed, &mut env, &mut state);
+        let windows = dget(&lget(&info, 0), "windows");
+        assert_eq!(llen(&windows), 2);
+        assert_eq!(dnum(&lget(&windows, 1), "winid"), ids[1] as i64);
+        assert_eq!(dnum(&lget(&windows, 0), "botline"), 3);
+    }
+
+    #[test]
+    fn vertical_split_reports_a_row_layout() {
+        let (mut ed, mut env, mut state) = setup();
+        run_ex(&mut ed, &mut env, &mut state, "vsplit");
+        assert_eq!(ed.window_count(), 2);
+        let ids = ed.windows.ids();
+        ed.layout_windows(23, 80);
+        let left = run("winwidth", vec![num(1)], &mut ed, &mut env, &mut state).to_number();
+        let right = run("winwidth", vec![num(2)], &mut ed, &mut env, &mut state).to_number();
+        assert!(left >= 10 && right >= 10);
+        assert_eq!(left + right + 1, 80, "one separator column between them");
+        let layout = run("winlayout", vec![], &mut ed, &mut env, &mut state);
+        assert_eq!(lget(&layout, 0).to_string_value(), "row");
+        let children = lget(&layout, 1);
+        assert_eq!(llen(&children), 2);
+        assert_eq!(lget(&lget(&children, 1), 1).to_number(), ids[1] as i64);
+        let pos = run("win_screenpos", vec![num(2)], &mut ed, &mut env, &mut state);
+        assert_eq!(lget(&pos, 0).to_number(), 1);
+        assert_eq!(lget(&pos, 1).to_number(), left + 2);
+        // Both windows are as tall as the frame.
+        assert_eq!(
+            run("winheight", vec![num(1)], &mut ed, &mut env, &mut state).to_number(),
+            22
+        );
+    }
+
+    #[test]
+    fn win_splitmove_exchanges_the_two_windows() {
+        let (mut ed, mut env, mut state) = setup();
+        set_lines(&mut ed, &["one", "two", "three"]);
+        run_ex(&mut ed, &mut env, &mut state, "split");
+        let ids = ed.windows.ids();
+        let top = ids[0];
+        let bottom = ids[1];
+        // Give the current (upper) window its own buffer so the exchange shows.
+        let second_buffer = ed.new_buffer();
+        ed.switch_buffer(second_buffer).unwrap();
+        let first_buffer = ed.windows.get(bottom).unwrap().bufnr;
+        assert_ne!(first_buffer, second_buffer);
+        assert_eq!(
+            run(
+                "win_splitmove",
+                vec![num(top as i64), num(bottom as i64)],
+                &mut ed,
+                &mut env,
+                &mut state
+            )
+            .to_number(),
+            0
+        );
+        assert_eq!(
+            ed.windows.get(top).unwrap().bufnr,
+            first_buffer,
+            "the target's buffer moved into the source window"
+        );
+        assert_eq!(ed.windows.get(bottom).unwrap().bufnr, second_buffer);
+        assert_eq!(ed.window_count(), 2, "the frame tree is untouched");
+        // Both arguments naming the same window is vim's E957.
+        assert_eq!(
+            run_err(
+                "win_splitmove",
+                vec![num(top as i64), num(top as i64)],
+                &mut ed,
+                &mut env,
+                &mut state
+            )
+            .code,
+            "E957"
+        );
+    }
+
+    #[test]
+    fn window_variables_are_per_window() {
+        let (mut ed, mut env, mut state) = setup();
+        run_ex(&mut ed, &mut env, &mut state, "split");
+        let ids = ed.windows.ids();
+        let top = ids[0];
+        let bottom = ids[1];
+        assert_eq!(ed.current_win_id(), top, "the split window is current");
+        run(
+            "setwinvar",
+            vec![num(1), text("mine"), text("top")],
+            &mut ed,
+            &mut env,
+            &mut state,
+        );
+        run(
+            "setwinvar",
+            vec![num(2), text("mine"), text("bottom")],
+            &mut ed,
+            &mut env,
+            &mut state,
+        );
+        assert_eq!(
+            run(
+                "getwinvar",
+                vec![num(1), text("mine")],
+                &mut ed,
+                &mut env,
+                &mut state
+            )
+            .to_string_value(),
+            "top"
+        );
+        assert_eq!(
+            run(
+                "getwinvar",
+                vec![num(2), text("mine")],
+                &mut ed,
+                &mut env,
+                &mut state
+            )
+            .to_string_value(),
+            "bottom"
+        );
+        assert_eq!(
+            run(
+                "getwinvar",
+                vec![num(bottom as i64), text("mine")],
+                &mut ed,
+                &mut env,
+                &mut state
+            )
+            .to_string_value(),
+            "bottom",
+            "window IDs reach the same dictionary"
+        );
+        assert_eq!(
+            run(
+                "gettabwinvar",
+                vec![num(1), num(2), text("mine")],
+                &mut ed,
+                &mut env,
+                &mut state
+            )
+            .to_string_value(),
+            "bottom"
+        );
+        // getwininfo() reports each window's own w: dictionary.
+        let info = run("getwininfo", vec![], &mut ed, &mut env, &mut state);
+        assert_eq!(dstr(&dget(&lget(&info, 0), "variables"), "mine"), "top");
+        assert_eq!(dstr(&dget(&lget(&info, 1), "variables"), "mine"), "bottom");
+        // The w: scope inside VimL follows the window as well.
+        run(
+            "win_execute",
+            vec![num(bottom as i64), text("let g:seen = w:mine")],
+            &mut ed,
+            &mut env,
+            &mut state,
+        );
+        assert_eq!(
+            env.globals.get("seen").map(Value::to_string_value),
+            Some("bottom".to_string())
+        );
+        run(
+            "win_execute",
+            vec![num(top as i64), text("let g:seen = w:mine")],
+            &mut ed,
+            &mut env,
+            &mut state,
+        );
+        assert_eq!(
+            env.globals.get("seen").map(Value::to_string_value),
+            Some("top".to_string())
+        );
+    }
+
+    #[test]
+    fn win_gotoid_switches_the_current_window() {
+        let (mut ed, mut env, mut state) = setup();
+        run_ex(&mut ed, &mut env, &mut state, "split");
+        let ids = ed.windows.ids();
+        let top = ids[0];
+        let bottom = ids[1];
+        assert_eq!(ed.current_win_id(), top);
+        assert_eq!(
+            run(
+                "win_gotoid",
+                vec![num(bottom as i64)],
+                &mut ed,
+                &mut env,
+                &mut state
+            )
+            .to_number(),
+            1
+        );
+        assert_eq!(ed.current_win_id(), bottom);
+        assert_eq!(
+            run(
+                "win_id2win",
+                vec![num(bottom as i64)],
+                &mut ed,
+                &mut env,
+                &mut state
+            )
+            .to_number(),
+            2
+        );
+        let tabwin = run(
+            "win_id2tabwin",
+            vec![num(bottom as i64)],
+            &mut ed,
+            &mut env,
+            &mut state,
+        );
+        assert_eq!(lget(&tabwin, 0).to_number(), 1);
+        assert_eq!(lget(&tabwin, 1).to_number(), 2);
+        // A bogus id is reported as 0 and changes nothing.
+        assert_eq!(
+            run("win_gotoid", vec![num(4242)], &mut ed, &mut env, &mut state).to_number(),
+            0
+        );
+        assert_eq!(ed.current_win_id(), bottom);
+        // A window of another tab page has no number in the current one.
+        let tab_id = ed.new_tabpage(None).unwrap();
+        assert_eq!(tab_id, 2);
+        let other_win = ed.current_win_id();
+        ed.goto_tabpage(1).unwrap();
+        assert_eq!(
+            run(
+                "win_id2win",
+                vec![num(other_win as i64)],
+                &mut ed,
+                &mut env,
+                &mut state
+            )
+            .to_number(),
+            0
+        );
+        let tabwin = run(
+            "win_id2tabwin",
+            vec![num(other_win as i64)],
+            &mut ed,
+            &mut env,
+            &mut state,
+        );
+        assert_eq!(lget(&tabwin, 0).to_number(), 2);
+        assert_eq!(lget(&tabwin, 1).to_number(), 1);
+        assert_eq!(
+            run(
+                "win_getid",
+                vec![num(1), num(2)],
+                &mut ed,
+                &mut env,
+                &mut state
+            )
+            .to_number(),
+            other_win as i64
+        );
+    }
+
+    #[test]
+    fn win_execute_switches_windows_and_restores_them() {
+        let (mut ed, mut env, mut state) = setup();
+        run_ex(&mut ed, &mut env, &mut state, "split");
+        let ids = ed.windows.ids();
+        let top = ids[0];
+        let bottom = ids[1];
+        let previous = ed.current_win_id();
+        let other = if previous == top { bottom } else { top };
         assert_eq!(
             run(
                 "win_execute",
-                vec![num(WINID), text("let g:win_exec_a = 41")],
+                vec![num(other as i64), text("let g:exec_win = win_getid()")],
+                &mut ed,
+                &mut env,
+                &mut state
+            )
+            .to_string_value(),
+            ""
+        );
+        assert_eq!(
+            env.globals.get("exec_win").map(Value::to_number),
+            Some(other as i64),
+            "the command ran in the other window"
+        );
+        assert_eq!(ed.current_win_id(), previous, "the previous window is back");
+        // A failing command aborts the rest of the list and is reported.
+        let error = run_err(
+            "win_execute",
+            vec![
+                num(other as i64),
+                Value::list(vec![
+                    text("let g:exec_first = 1"),
+                    text("zzz_bogus_command"),
+                    text("let g:exec_after = 1"),
+                ]),
+            ],
+            &mut ed,
+            &mut env,
+            &mut state,
+        );
+        assert_eq!(error.code, "E492");
+        assert_eq!(env.globals.get("exec_first").map(Value::to_number), Some(1));
+        assert!(
+            !env.globals.contains_key("exec_after"),
+            "the commands after the failing one do not run"
+        );
+        assert_eq!(
+            ed.current_win_id(),
+            previous,
+            "the window is still restored"
+        );
+    }
+
+    #[test]
+    fn second_tabpage_is_visible_to_the_tab_builtins() {
+        let (mut ed, mut env, mut state) = setup();
+        // Record the current tab page before switching (tabpagenr('#')).
+        assert_eq!(
+            run("tabpagenr", vec![], &mut ed, &mut env, &mut state).to_number(),
+            1
+        );
+        let first_window = ed.current_win_id();
+        let first_buffer = ed.current_bufnr() as i64;
+        assert_eq!(ed.new_tabpage(None).ok(), Some(2));
+        assert_eq!(ed.tabpage_count(), 2);
+        let second_window = ed.current_win_id();
+        let second_buffer = ed.current_bufnr() as i64;
+        assert_ne!(second_window, first_window);
+        assert_eq!(
+            run("tabpagenr", vec![], &mut ed, &mut env, &mut state).to_number(),
+            2
+        );
+        assert_eq!(
+            run("tabpagenr", vec![text("$")], &mut ed, &mut env, &mut state).to_number(),
+            2
+        );
+        assert_eq!(
+            run("tabpagenr", vec![text("#")], &mut ed, &mut env, &mut state).to_number(),
+            1,
+            "the tab page used before the switch"
+        );
+        // gettabinfo() has one dictionary per tab page, each with its own
+        // window dictionaries.
+        let info = run("gettabinfo", vec![], &mut ed, &mut env, &mut state);
+        assert_eq!(llen(&info), 2);
+        let first = lget(&info, 0);
+        let second = lget(&info, 1);
+        assert_eq!(dnum(&first, "tabnr"), 1);
+        assert_eq!(dnum(&second, "tabnr"), 2);
+        for (tab, window) in [(&first, first_window), (&second, second_window)] {
+            let windows = dget(tab, "windows");
+            assert_eq!(llen(&windows), 1);
+            assert_eq!(dnum(&lget(&windows, 0), "winid"), window as i64);
+            assert_eq!(dnum(&lget(&windows, 0), "tabnr"), dnum(tab, "tabnr"));
+        }
+        assert_eq!(
+            dnum(&lget(&dget(&first, "windows"), 0), "bufnr"),
+            first_buffer
+        );
+        assert_eq!(
+            dnum(&lget(&dget(&second, "windows"), 0), "bufnr"),
+            second_buffer
+        );
+        assert_eq!(
+            run("tabpagewinnr", vec![num(2)], &mut ed, &mut env, &mut state).to_number(),
+            1
+        );
+        assert_eq!(
+            run(
+                "tabpagewinnr",
+                vec![num(1), text("$")],
+                &mut ed,
+                &mut env,
+                &mut state
+            )
+            .to_number(),
+            1
+        );
+        let buffers = run(
+            "tabpagebuflist",
+            vec![num(2)],
+            &mut ed,
+            &mut env,
+            &mut state,
+        );
+        assert_eq!(llen(&buffers), 1);
+        assert_eq!(lget(&buffers, 0).to_number(), second_buffer);
+        // A window ID only resolves inside its own tab page.
+        run(
+            "settabwinvar",
+            vec![num(2), num(second_window as i64), text("cross"), num(5)],
+            &mut ed,
+            &mut env,
+            &mut state,
+        );
+        assert_eq!(
+            run(
+                "gettabwinvar",
+                vec![num(2), num(second_window as i64), text("cross")],
+                &mut ed,
+                &mut env,
+                &mut state
+            )
+            .to_number(),
+            5
+        );
+        assert_eq!(
+            run(
+                "gettabwinvar",
+                vec![
+                    num(1),
+                    num(second_window as i64),
+                    text("cross"),
+                    text("none")
+                ],
+                &mut ed,
+                &mut env,
+                &mut state
+            )
+            .to_string_value(),
+            "none",
+            "the window belongs to the other tab page"
+        );
+        // win_findbuf() searches every tab page.
+        let found = run(
+            "win_findbuf",
+            vec![num(second_buffer)],
+            &mut ed,
+            &mut env,
+            &mut state,
+        );
+        assert_eq!(llen(&found), 1);
+        assert_eq!(lget(&found, 0).to_number(), second_window as i64);
+        // t: is per tab page.
+        run(
+            "settabvar",
+            vec![num(1), text("tv"), num(1)],
+            &mut ed,
+            &mut env,
+            &mut state,
+        );
+        run(
+            "settabvar",
+            vec![num(2), text("tv"), num(2)],
+            &mut ed,
+            &mut env,
+            &mut state,
+        );
+        assert_eq!(
+            run(
+                "gettabvar",
+                vec![num(1), text("tv")],
+                &mut ed,
+                &mut env,
+                &mut state
+            )
+            .to_number(),
+            1
+        );
+        assert_eq!(
+            run(
+                "gettabvar",
+                vec![num(2), text("tv")],
+                &mut ed,
+                &mut env,
+                &mut state
+            )
+            .to_number(),
+            2
+        );
+        let info = run("gettabinfo", vec![], &mut ed, &mut env, &mut state);
+        assert_eq!(dnum(&dget(&lget(&info, 0), "variables"), "tv"), 1);
+        assert_eq!(dnum(&dget(&lget(&info, 1), "variables"), "tv"), 2);
+        // getwininfo() covers every tab page as well.
+        let info = run("getwininfo", vec![], &mut ed, &mut env, &mut state);
+        assert_eq!(llen(&info), 2);
+        assert_eq!(dnum(&lget(&info, 1), "tabnr"), 2);
+        // win_execute() reaches a window of another tab page and comes back.
+        run(
+            "win_execute",
+            vec![
+                num(first_window as i64),
+                text("let g:tab_exec = tabpagenr()"),
+            ],
+            &mut ed,
+            &mut env,
+            &mut state,
+        );
+        assert_eq!(env.globals.get("tab_exec").map(Value::to_number), Some(1));
+        assert_eq!(
+            ed.windows.current_tab_index(),
+            1,
+            "the original tab page is current again"
+        );
+    }
+
+    #[test]
+    fn winrestcmd_reports_the_sizes_of_every_window() {
+        let (mut ed, mut env, mut state) = setup();
+        let command = run("winrestcmd", vec![], &mut ed, &mut env, &mut state).to_string_value();
+        let height = ed.windows.current().height;
+        assert_eq!(command, format!("1resize {height}|"));
+        run_ex(&mut ed, &mut env, &mut state, "split");
+        let ids = ed.windows.ids();
+        let command = run("winrestcmd", vec![], &mut ed, &mut env, &mut state).to_string_value();
+        let expected = format!(
+            "1resize {}|2resize {}|",
+            ed.windows.get(ids[0]).unwrap().height,
+            ed.windows.get(ids[1]).unwrap().height
+        );
+        assert_eq!(command, expected);
+        assert!(command.ends_with('|'));
+        // A vertical split also restores the widths.
+        run_ex(&mut ed, &mut env, &mut state, "vsplit");
+        let command = run("winrestcmd", vec![], &mut ed, &mut env, &mut state).to_string_value();
+        assert!(command.contains("vert 1resize "), "{command}");
+        assert_eq!(
+            command.matches("resize").count(),
+            6,
+            "three windows, each with a height and a width: {command}"
+        );
+        assert!(command.ends_with('|'));
+    }
+
+    #[test]
+    fn win_execute_runs_commands_in_the_window() {
+        let (mut ed, mut env, mut state) = setup();
+        let current = ed.current_win_id() as i64;
+        assert_eq!(
+            run(
+                "win_execute",
+                vec![num(current), text("let g:win_exec_a = 41")],
                 &mut ed,
                 &mut env,
                 &mut state
@@ -2707,7 +4180,7 @@ mod tests {
         run(
             "win_execute",
             vec![
-                num(WINID),
+                num(current),
                 Value::list(vec![
                     text("let g:win_exec_b = 1"),
                     text("let g:win_exec_c = 2"),
@@ -2722,7 +4195,7 @@ mod tests {
         // Unknown window IDs do not execute anything.
         run(
             "win_execute",
-            vec![num(99), text("let g:win_exec_d = 1")],
+            vec![num(4242), text("let g:win_exec_d = 1")],
             &mut ed,
             &mut env,
             &mut state,
@@ -2733,17 +4206,31 @@ mod tests {
     #[test]
     fn save_and_restore_view() {
         let (mut ed, mut env, mut state) = setup();
-        set_lines(&mut ed, &["alpha", "beta", "gamma"]);
+        set_lines(&mut ed, &["alpha", "beta", "gamma", "delta"]);
         ed.set_cursor(Pos::new(1, 2));
+        ed.windows.current_mut().top_line = 1;
         let view = run("winsaveview", vec![], &mut ed, &mut env, &mut state);
         assert_eq!(dnum(&view, "lnum"), 2);
         assert_eq!(dnum(&view, "col"), 2);
-        assert_eq!(dnum(&view, "topline"), 1);
+        assert_eq!(dnum(&view, "topline"), 2, "the window's own viewport");
         assert_eq!(dnum(&view, "leftcol"), 0);
         ed.set_cursor(Pos::new(0, 0));
+        ed.windows.current_mut().top_line = 0;
         run("winrestview", vec![view], &mut ed, &mut env, &mut state);
         assert_eq!(ed.cursor().line, 1);
         assert_eq!(ed.cursor().col, 2);
+        assert_eq!(
+            ed.windows.current().top_line,
+            1,
+            "winrestview() restores the viewport"
+        );
+        // Saved views are per window: a split window has none of its own yet.
+        let original = ed.current_win_id();
+        run_ex(&mut ed, &mut env, &mut state, "split");
+        let fresh = ed.current_win_id();
+        assert_ne!(fresh, original);
+        assert!(state.win.saved_views.contains_key(&original));
+        assert!(!state.win.saved_views.contains_key(&fresh));
         let error = run_err("winrestview", vec![num(1)], &mut ed, &mut env, &mut state);
         assert_eq!(error.code, "E474");
     }
@@ -3541,9 +5028,10 @@ mod tests {
     fn builtins_are_reachable_through_viml_expressions() {
         let mut ed = Editor::new();
         let mut ctx = crate::script::Ctx::new();
+        let current = ed.current_win_id() as i64;
         let value =
             crate::script::eval_expr(&mut ed, &mut ctx.env, &mut ctx.state, "win_getid()").unwrap();
-        assert_eq!(value.to_number(), WINID);
+        assert_eq!(value.to_number(), current);
         let value = crate::script::eval_expr(
             &mut ed,
             &mut ctx.env,
@@ -3551,7 +5039,7 @@ mod tests {
             "getwininfo()[0].winid",
         )
         .unwrap();
-        assert_eq!(value.to_number(), WINID);
+        assert_eq!(value.to_number(), current);
         let value =
             crate::script::eval_expr(&mut ed, &mut ctx.env, &mut ctx.state, "tabpagebuflist()")
                 .unwrap();

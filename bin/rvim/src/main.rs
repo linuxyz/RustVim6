@@ -28,7 +28,22 @@ enum QueuedCmd {
     Source(PathBuf),
 }
 
+/// How files beyond the first are opened (-o / -O).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SplitKind {
+    Horizontal,
+    Vertical,
+}
+
 struct Cli {
+    /// Vim's -d: open every file in its own window and diff them.
+    diff_mode: bool,
+    /// Vim's -p: open every file in its own tabpage.
+    tab_files: bool,
+    /// Vim's -o / -O.
+    split_files: Option<SplitKind>,
+    /// Vim's -i {viminfo}: the viminfo file to read and write.
+    viminfo: Option<PathBuf>,
     /// Ex mode (`-e`/`-E`), vim's `exmode_active`.
     exmode: bool,
     /// Silent Ex batch mode (`-es`): also reads commands from stdin.
@@ -55,6 +70,10 @@ struct Cli {
 
 fn parse_args(argv: &[String]) -> Result<Cli, String> {
     let mut cli = Cli {
+        diff_mode: false,
+        tab_files: false,
+        split_files: None,
+        viminfo: None,
         exmode: false,
         silent_ex: false,
         pre_commands: Vec::new(),
@@ -85,6 +104,17 @@ fn parse_args(argv: &[String]) -> Result<Cli, String> {
                 cli.silent_ex = true;
             }
             "-e" | "-E" => cli.exmode = true,
+            // -d opens every file in its own window and starts diff mode.
+            "-d" => cli.diff_mode = true,
+            // -p puts every file in its own tabpage.
+            "-p" => cli.tab_files = true,
+            "-o" => cli.split_files = Some(SplitKind::Horizontal),
+            "-O" => cli.split_files = Some(SplitKind::Vertical),
+            "-i" => {
+                let value = argv.get(i).ok_or("-i requires a file name")?;
+                cli.viminfo = Some(PathBuf::from(value));
+                i += 1;
+            }
             "-u" => {
                 i += 1;
                 let value = argv.get(i).ok_or("-u requires an argument")?;
@@ -200,6 +230,18 @@ fn print_help() {
     );
 }
 
+/// Persist marks/registers/history on exit when -i was given (viminfo.c).
+fn save_viminfo(session: &Session, path: &Option<PathBuf>) {
+    let Some(path) = path else {
+        return;
+    };
+    if let Err(e) =
+        rvim_ex::handlers_session::write_viminfo(&session.editor, &session.viml.state, path)
+    {
+        eprintln!("rvim: cannot write {}: {e}", path.display());
+    }
+}
+
 fn main() -> ExitCode {
     // VimL function calls recurse deeply (Vim's default 'maxfuncdepth' is 100)
     // and each interpreted call frame is large in a debug build. Run the whole
@@ -234,6 +276,43 @@ fn run() -> ExitCode {
             eprintln!("rvim: {e}");
             session.count_error();
         }
+    }
+
+    // -p / -o / -O / -d: the remaining files get their own tabpage, split
+    // window or diff window (main.c:2500-2560, diff.c ex_diffsplit).
+    if cli.files.len() > 1 {
+        for path in cli.files.iter().skip(1) {
+            let escaped = path.display().to_string().replace(' ', "\\ ");
+            // vimdiff (-d) lays the files out side by side like :vertical split.
+            let command = if cli.tab_files {
+                format!("tabedit {escaped}")
+            } else if cli.split_files == Some(SplitKind::Vertical) || cli.diff_mode {
+                format!("vsplit {escaped}")
+            } else {
+                format!("split {escaped}")
+            };
+            if let Err(e) = session.ex(&command) {
+                eprintln!("rvim: {e}");
+                session.count_error();
+            }
+        }
+    }
+    if cli.diff_mode {
+        // Every window of the first tabpage enters diff mode (vimdiff).
+        if let Err(e) = session.ex("windo diffthis") {
+            eprintln!("rvim: {e}");
+            session.count_error();
+        }
+    }
+
+    // -i {viminfo}: restore marks, registers and history (viminfo.c).
+    if let Some(path) = &cli.viminfo {
+        let path = path.clone();
+        let _ = rvim_ex::handlers_session::read_viminfo(
+            &mut session.editor,
+            &mut session.viml.state,
+            &path,
+        );
     }
 
     // MS-Windows: a single fully-qualified file argument means we were probably
@@ -348,6 +427,7 @@ fn run() -> ExitCode {
                 .run(&mut source, &mut out, size.cols, size.rows)
                 .unwrap_or(1);
             let _ = out.flush();
+            save_viminfo(&tui.session, &cli.viminfo);
             tui.session.sync_errors();
             let exit = if code != 0 {
                 code as u8
@@ -390,6 +470,7 @@ fn run() -> ExitCode {
     }
 
     session.sync_errors();
+    save_viminfo(&session, &cli.viminfo);
     ExitCode::from(final_exit_code(&session.report))
 }
 

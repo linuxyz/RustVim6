@@ -1,10 +1,9 @@
 //! Additional host builtins: argument-list access, character positions, manual
 //! folds, highlight-group metadata and Ex command-line queries.
 //!
-//! These are implemented against the current headless/single-window model:
-//! "no folds", "no command line being edited" and a single highlight-group
-//! registry. States that cannot be observed yet are reported as empty rather
-//! than invented.
+//! Folds are read from the real per-window store in rvim-editor (M5); the
+//! remaining builtins cover a single highlight-group registry and an empty
+//! "command line being edited" state, which cannot be observed headlessly yet.
 
 use rvim_core::{Pos, VimError, VimResult};
 use rvim_editor::Editor;
@@ -13,11 +12,9 @@ use rvim_viml::value::{Value, VimDict};
 
 use crate::script::ScriptState;
 
-/// State for this module: manual fold ranges (per buffer) and highlight groups.
+/// State for this module: highlight groups (folds live on the editor).
 #[derive(Debug, Default)]
 pub struct MoreState {
-    /// (bufnr, start_lnum, end_lnum, level, closed)
-    pub folds: Vec<(i64, i64, i64, i64, bool)>,
     /// Highlight groups: (name, id, properties).
     pub highlight_groups: Vec<(String, i64, VimDict)>,
 }
@@ -49,6 +46,10 @@ pub const FUNCS: &[&str] = &[
     "getcmdwintype",
     "getcompletion",
     "getcursorcharpos",
+    "getloclist",
+    "getqflist",
+    "setloclist",
+    "setqflist",
     "hlexists",
     "hlget",
     "hlID",
@@ -66,6 +67,21 @@ fn sarg(args: &[Value], i: usize) -> String {
 
 fn narg(args: &[Value], i: usize) -> i64 {
     arg(args, i).to_number()
+}
+
+/// The fold text of the closed fold that contains a zero-based line.
+fn fold_text_of(ed: &Editor, line: usize) -> String {
+    match ed.closed_fold_at(line) {
+        Some((start, end)) => {
+            let first = ed
+                .current_buffer()
+                .line_str(start)
+                .unwrap_or("")
+                .to_string();
+            ed.fold_text(&first, end - start + 1)
+        }
+        None => String::new(),
+    }
 }
 
 /// Dispatch a call; `None` when the name does not belong to this module.
@@ -89,6 +105,11 @@ fn dispatch(
     state: &mut ScriptState,
 ) -> VimResult<Value> {
     match name {
+        // ------------------------------------------- quickfix / location lists
+        "getqflist" => crate::handlers_qf::builtin_getqflist(ed, args, 0, None),
+        "setqflist" => crate::handlers_qf::builtin_setqflist(ed, args, 0, None),
+        "getloclist" => crate::handlers_qf::builtin_getqflist(ed, args, 1, None),
+        "setloclist" => crate::handlers_qf::builtin_setqflist(ed, args, 1, None),
         // -------------------------------------------------- argument list
         "argc" => Ok(Value::Number(ed.arglist.len() as i64)),
         "argidx" => Ok(Value::Number(ed.arg_index as i64)),
@@ -249,22 +270,20 @@ fn dispatch(
         }
 
         // ---------------------------------------------------------- folds
+        // Vim's fold functions work on line numbers (1-based); out-of-range
+        // lines report 0/-1/"" instead of an error (fold.c f_foldlevel etc.).
         "foldlevel" => {
             let lnum = if args.is_empty() {
                 ed.cursor().line as i64 + 1
             } else {
                 narg(args, 0)
             };
-            let bufnr = ed.current_bufnr() as i64;
-            let level = state
-                .more
-                .folds
-                .iter()
-                .filter(|(b, s, e, _, _)| *b == bufnr && (lnum >= *s && lnum <= *e))
-                .map(|(_, _, _, level, _)| *level)
-                .max()
-                .unwrap_or(0);
-            Ok(Value::Number(level))
+            let level = if lnum >= 1 && lnum as usize <= ed.line_count() {
+                ed.fold_level_at(lnum as usize - 1)
+            } else {
+                0
+            };
+            Ok(Value::Number(level as i64))
         }
         "foldclosed" | "foldclosedend" => {
             let lnum = if args.is_empty() {
@@ -272,24 +291,32 @@ fn dispatch(
             } else {
                 narg(args, 0)
             };
-            let bufnr = ed.current_bufnr() as i64;
-            let fold =
-                state.more.folds.iter().find(|(b, s, e, _, closed)| {
-                    *b == bufnr && *closed && lnum >= *s && lnum <= *e
-                });
+            let fold = if lnum >= 1 && lnum as usize <= ed.line_count() {
+                ed.closed_fold_at(lnum as usize - 1)
+            } else {
+                None
+            };
             Ok(Value::Number(match (name, fold) {
                 (_, None) => -1,
-                ("foldclosed", Some((_, s, _, _, _))) => *s,
-                ("foldclosedend", Some((_, _, e, _, _))) => *e,
+                ("foldclosed", Some((start, _))) => start as i64 + 1,
+                ("foldclosedend", Some((_, end))) => end as i64 + 1,
                 _ => -1,
             }))
         }
         "foldtext" => {
-            // Default fold text: the first line of the fold.
-            let line = ed.current_line();
-            Ok(Value::String(line))
+            // Only meaningful while a fold text is evaluated; the current
+            // line's closed fold stands in for v:foldstart/v:foldend here.
+            let line = ed.cursor().line;
+            Ok(Value::String(fold_text_of(ed, line)))
         }
-        "foldtextresult" => Ok(Value::String(String::new())),
+        "foldtextresult" => {
+            let lnum = narg(args, 0);
+            if lnum < 1 {
+                Ok(Value::String(String::new()))
+            } else {
+                Ok(Value::String(fold_text_of(ed, lnum as usize - 1)))
+            }
+        }
 
         // ------------------------------------------- Ex command line state
         // No command line is being edited in the headless model.
@@ -615,6 +642,126 @@ mod tests {
         assert_eq!(
             call_ok(
                 "foldclosedend",
+                &[Value::Number(1)],
+                &mut ed,
+                &mut env,
+                &mut st
+            )
+            .to_number(),
+            -1
+        );
+        assert_eq!(
+            call_ok(
+                "foldtextresult",
+                &[Value::Number(1)],
+                &mut ed,
+                &mut env,
+                &mut st
+            )
+            .to_string_value(),
+            ""
+        );
+        // Out-of-range lines report the documented "no fold" values.
+        assert_eq!(
+            call_ok(
+                "foldclosed",
+                &[Value::Number(99)],
+                &mut ed,
+                &mut env,
+                &mut st
+            )
+            .to_number(),
+            -1
+        );
+        assert_eq!(
+            call_ok(
+                "foldlevel",
+                &[Value::Number(99)],
+                &mut ed,
+                &mut env,
+                &mut st
+            )
+            .to_number(),
+            0
+        );
+    }
+
+    #[test]
+    fn folds_use_the_editor_store() {
+        let (mut ed, mut env, mut st) = state();
+        ed.replace_lines(0, 1, vec!["alpha".into(), "beta".into(), "gamma".into()])
+            .unwrap();
+        ed.add_fold(0, 2).unwrap();
+        assert_eq!(
+            call_ok("foldlevel", &[Value::Number(2)], &mut ed, &mut env, &mut st).to_number(),
+            1
+        );
+        assert_eq!(
+            call_ok(
+                "foldclosed",
+                &[Value::Number(1)],
+                &mut ed,
+                &mut env,
+                &mut st
+            )
+            .to_number(),
+            1
+        );
+        assert_eq!(
+            call_ok(
+                "foldclosedend",
+                &[Value::Number(1)],
+                &mut ed,
+                &mut env,
+                &mut st
+            )
+            .to_number(),
+            3
+        );
+        // A line inside the fold also reports it; a line after it does not.
+        assert_eq!(
+            call_ok(
+                "foldclosed",
+                &[Value::Number(3)],
+                &mut ed,
+                &mut env,
+                &mut st
+            )
+            .to_number(),
+            1
+        );
+        assert_eq!(
+            call_ok(
+                "foldclosed",
+                &[Value::Number(4)],
+                &mut ed,
+                &mut env,
+                &mut st
+            )
+            .to_number(),
+            -1
+        );
+        assert_eq!(
+            call_ok(
+                "foldtextresult",
+                &[Value::Number(1)],
+                &mut ed,
+                &mut env,
+                &mut st
+            )
+            .to_string_value(),
+            "+--  3 lines: alpha"
+        );
+        // foldtext() uses the cursor line's folded text.
+        ed.set_cursor(Pos::new(0, 0));
+        assert_eq!(
+            call_ok("foldtext", &[], &mut ed, &mut env, &mut st).to_string_value(),
+            "+--  3 lines: alpha"
+        );
+        ed.open_fold_at(0);
+        assert_eq!(
+            call_ok(
+                "foldclosed",
                 &[Value::Number(1)],
                 &mut ed,
                 &mut env,

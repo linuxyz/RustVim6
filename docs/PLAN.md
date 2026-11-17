@@ -133,14 +133,24 @@ M0 脚手架 ─► M1 Headless 编辑内核 ─► M2 Ex 命令体系 ─► M3
 
 ---
 
-## M5 — 窗口、标签页与高级编辑
+## M5 — 窗口、标签页与高级编辑（✅ 已完成）
 
-- 多窗口/tabpage：`split/vsplit/tabedit/wincmd`、窗口局部选项（`win` 作用域）、`win_execute`。
-- 折叠（manual/indent/marker/syntax/expr）、diff 模式（自研 xdiff 移植，对齐 `src/xdiff`）、sign、textprop、popup window、quickfix/location list。
-- 视觉块/选择模式、`gv`、文本对象全集、`.` 重复、复杂操作符（`gq/=/>`）、格式化（`textwidth/fo-table`）。
-- 标记/跳转列表/change list、`:jumps :changes`、viminfo（`viminfo` 文件格式兼容读写）。
+- ✅ **多窗口/tabpage**（`rvim-editor::window`）：`TabPage` + `Layout` frame 树（`Row` 并排 = `:vsplit`、`Col` 堆叠 = `:split`）、`Window` 携带光标/视口/窗口局部选项/矩形。命令：`:split :vsplit :sview :new :vnew :close :only :hide :resize :vertical :wincmd :tabnew :tabedit :tabclose :tabonly :tabnext :tabprevious :tabfirst :tablast :tabmove :tabs :windo :tabdo :bufdo :argdo`；键位 `<C-w>` 后接 `h j k l w W t b p c q o n s v x r H J K L = + - _ |`。
+- ✅ **窗口局部选项与 `win_execute()`**：`Options::WINDOW_LOCAL` 表 + `Window.local`；`:set` 写全局与当前窗口、`:setlocal` 只写窗口、`&opt` 读窗口值；`w:` 变量按窗口 id 分开存放。
+- ✅ **折叠**（`rvim-editor::fold`）：manual/indent/marker/diff 四种 `'foldmethod'`（`syntax/expr` 显式报告不支持），`zf zF zo zc za zR zM zd zE zj zk zO zC zv`、`:fold :foldopen :foldclose :folddoopen :folddoclosed`、`foldclosed() foldclosedend() foldlevel() foldtext() foldtextresult()`；TUI 把闭合折叠画成 `+-- N lines: text`，`'foldcolumn'` 画层级。
+- ✅ **diff 模式**（`rvim-diff` + `rvim-editor::diff`）：Myers 最短编辑脚本（对齐 `src/xdiff` 的变更块、滑动归并与 unified 输出），`:diffthis :diffoff :diffsplit :diffupdate :diffget :diffput`、filler 行对齐、变更行标记、`'foldmethod=diff'`、`]c`/`[c` 导航；`rvim -d a b` 即 `vimdiff` 工作流。
+- ✅ **quickfix/location list**（`rvim-ex::errorformat` + `rvim-editor::quickfix`）：`'errorformat'` 编译器（`%f %l %c %v %m %t %n %r %p %o %s`、`%*` skip、`%#` 量词、`%-G` 忽略、E372/E373/E374），`:copen :cclose :cnext :cprevious :cfirst :clast :cc :cwindow :cexpr :caddexpr :cgetexpr :cfile :cgetfile :clist :colder :cnewer` 与 `l*` 全族，`setqflist()/getqflist()/setloclist()/getloclist()`，quickfix 窗口。
+- ✅ **视觉模式与高级编辑**（`rvim-normal::visual`）：`v/V/<C-v>`、`o/O` 换端、`gv`、`d y c x s p P > < ~ u U J`、块选择的行列操作与块 `I/A`、`:'<,'>` 命令行前缀；**文本对象全集**（`rvim-normal::textobjects`，覆盖 `iw aw iW aW is as ip ap it at`、各类括号与引号对象）同时用于 `d/y/c` 与视觉模式；**`.` 重复**（`RepeatChange`：插入会话、操作符+动作、`x D C`、`p P`，带计数）。
+- ✅ **标记/跳转/change list 与 viminfo**：`:jumps :changes`、`<C-o>`/`<C-i>`、`g;`/`g,`、`:wviminfo/:rviminfo`、`'viminfo'` 与 `-i`。
+- ✅ **sign / textprop / popup API**：`sign_define/sign_place/sign_unplace/sign_jump/sign_getplaced/sign_placelist`、`prop_type_add/prop_add/prop_list/prop_remove/prop_clear`、`popup_create/popup_close/popup_list/popup_getpos/popup_move`（数据面完整，TUI 渲染 sign 列与 popup 覆盖层）。
 
-**出口标准**：`vimdiff` 等价工作流可用；`testdir` 窗口/折叠类用例通过率公开并持续提升。
+> **复核轮 4（M5）**：窗口几何与 `<C-w>` 邻居判定按 `window.c` 重写（垂直/水平重叠带允许相切）、`:vertical` 真正包裹后续命令、`windo/tabdo/bufdo/argdo` 在迭代中容错、tabline 仅在多标签时出现、每个窗口独立状态行（非活动窗口用 StatusLineNC）、折叠/视觉选区/块操作逐条对拍 `normal.c`/`fold.c`。回归用例见 `crates/rvim-app/tests/m5_windows.rs`、`m5_editing.rs`、`m5_folds.rs`、`m5_diff.rs`、`m5_quickfix.rs`。
+
+**出口标准进度**：
+1. **`vimdiff` 等价工作流**：✅ `rvim -d a b` 打开两个窗口并全部 `:diffthis`，filler 对齐、`]c`/`[c`、`:diffget`/`:diffput`、`zo`/`zR` 展开 diff 折叠可用（`m5_diff.rs`）。
+2. **窗口/折叠类用例通过率**：⚠️ 官方 `src/testdir` 依赖 `term_start`/GUI 与完整 `:normal` 键循环，本环境无法运行；改用等价自研用例统计并公开口径（各 `m5_*.rs` 的 `#[test]` 数量与 `scripts/smoke.ps1` 场景）。
+3. **量化口径（`cargo run -p rvim-tools -- coverage`）**：Ex 命令 **245/589（41.6%）**、options **78/429（18.2%）**、内置函数 **393/543（72.4%）**；M2 出口的用户语料对数桶加权仍为 **104/122（85.2%）**。TUI 特性用例 49 例（windows 21 / folds 9 / diff 6 / quickfix 7 / signs 6），crate 单测新增约 200 例（rvim-diff 18、fold 18、foldcmd 10、handlers_fold 9、errorformat 31、quickfix 17、handlers_qf 28、diff 16、handlers_diff 12、textobjects 21、viminfo 17、window 12、handlers_win 6、handlers_session 4），全仓 **962** 个测试。
+4. **已知未做**（登记 `docs/compat_deviations.md` \9）：自定义 `'foldtext'` 表达式、`foldmethod=expr/syntax`、`:diffpatch`、popup 的 filter/回调、textprop 的高亮渲染、viminfo 只读写 RustVim 建模的字段子集。
 
 ---
 

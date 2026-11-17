@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use rvim_core::{Pos, VimError, VimResult};
-use rvim_editor::Editor;
+use rvim_editor::{Editor, SetScope};
 
 use crate::parser::{ParsedEx, Range, parse_line};
 use crate::script::{Ctx, ScriptState};
@@ -102,6 +102,58 @@ impl_implemented![
     "exit",
     "file",
     "files",
+    "cNext",
+    "cabove",
+    "caddexpr",
+    "cbelow",
+    "cc",
+    "cclose",
+    "cexpr",
+    "cfile",
+    "cfirst",
+    "cgetexpr",
+    "cgetfile",
+    "clast",
+    "clist",
+    "cnewer",
+    "cnext",
+    "colder",
+    "copen",
+    "cprevious",
+    "crewind",
+    "cwindow",
+    "lNext",
+    "labove",
+    "laddexpr",
+    "lbelow",
+    "lclose",
+    "lexpr",
+    "lfile",
+    "lfirst",
+    "lgetexpr",
+    "lgetfile",
+    "ll",
+    "llast",
+    "llist",
+    "lnewer",
+    "lnext",
+    "lolder",
+    "lopen",
+    "lprevious",
+    "lrewind",
+    "lwindow",
+    "changes",
+    "diffget",
+    "diffoff",
+    "diffput",
+    "diffsplit",
+    "diffthis",
+    "diffupdate",
+    "fold",
+    "foldclose",
+    "folddoopen",
+    "folddoclosed",
+    "foldopen",
     "finish",
     "global",
     "help",
@@ -148,6 +200,7 @@ impl_implemented![
     "quitall",
     "read",
     "redo",
+    "rviminfo",
     "redraw",
     "registers",
     "retab",
@@ -178,6 +231,31 @@ impl_implemented![
     "vmapclear",
     "vnoremap",
     "vunmap",
+    "argdo",
+    "bufdo",
+    "close",
+    "hide",
+    "new",
+    "only",
+    "resize",
+    "split",
+    "sview",
+    "tabclose",
+    "tabdo",
+    "tabedit",
+    "tabfirst",
+    "tablast",
+    "tabmove",
+    "tabnew",
+    "tabnext",
+    "tabonly",
+    "tabprevious",
+    "tabs",
+    "vertical",
+    "vnew",
+    "vsplit",
+    "wincmd",
+    "windo",
     "wall",
     "wq",
     "wqall",
@@ -188,6 +266,8 @@ impl_implemented![
     "xnoremap",
     "xunmap",
     "yank",
+    "jumps",
+    "wviminfo",
 ];
 
 /// Outcome of running an Ex line, letting the front-end decide process exit.
@@ -473,6 +553,10 @@ pub fn run_command_ctx(
         ));
     }
 
+    // What the user typed, before the table lookup rewrites it to the
+    // canonical name (`:diff` resolves to `diffupdate`).
+    let typed_command = p.command.clone();
+
     // Handlers distinguish families by looking at `p.command` (`:v`/`:vglobal`
     // inversions, `:le`/`:left` alignment, `:ab`/`:abbreviate`, `:bf`/`:bfirst`),
     // so they must see the table's canonical name, not the typed abbreviation.
@@ -555,8 +639,54 @@ pub fn run_command_ctx(
             Ok(ExOutcome::Continue)
         }
         "set" | "setlocal" | "setglobal" => {
-            cmd_set(ed, &p.args)?;
+            let scope = match def.name {
+                "setlocal" => SetScope::Local,
+                "setglobal" => SetScope::Global,
+                _ => SetScope::All,
+            };
+            cmd_set(ed, &p.args, scope)?;
             Ok(ExOutcome::Continue)
+        }
+        // --- M5: windows and tabpages -----------------------------------
+        "split" | "vsplit" | "sview" | "new" | "vnew" => {
+            crate::handlers_win::cmd_splitview(ed, env, state, p, def.name)
+        }
+        "close" | "hide" => crate::handlers_win::cmd_close(ed, env, state, p, def.name),
+        "only" => crate::handlers_win::cmd_only(ed, env, state),
+        "resize" => crate::handlers_win::cmd_resize(ed, p),
+        "vertical" => crate::handlers_win::cmd_vertical(ed, env, state, p),
+        "wincmd" => crate::handlers_win::cmd_wincmd(ed, p),
+        "tabnew" | "tabedit" => crate::handlers_win::cmd_tabnew(ed, env, state, p, def.name),
+        "tabclose" | "tabonly" | "tabnext" | "tabprevious" | "tabfirst" | "tablast" | "tabmove" => {
+            crate::handlers_win::cmd_tab(ed, env, state, p, def.name)
+        }
+        "tabs" => crate::handlers_win::cmd_tabs(ed),
+        "windo" | "tabdo" | "bufdo" | "argdo" => {
+            crate::handlers_win::cmd_doall(ed, env, state, p, def.name)
+        }
+        // --- M5: quickfix / location lists ----------------------------------
+        "copen" | "cclose" | "cnext" | "cprevious" | "cNext" | "cfirst" | "clast" | "cc"
+        | "crewind" | "cwindow" | "cbelow" | "cabove" | "cexpr" | "caddexpr" | "cgetexpr"
+        | "cfile" | "cgetfile" | "clist" | "colder" | "cnewer" | "lopen" | "lclose" | "lnext"
+        | "lprevious" | "lNext" | "lfirst" | "llast" | "ll" | "lrewind" | "lwindow" | "lexpr"
+        | "laddexpr" | "lgetexpr" | "lfile" | "lgetfile" | "llist" | "lolder" | "lnewer"
+        | "lbelow" | "labove" => crate::handlers_qf::cmd_quickfix(ed, env, state, p, def.name),
+        // --- M5: session (jumps, changes, viminfo) --------------------------
+        "jumps" | "changes" | "rviminfo" | "wviminfo" => {
+            crate::handlers_session::cmd_session(ed, env, state, p, def.name)
+        }
+        // --- M5: diff mode -------------------------------------------------
+        "diffthis" | "diffoff" | "diffsplit" | "diffupdate" | "diffget" | "diffput" => {
+            let name = if typed_command == "diff" {
+                "diff"
+            } else {
+                def.name
+            };
+            crate::handlers_diff::cmd_diff(ed, env, state, p, name)
+        }
+        // --- M5: folds ----------------------------------------------------
+        "fold" | "foldopen" | "foldclose" | "folddoopen" | "folddoclosed" => {
+            crate::handlers_fold::cmd_fold(ed, env, state, p, def.name)
         }
         "nohlsearch" => {
             ed.search_pattern.clear();
@@ -1595,7 +1725,7 @@ fn cmd_put(
     Ok(ExOutcome::Continue)
 }
 
-fn cmd_set(ed: &mut Editor, args: &str) -> VimResult<()> {
+fn cmd_set(ed: &mut Editor, args: &str, scope: SetScope) -> VimResult<()> {
     if args.is_empty() {
         for line in ed.options.render_all() {
             ed.messages.info(line);
@@ -1617,46 +1747,61 @@ fn cmd_set(ed: &mut Editor, args: &str) -> VimResult<()> {
             continue;
         }
         if let Some(name) = token.strip_suffix('?') {
-            ed.messages.info(ed.options.render_one(name)?);
+            // ":set opt?" reports the value in effect, i.e. the window-local
+            // one for a P_WIN option (option.c showoneopt/do_set).
+            ed.messages.info(render_option(ed, name)?);
         } else if let Some(name) = token
             .strip_suffix("&vim")
             .or_else(|| token.strip_suffix("&vi"))
         {
             // ":set opt&vim" resets to the Vim default.
             ed.options.reset_default(name)?;
+            ed.reset_local_option(name)?;
             if rvim_editor::Options::canonical(name)? == "fileformat" {
                 sync_buffer_fileformat(ed);
             }
         } else if let Some(name) = token.strip_suffix('&') {
             ed.options.reset_default(name)?;
+            ed.reset_local_option(name)?;
             if rvim_editor::Options::canonical(name)? == "fileformat" {
                 sync_buffer_fileformat(ed);
             }
         } else if let Some((name, op, value)) = split_set_compound(token) {
-            apply_set_compound(ed, name, op, value)?;
+            apply_set_compound(ed, name, op, value, scope)?;
         } else if let Some((name, value)) = token.split_once('=') {
-            if let Ok(n) = value.parse::<i64>() {
-                ed.options.set(name, rvim_editor::OptValue::Num(n))?;
+            let resolved = if let Ok(n) = value.parse::<i64>() {
+                rvim_editor::OptValue::Num(n)
             } else {
-                ed.options
-                    .set(name, rvim_editor::OptValue::Str(value.to_string()))?;
-            }
+                rvim_editor::OptValue::Str(value.to_string())
+            };
+            ed.set_option(name, resolved, scope)?;
             if rvim_editor::Options::canonical(name)? == "fileformat" {
                 sync_buffer_fileformat(ed);
             }
         } else if let Some(name) = token.strip_prefix("inv") {
             // ":set inv{option}" toggles a boolean option (option.c).
             let canon = rvim_editor::Options::canonical(name)?;
-            let current = ed.options.bool_or(&canon, false);
-            ed.options
-                .set(&canon, rvim_editor::OptValue::Bool(!current))?;
+            let current = ed.bool_option(&canon, false);
+            ed.set_option(&canon, rvim_editor::OptValue::Bool(!current), scope)?;
         } else if let Some(name) = token.strip_prefix("no") {
-            ed.options.set(name, rvim_editor::OptValue::Bool(false))?;
+            ed.set_option(name, rvim_editor::OptValue::Bool(false), scope)?;
         } else {
-            ed.options.set(token, rvim_editor::OptValue::Bool(true))?;
+            ed.set_option(token, rvim_editor::OptValue::Bool(true), scope)?;
         }
     }
     Ok(())
+}
+
+/// Render one option as `:set opt?` prints it, using the value in effect.
+fn render_option(ed: &Editor, name: &str) -> VimResult<String> {
+    let canon = rvim_editor::Options::canonical(name)?;
+    let value = ed.wopt(&canon)?;
+    Ok(match value {
+        rvim_editor::OptValue::Bool(true) => canon,
+        rvim_editor::OptValue::Bool(false) => format!("no{canon}"),
+        rvim_editor::OptValue::Num(n) => format!("{canon}={n}"),
+        rvim_editor::OptValue::Str(s) => format!("{canon}={s:?}"),
+    })
 }
 
 /// Push the global `'fileformat'` option onto the current buffer, whose own
@@ -1723,9 +1868,15 @@ fn split_set_compound(token: &str) -> Option<(&str, &str, &str)> {
 }
 
 /// Apply a compound `:set` operation to a string or number option.
-fn apply_set_compound(ed: &mut Editor, name: &str, op: &str, value: &str) -> VimResult<()> {
+fn apply_set_compound(
+    ed: &mut Editor,
+    name: &str,
+    op: &str,
+    value: &str,
+    scope: SetScope,
+) -> VimResult<()> {
     let canon = rvim_editor::Options::canonical(name)?;
-    match ed.options.get(&canon)?.clone() {
+    match ed.wopt(&canon)? {
         rvim_editor::OptValue::Str(current) => {
             let mut items: Vec<String> = current
                 .split(',')
@@ -1752,8 +1903,7 @@ fn apply_set_compound(ed: &mut Editor, name: &str, op: &str, value: &str) -> Vim
                 }
                 _ => {}
             }
-            ed.options
-                .set(&canon, rvim_editor::OptValue::Str(items.join(",")))?;
+            ed.set_option(&canon, rvim_editor::OptValue::Str(items.join(",")), scope)?;
             Ok(())
         }
         rvim_editor::OptValue::Num(current) => {
@@ -1766,7 +1916,7 @@ fn apply_set_compound(ed: &mut Editor, name: &str, op: &str, value: &str) -> Vim
                 "^=" => current * delta,
                 _ => current,
             };
-            ed.options.set(&canon, rvim_editor::OptValue::Num(next))?;
+            ed.set_option(&canon, rvim_editor::OptValue::Num(next), scope)?;
             Ok(())
         }
         rvim_editor::OptValue::Bool(_) => Err(VimError::invalid_argument(&format!(
