@@ -1,0 +1,34 @@
+# RustVim workspace — Vim rewrite in Rust (reference: vim/vim v8.2.5172)
+# Hard constraint: std-only, zero third-party dependencies, offline-buildable.
+[workspace]
+resolver = "2"
+members = [
+    "bin/rvim",
+    "crates/rvim-core",
+    "crates/rvim-buffer",
+    "crates/rvim-undo",
+    "crates/rvim-editor",
+    "crates/rvim-ex",
+    "crates/rvim-normal",
+    "crates/rvim-cmdline",
+    "crates/rvim-viml",
+    "crates/rvim-termio",
+    "crates/rvim-term",
+    "crates/rvim-app",
+    "crates/rvim-tools",
+]
+
+[workspace.package]
+version = "0.1.0-M4"
+edition = "2024"
+rust-version = "1.85"
+license = "Vim"
+description = "A Vim-compatible editor written in Rust (headless-first, std-only)"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

@@ -1,0 +1,15 @@
+[package]
+name = "rvim-cmdline"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rvim-core = { path = "../rvim-core" }
+rvim-editor = { path = "../rvim-editor" }
+rvim-ex = { path = "../rvim-ex" }

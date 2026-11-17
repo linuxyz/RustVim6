@@ -1,0 +1,21 @@
+[package]
+name = "rvim"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "RustVim executable (Vim-compatible, std-only)"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "rvim"
+path = "src/main.rs"
+
+[dependencies]
+rvim-app = { path = "../../crates/rvim-app" }
+rvim-editor = { path = "../../crates/rvim-editor" }
+rvim-ex = { path = "../../crates/rvim-ex" }
+rvim-term = { path = "../../crates/rvim-term" }
+rvim-termio = { path = "../../crates/rvim-termio" }

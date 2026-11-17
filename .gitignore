@@ -1,0 +1,17 @@
+/target
+**/*.rs.bk
+*.pdb
+.vscode/
+.idea/
+.tmp_net/
+# scratch + local verification artifacts
+.tmp_rev/
+.tmp_diff/
+.tmp_*.txt
+OUTPATH*
+_.sw?
+*.swp
+*.swo
+# vendored Vim baseline (src + runtime, ~57 MB): not versioned.
+# Reproduce with scripts/fetch-reference.ps1 (pinned tag, see docs/ARCH.md §8).
+/reference/

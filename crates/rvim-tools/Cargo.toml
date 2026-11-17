@@ -1,0 +1,15 @@
+[package]
+name = "rvim-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rvim-ex = { path = "../rvim-ex" }
+rvim-editor = { path = "../rvim-editor" }
+rvim-viml = { path = "../rvim-viml" }

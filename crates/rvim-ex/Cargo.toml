@@ -1,0 +1,16 @@
+[package]
+name = "rvim-ex"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rvim-core = { path = "../rvim-core" }
+rvim-buffer = { path = "../rvim-buffer" }
+rvim-editor = { path = "../rvim-editor" }
+rvim-viml = { path = "../rvim-viml" }
