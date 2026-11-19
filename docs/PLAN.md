@@ -142,6 +142,7 @@ M0 脚手架 ─► M1 Headless 编辑内核 ─► M2 Ex 命令体系 ─► M3
 - ✅ **diff 模式**（`rvim-diff` + `rvim-editor::diff`）：Myers 最短编辑脚本（对齐 `src/xdiff` 的变更块、滑动归并与 unified 输出），`:diffthis :diffoff :diffsplit :diffupdate :diffget :diffput`、filler 行对齐、变更行标记、`'foldmethod=diff'`、`]c`/`[c` 导航；`rvim -d a b` 即 `vimdiff` 工作流。
 - ✅ **quickfix/location list**（`rvim-ex::errorformat` + `rvim-editor::quickfix`）：`'errorformat'` 编译器（`%f %l %c %v %m %t %n %r %p %o %s`、`%*` skip、`%#` 量词、`%-G` 忽略、E372/E373/E374），`:copen :cclose :cnext :cprevious :cfirst :clast :cc :cwindow :cexpr :caddexpr :cgetexpr :cfile :cgetfile :clist :colder :cnewer` 与 `l*` 全族，`setqflist()/getqflist()/setloclist()/getloclist()`，quickfix 窗口。
 - ✅ **视觉模式与高级编辑**（`rvim-normal::visual`）：`v/V/<C-v>`、`o/O` 换端、`gv`、`d y c x s p P > < ~ u U J`、块选择的行列操作与块 `I/A`（`I` 跳过短行、`A` 补齐到块右边界，整段一个 undo 步）、视觉模式计数（`3I`/`v3j`）、`:'<,'>` 命令行前缀；**文本对象全集**（`rvim-normal::textobjects`，覆盖 `iw aw iW aW is as ip ap it at`、各类括号与引号对象）同时用于 `d/y/c` 与视觉模式；**`.` 重复**（`RepeatChange`：插入会话、操作符+动作、`x D C`、`p P`，带计数）。
+- ✅ **数字增减**（`rvim-normal::addsub`）：`<C-a>`/`<C-x>` 按 `ops.c do_addsub()` 实现，支持十进制/十六进制/二进制/八进制（`'nrformats'`）、负号、前导零宽度、大小写、计数、`.` 重复与单步 undo。
 - ✅ **标记/跳转/change list 与 viminfo**：`:jumps :changes`、`<C-o>`/`<C-i>`、`g;`/`g,`、`:wviminfo/:rviminfo`、`'viminfo'` 与 `-i`。
 - ✅ **sign / textprop / popup API**：`sign_define/sign_place/sign_unplace/sign_jump/sign_getplaced/sign_placelist`、`prop_type_add/prop_add/prop_list/prop_remove/prop_clear`、`popup_create/popup_close/popup_list/popup_getpos/popup_move`（数据面完整，TUI 渲染 sign 列与 popup 覆盖层）。
 

@@ -4,6 +4,7 @@
 //! prefix, motions, operators and insert-mode entry. The TUI (M4) will feed raw
 //! key codes into the same engine; everything here is UI-free and deterministic.
 
+pub mod addsub;
 pub mod foldcmd;
 pub mod insert;
 pub mod motions;
@@ -153,6 +154,14 @@ impl NormalEngine {
             'x' => {
                 operators::delete_char(ed, count, reg)?;
                 ed.last_change = Some(RepeatChange::Simple { key: 'x', count });
+            }
+            // CTRL-A / CTRL-X: add to or subtract from the number under the
+            // cursor (normal.c nv_addsub -> ops.c do_addsub).
+            '\u{1}' | '\u{18}' => {
+                let add = key == '\u{1}';
+                if addsub::addsub(ed, add, count)? {
+                    ed.last_change = Some(RepeatChange::Simple { key, count });
+                }
             }
             // "." repeats the last change (normal.c nv_dot).
             '.' => self.repeat_last_change(ed, count)?,
@@ -461,6 +470,11 @@ impl NormalEngine {
                     }
                 }
                 RepeatChange::Simple { key, count } => match key {
+                    '\u{1}' | '\u{18}' => {
+                        if addsub::addsub(ed, key == '\u{1}', count)? {
+                            ed.last_change = Some(RepeatChange::Simple { key, count });
+                        }
+                    }
                     'x' => {
                         operators::delete_char(ed, count, None)?;
                         ed.last_change = Some(RepeatChange::Simple { key, count });

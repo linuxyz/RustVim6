@@ -150,7 +150,7 @@
 | `:!` 外部命令显示 | 命令输出 + `Press ENTER` 提示 | ⚠️ 输出直接写终端后重绘，无 hit-enter | M5 |
 | 插入模式的 `<C-w>`/`<C-u>`/`<C-r>`/`<C-a>` | 删前一词、删到行首、插入寄存器、重新插入上次文本 | ❌ 未绑定（`<Esc>`/`<CR>`/`<BS>`/`<Del>`/方向键已接） | M5 |
 | `'autoindent'`/`'smartindent'` 换行缩进 | 插入模式 `<CR>` 继承当前缩进 | ❌ 换行后从第 1 列开始 | M5 |
-| `<C-a>`/`<C-x>` 数字增减 | 光标下（或下一个）数字 +1/-1，支持计数与 `nrformats` | ❌ 未实现（normal 引擎无该项） | M5 |
+| `<C-a>`/`<C-x>` 数字增减 | 光标下（或下一个）数字 +1/-1，支持计数与 `nrformats` | ✅ M5 已实现（`rvim-normal::addsub`，见 §9）；仅未做视觉模式 `g<C-a>` 与 64 位回绕 | — |
 | 长消息软折行 | 超过窗口宽度的消息折行显示并分页 | ⚠️ 单行内截断，`-- More --` 只按消息条数分页 | M5 |
 | `'termguicolors'` / 语法高亮颜色 | 真彩 + 高亮组 | ⚠️ 颜色模型支持 256/真彩，但无高亮组（等 syntax） | M6 |
 | 三端人工验证 | kitty / Windows Terminal / conhost | ⚠️ 本环境无交互终端，仅以 `--script` 逐帧验证；三端肉眼验证待人工执行 | 收口时 |
@@ -291,6 +291,7 @@
 
 | 主题 | 问题 | 修正 |
 |---|---|---|
+| `<C-a>`/`<C-x>` 数字增减 | 未实现（normal 引擎没有这两个键，插入模式下 ``C-a`` 也未绑定） | `rvim-normal::addsub` 按 `ops.c do_addsub()`/`normal.c nv_addsub()` 实现：十进制/`0x` 十六进制/`0b` 二进制/`0` 八进制（受 `'nrformats'` 控制，默认 `bin,hex`）、`-` 号属于数字、前导零保持宽度、十六进制保持大小写、光标不在数字上时取行内下一个数字、`alpha`/`unsigned` 选项、计数与 `.` 重复、一次 undo 一步；TUI 把 `<C-a>`/`<C-x>` 交给引擎。回归用例 13 条（`addsub` 9 + `m4_tui` 4）。**未做**：视觉模式 `g<C-a>` 顺序编号、超过 64 位时的回绕（改为截断） |
 | `'showcmd'` | 没有实现：`set showcmd` 后光标行右侧不显示未完成的命令，而且 `'showcmd'` 的默认值是 off（vim 在 nocompatible 下默认 on，`optiondefs.h` 无 `P_VI_DEF` → `VIM_DEFAULT`） | 默认改为 on；TUI 在命令行行右端按 `normal.c display_showcmd()` 画出 10 列字段（`Columns-(SHOWCMD_COLS+1)` 起，超长取尾部）：计数（`2d`/`d2`）、操作符与文本对象前缀（`di`）、`g`/`z`/`]`/`[`/`<C-w>`（显示为 `^W`）、寄存器前缀（`"a`/`"ad`）、视觉模式选区大小（字符数/行数/`行x列`）；命令行编辑时让位给 `:` 提示符。回归用例 5 条（`m4_tui.rs`） |
 | 列选模式 `I`/`A` 无效 | TUI 的视觉模式分发里没有 `I`/`A` 分支（落到“动作”分支后什么都不做，随后 `x` 又把选区删掉）；即使进入插入模式也没有记录块，`<Esc>` 后不会把文本复制到块内其它行 | 视觉模式分发 `I`/`A`（仅 `VIsualBlock`）；`Editor` 新增 `BlockInsert`，`finish_insert` 在插入会话结束时按 `ops.c block_insert()` 把文本复制到块内其余行（`I` 跳过短行、`A` 先补空格到块右边界），整段仍是**一个** undo 步；视觉模式新增计数（`3I`、`v3j`）。回归用例 8 条（`m5_windows.rs`） |
 | 插入模式 `<CR>` 丢换行 | ① `Buffer::insert_text` 复用 `split_lines` 的**文件**约定（尾部换行不产生新行），所以行尾 `<CR>` 不分行、光标被钳回行首；② TUI 自己用 `replace_lines` 处理 `<CR>`，没有记入插入会话，导致 `3i%<CR><Esc>` 与 `.` 重复时换行被吞掉（只剩 `%`） | `insert_text` 在合并文本以换行结尾时补回空行（`edit.c ins_eol` 语义），`<CR>` 统一走 `insert::type_char('\n')` 记入插入会话；新增 `1000i%<CR><Esc>`、`3i%<CR>`、`. ` 重复换行与 `insert_text` 行尾换行的回归用例 |

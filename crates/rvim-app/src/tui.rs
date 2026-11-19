@@ -425,6 +425,9 @@ impl Tui {
                 }
                 // <C-v> starts a blockwise selection.
                 "C-V" => rvim_normal::visual::start(self.editor(), Mode::VisualBlock).map(|_| true),
+                // <C-a>/<C-x> increment/decrement the number under the cursor.
+                "C-A" => engine.feed(self.editor(), '\u{1}'),
+                "C-X" => engine.feed(self.editor(), '\u{18}'),
                 // <PageDown>/<C-f> and <PageUp>/<C-b> scroll one screen and keep
                 // the cursor in the same screen row (normal.c nv_page).
                 "PAGEDOWN" | "C-F" => {

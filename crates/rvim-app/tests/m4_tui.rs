@@ -911,3 +911,57 @@ fn showcmd_is_hidden_while_the_command_line_is_open() {
     let rows = screen(&mut tui, ":", 40, 5);
     assert_eq!(rows[4].trim_end(), ":", "the command line takes the row");
 }
+
+// ------------------------------------------------------- CTRL-A / CTRL-X
+
+fn line_text(tui: &Tui) -> String {
+    tui.session.editor.current_buffer().full_text()
+}
+
+#[test]
+fn ctrl_a_increments_and_ctrl_x_decrements_the_number() {
+    let mut tui = Tui::new(open(&["value 41"]));
+    screen(&mut tui, "<C-a>", 30, 5);
+    assert_eq!(line_text(&tui), "value 42");
+    screen(&mut tui, "3<C-a>", 30, 5);
+    assert_eq!(line_text(&tui), "value 45");
+    screen(&mut tui, "2<C-x>", 30, 5);
+    assert_eq!(line_text(&tui), "value 43");
+}
+
+#[test]
+fn ctrl_x_crosses_zero_into_a_negative_number() {
+    let mut tui = Tui::new(open(&["0"]));
+    screen(&mut tui, "<C-x>", 30, 5);
+    assert_eq!(line_text(&tui), "-1");
+    screen(&mut tui, "<C-a><C-a>", 30, 5);
+    assert_eq!(line_text(&tui), "1");
+}
+
+#[test]
+fn ctrl_a_keeps_the_number_format() {
+    let mut tui = Tui::new(open(&["0x1f"]));
+    screen(&mut tui, "<C-a>", 30, 5);
+    assert_eq!(line_text(&tui), "0x20");
+
+    let mut tui = Tui::new(open(&["0b101"]));
+    screen(&mut tui, "<C-a>", 30, 5);
+    assert_eq!(line_text(&tui), "0b110");
+
+    let mut tui = Tui::new(open(&["007"]));
+    screen(&mut tui, "<C-a>", 30, 5);
+    assert_eq!(
+        line_text(&tui),
+        "008",
+        "a zero padded number keeps its width"
+    );
+}
+
+#[test]
+fn ctrl_a_repeats_with_dot_and_undoes_in_one_step() {
+    let mut tui = Tui::new(open(&["41"]));
+    screen(&mut tui, "3<C-a>.", 30, 5);
+    assert_eq!(line_text(&tui), "47", "the repeat adds another 3");
+    screen(&mut tui, "u", 30, 5);
+    assert_eq!(line_text(&tui), "44", "one undo step per increment");
+}
