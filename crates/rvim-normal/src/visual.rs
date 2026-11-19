@@ -16,6 +16,7 @@ use crate::textobjects::{self, Which};
 
 /// Start visual mode with the given flavour, anchoring at the cursor.
 pub fn start(ed: &mut Editor, mode: Mode) -> VimResult<()> {
+    ed.block_insert = None;
     let pos = ed.cursor();
     ed.visual = Some(VisualState { mode, anchor: pos });
     ed.mode = mode;
@@ -24,6 +25,10 @@ pub fn start(ed: &mut Editor, mode: Mode) -> VimResult<()> {
 
 /// Leave visual mode: record `'<`/`'>` and restore Normal (normal.c end_visual_mode).
 pub fn stop(ed: &mut Editor) {
+    // Leaving visual mode cancels a block insert that never reached insert mode.
+    if !ed.mode.is_insert_like() {
+        ed.block_insert = None;
+    }
     if let Some(state) = ed.visual.take() {
         let anchor = state.anchor;
         let last_cursor = ed.cursor();
@@ -274,10 +279,28 @@ fn apply_block(ed: &mut Editor, op: char, reg: Option<char>) -> VimResult<bool> 
             ed.mode = Mode::Insert;
             Ok(true)
         }
+        // Block insert: type once, and the text is repeated on every other line
+        // of the block when insert mode ends (ops.c op_insert/block_insert).
         'I' | 'A' => {
-            let col = if op == 'I' { left } else { right + 1 };
+            let first_text = ed.current_buffer().line_str(first)?.to_string();
+            let col = if op == 'I' {
+                rvim_core::text::snap_byte(&first_text, left.min(first_text.len()))
+            } else {
+                // "A" appends after the block's rightmost character.
+                if right >= first_text.len() {
+                    first_text.len()
+                } else {
+                    next_boundary(&first_text, right)
+                }
+            };
             ed.set_cursor(Pos::new(first, col));
             ed.visual = None;
+            ed.block_insert = Some(rvim_editor::BlockInsert {
+                first,
+                last,
+                col,
+                append: op == 'A',
+            });
             ed.mode = Mode::Insert;
             ed.begin_undo_block();
             Ok(true)

@@ -243,3 +243,75 @@ fn colon_from_visual_mode_prefills_the_range() {
     tui.run(&mut keys, &mut sink, 40, 6).unwrap();
     assert_eq!(buffer_text(&tui), "three", "the visual range reached :d");
 }
+
+// ------------------------------------------------- visual block insert
+
+#[test]
+fn block_insert_i_repeats_the_text_on_every_block_line() {
+    let mut tui = Tui::new(open(&["abc", "def", "ghi"]));
+    screen(&mut tui, "<C-v>jlIxx<Esc>", 24, 6);
+    assert_eq!(buffer_text(&tui), "xxabc\nxxdef\nghi");
+}
+
+#[test]
+fn block_insert_a_appends_after_the_block_right_edge() {
+    let mut tui = Tui::new(open(&["abc", "def", "ghi"]));
+    screen(&mut tui, "<C-v>jlAxx<Esc>", 24, 6);
+    assert_eq!(buffer_text(&tui), "abxxc\ndexxf\nghi");
+}
+
+#[test]
+fn block_insert_pads_short_lines_for_append() {
+    let mut tui = Tui::new(open(&["abcd", "x"]));
+    // The block reaches column 1 (byte columns, see compat_deviations 9.1);
+    // "A" pads the short line out to the block edge before inserting
+    // (ops.c block_insert()).
+    screen(&mut tui, "<C-v>llljAzz<Esc>", 24, 6);
+    assert_eq!(buffer_text(&tui), "abzzcd\nx zz");
+}
+
+#[test]
+fn block_insert_is_a_single_undo_step() {
+    let mut tui = Tui::new(open(&["abc", "def"]));
+    screen(&mut tui, "<C-v>jlIxx<Esc>", 24, 6);
+    assert_eq!(buffer_text(&tui), "xxabc\nxxdef");
+    screen(&mut tui, "u", 24, 6);
+    assert_eq!(buffer_text(&tui), "abc\ndef", "one undo restores the block");
+}
+
+#[test]
+fn block_insert_with_a_count_repeats_on_every_line() {
+    let mut tui = Tui::new(open(&["abc", "def"]));
+    screen(&mut tui, "<C-v>jl3Ixy<Esc>", 24, 6);
+    assert_eq!(buffer_text(&tui), "xyxyxyabc\nxyxyxydef");
+}
+
+#[test]
+fn block_insert_keeps_the_cursor_on_the_first_block_column() {
+    let mut tui = Tui::new(open(&["abc", "def"]));
+    screen(&mut tui, "<C-v>jlIxx<Esc>", 24, 6);
+    let cursor = tui.session.editor.cursor();
+    assert_eq!(
+        cursor.line, 0,
+        "the cursor returns to the block's first line"
+    );
+    assert_eq!(cursor.col, 0, "and to its first column");
+}
+
+#[test]
+fn i_outside_block_wise_visual_mode_does_not_insert() {
+    let mut tui = Tui::new(open(&["abcdef"]));
+    screen(&mut tui, "vllIzz<Esc>", 24, 6);
+    assert_eq!(
+        buffer_text(&tui),
+        "abcdef",
+        "vim only accepts I/A in blockwise visual mode"
+    );
+}
+
+#[test]
+fn visual_count_extends_the_selection() {
+    let mut tui = Tui::new(open(&["abc", "def", "ghi", "jkl", "mno"]));
+    screen(&mut tui, "v3jd", 24, 8);
+    assert_eq!(buffer_text(&tui), "kl\nmno");
+}

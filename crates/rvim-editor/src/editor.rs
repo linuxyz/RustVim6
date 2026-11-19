@@ -29,6 +29,23 @@ pub struct VisualState {
     pub anchor: Pos,
 }
 
+/// A pending visual-block insert (`<C-v>` + `I`/`A`).
+///
+/// vim records the block in `oap` and, when insert mode ends, repeats the typed
+/// text on every other line of the block (ops.c `op_insert()`/`block_insert()`).
+/// The first line is inserted normally, so only `first + 1 ..= last` is stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockInsert {
+    /// First line of the block (the line the user typed on).
+    pub first: usize,
+    /// Last line of the block.
+    pub last: usize,
+    /// Byte column to insert at on the remaining lines.
+    pub col: usize,
+    /// True for `A` (append after the block): short lines are padded to `col`.
+    pub append: bool,
+}
+
 /// One jump-list entry (mark.c setpcmark / getpcmark).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JumpPos {
@@ -131,6 +148,8 @@ pub struct Editor {
     pub last_visual: Option<(VisualState, Pos)>,
     /// The last change, replayed by ".".
     pub last_change: Option<RepeatChange>,
+    /// Pending visual-block insert, applied when the insert session ends.
+    pub block_insert: Option<BlockInsert>,
     /// Jump list (:jumps, CTRL-O/CTRL-I), oldest first.
     pub jumplist: Vec<JumpPos>,
     /// Index of the current position inside jumplist.
@@ -210,6 +229,7 @@ impl Editor {
             visual: None,
             last_visual: None,
             last_change: None,
+            block_insert: None,
             jumplist: Vec::new(),
             jumplist_idx: 0,
             changelist: Vec::new(),

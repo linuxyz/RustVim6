@@ -291,6 +291,7 @@
 
 | 主题 | 问题 | 修正 |
 |---|---|---|
+| 列选模式 `I`/`A` 无效 | TUI 的视觉模式分发里没有 `I`/`A` 分支（落到“动作”分支后什么都不做，随后 `x` 又把选区删掉）；即使进入插入模式也没有记录块，`<Esc>` 后不会把文本复制到块内其它行 | 视觉模式分发 `I`/`A`（仅 `VIsualBlock`）；`Editor` 新增 `BlockInsert`，`finish_insert` 在插入会话结束时按 `ops.c block_insert()` 把文本复制到块内其余行（`I` 跳过短行、`A` 先补空格到块右边界），整段仍是**一个** undo 步；视觉模式新增计数（`3I`、`v3j`）。回归用例 8 条（`m5_windows.rs`） |
 | 插入模式 `<CR>` 丢换行 | ① `Buffer::insert_text` 复用 `split_lines` 的**文件**约定（尾部换行不产生新行），所以行尾 `<CR>` 不分行、光标被钳回行首；② TUI 自己用 `replace_lines` 处理 `<CR>`，没有记入插入会话，导致 `3i%<CR><Esc>` 与 `.` 重复时换行被吞掉（只剩 `%`） | `insert_text` 在合并文本以换行结尾时补回空行（`edit.c ins_eol` 语义），`<CR>` 统一走 `insert::type_char('\n')` 记入插入会话；新增 `1000i%<CR><Esc>`、`3i%<CR>`、`. ` 重复换行与 `insert_text` 行尾换行的回归用例 |
 | 单窗口假设 | M1–M4 的 `Editor` 只有一个 `Window`，`winnr()`/`winheight()`/`getwininfo()` 等内置函数硬编码 1 和 -1 | 新增 `rvim-editor::window`（`TabPage`/`Layout` frame 树/`Window`/`Windows`），`Editor.windows` 取代单窗口字段；`host_win.rs` 全部窗口/标签内置函数改查真实模型 |
 | 窗口局部选项 | 选项表只有全局模型，`:setlocal` 等同 `:set` | 新增 `WINDOW_LOCAL` 表与 `Window.local`：`:set` 写全局+当前窗口、`:setlocal` 只写窗口、`:setglobal` 只写全局，`&opt` 读生效值；`w:` 变量按窗口 id 分隔 |
@@ -322,4 +323,5 @@
 | `w:`/`t:` 变量 | 写穿透真实窗口/标签 | 按窗口/标签字典存放，外部切换在下一次内置函数调用时同步 | M6 |
 | `<C-w>r`/`x`/`H J K L` | 调整 frame 树位置 | 交换/轮转窗口“内容”（几何不变），两窗口情形等价 | 收口时按 frame 重写 |
 | 每缓冲窗口位置 | 每个窗口记住每个缓冲的光标/视口 | 换缓冲时视口跟随该缓冲最后光标 | 收口时补 `b_wininfo` |
+| 列选模式的列 | 用虚拟列（`curswant`），短行被夹住后块仍是原宽度，`A` 会补齐到该宽度 | 用字节列：`<C-v>` 的块右边界取 anchor 与光标的**当前**字节列，光标在短行被夹住时块会变窄（`<C-v>lllj` 在 `abcd`/`x` 上得到 0..1 而不是 0..3） | 收口时引入 `getvcol()/curswant` 虚拟列模型 |
 

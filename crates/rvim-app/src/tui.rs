@@ -113,6 +113,8 @@ pub struct Tui {
     pending_op: Option<Pending>,
     /// Direction of the last `/` or `?` search (`n` repeats it).
     search_forward: bool,
+    /// Count typed in visual mode (`v3j`, `3i` in a block).
+    visual_count: Option<u64>,
     /// When the pending key buffer started waiting, for 'timeoutlen'.
     pending_since: Option<std::time::Instant>,
     /// Wildmenu candidates while completing.
@@ -137,6 +139,7 @@ impl Tui {
             pending_keys: Vec::new(),
             pending_op: None,
             search_forward: true,
+            visual_count: None,
             pending_since: None,
             wildmenu: None,
             seen_messages: 0,
@@ -180,6 +183,7 @@ impl Tui {
             // A count typed before <Esc> is dropped, not carried to the next
             // command (normal.c nv_esc).
             self.session.normal.cancel_pending();
+            self.visual_count = None;
             if self.session.editor.mode.is_insert_like() {
                 self.finish_insert_mode();
             } else if self.session.editor.mode.is_visual() {
@@ -640,9 +644,15 @@ impl Tui {
     }
 
     fn finish_insert_mode(&mut self) {
+        // A block insert already parked the cursor on the block's first column
+        // (ops.c op_insert), so the usual "one char to the left" step is skipped.
+        let block_insert = self.session.editor.block_insert.is_some();
         let mut engine = std::mem::replace(&mut self.session.normal, NormalEngine::new());
         engine.finish_insert(self.editor());
         self.session.normal = engine;
+        if block_insert {
+            return;
+        }
         // vim leaves the cursor on the last inserted character (ins_esc()),
         // while the buffer parks it just past the inserted text.
         let pos = self.editor().cursor();
@@ -1259,6 +1269,18 @@ impl Tui {
             }
             Key::Char(ch) => {
                 let ch = *ch;
+                // Digits accumulate a count for the next motion or block insert.
+                if ch.is_ascii_digit() && !(ch == '0' && self.visual_count.is_none()) {
+                    let digit = ch.to_digit(10).unwrap_or(0) as u64;
+                    self.visual_count = Some(
+                        self.visual_count
+                            .unwrap_or(0)
+                            .saturating_mul(10)
+                            .saturating_add(digit),
+                    );
+                    return Ok(());
+                }
+                let count = self.visual_count.take().unwrap_or(1);
                 match ch {
                     'd' | 'x' => {
                         let _ = rvim_normal::visual::apply_operator(self.editor(), 'd', None)?;
@@ -1270,6 +1292,19 @@ impl Tui {
                         let _ = rvim_normal::visual::apply_operator(self.editor(), 'c', None)?;
                     }
                     'p' | 'P' => self.paste_over_selection(ch)?,
+                    // Block insert: I at the block's left edge, A after its right edge
+                    // (vim only accepts these in blockwise visual mode).
+                    'I' | 'A' => {
+                        let blockwise = self.session.editor.mode == Mode::VisualBlock;
+                        if blockwise {
+                            let inserted =
+                                rvim_normal::visual::apply_operator(self.editor(), ch, None)?;
+                            if inserted {
+                                // 3Itext<Esc> repeats the text three times per line.
+                                self.session.normal.set_insert_repeat(count);
+                            }
+                        }
+                    }
                     '>' | '<' | '~' | 'u' | 'U' | 'J' => {
                         let _ = rvim_normal::visual::apply_operator(self.editor(), ch, None)?;
                     }
@@ -1281,10 +1316,6 @@ impl Tui {
                     'z' => self.pending_op = Some(Pending::Fold),
                     _ => {
                         if let Some(motion) = visual_motion(ch) {
-                            let mut engine =
-                                std::mem::replace(&mut self.session.normal, NormalEngine::new());
-                            let count = engine.take_pending_count();
-                            self.session.normal = engine;
                             let pos = visual_move(self.editor(), motion, count)?;
                             self.session.editor.set_cursor(pos);
                         }

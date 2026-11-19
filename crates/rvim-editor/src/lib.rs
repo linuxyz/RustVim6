@@ -25,7 +25,9 @@ pub mod window;
 
 pub use abbrev::{AbbrevEntry, AbbrevMode, AbbrevStore};
 pub use autocmd::{AutoCmd, AutocmdStore, EVENTS};
-pub use editor::{ChangePos, Editor, JumpPos, LastSubstitute, RepeatChange, SetScope, VisualState};
+pub use editor::{
+    BlockInsert, ChangePos, Editor, JumpPos, LastSubstitute, RepeatChange, SetScope, VisualState,
+};
 pub use maps::{Key, MapEntry, MapMode, MapOptions, MapStore};
 pub use mark::MarkStore;
 pub use message::MessageLog;

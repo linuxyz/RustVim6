@@ -63,6 +63,12 @@ impl NormalEngine {
         self.take_count()
     }
 
+    /// Set the repeat count for the next insert session (used by visual-block
+    /// `I`/`A`, where the front-end owns the count, and by `.` replay).
+    pub fn set_insert_repeat(&mut self, count: u64) {
+        self.insert_repeat = count.max(1);
+    }
+
     /// Drop a count or register prefix typed before <Esc> (normal.c nv_esc).
     pub fn cancel_pending(&mut self) {
         self.count = None;
@@ -389,6 +395,14 @@ impl NormalEngine {
         if repeat > 1 && !text.is_empty() {
             let _ = Self::repeat_insert_text(ed, &text, repeat - 1, entry);
         }
+        // A visual-block insert (C-v I / A) repeats the typed text on the other
+        // lines of the block (ops.c block_insert()); it also places the cursor
+        // back on the block's first column, so it runs after the inline repeat.
+        if let Some(block) = ed.block_insert.take() {
+            if let Err(e) = Self::repeat_block_insert(ed, &block, &text, repeat) {
+                ed.emsg(e.to_string());
+            }
+        }
         if !text.is_empty() {
             ed.last_change = Some(RepeatChange::Insert {
                 entry,
@@ -462,6 +476,53 @@ impl NormalEngine {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Repeat the text typed during a visual-block insert on the block's other
+    /// lines, then put the cursor back on the block's first column.
+    ///
+    /// Mirrors ops.c `block_insert()`: `I` skips lines that end before the block
+    /// starts, `A` pads those lines with spaces up to the block's right edge.
+    fn repeat_block_insert(
+        ed: &mut Editor,
+        block: &rvim_editor::BlockInsert,
+        text: &str,
+        repeat: u64,
+    ) -> VimResult<()> {
+        if block.last <= block.first {
+            return Ok(());
+        }
+        let insert = text.repeat(repeat.max(1) as usize);
+        let total = ed.line_count();
+        for line in (block.first + 1)..=block.last {
+            if line >= total {
+                break;
+            }
+            let current = ed.current_buffer().line_str(line)?.to_string();
+            if insert.is_empty() {
+                continue;
+            }
+            let next = if block.col > current.len() {
+                if !block.append {
+                    // "I" on a line that ends before the block starts: untouched.
+                    continue;
+                }
+                // "A" pads a short line out to the block edge, like vim.
+                format!(
+                    "{}{}{}",
+                    current,
+                    " ".repeat(block.col - current.len()),
+                    insert
+                )
+            } else {
+                let at = rvim_core::text::snap_byte(&current, block.col);
+                format!("{}{}{}", &current[..at], insert, &current[at..])
+            };
+            ed.set_line_text(line, next)?;
+        }
+        let first_len = ed.current_buffer().line_str(block.first)?.len();
+        ed.set_cursor(Pos::new(block.first, block.col.min(first_len)));
         Ok(())
     }
 
