@@ -291,6 +291,7 @@
 
 | 主题 | 问题 | 修正 |
 |---|---|---|
+| `'showcmd'` | 没有实现：`set showcmd` 后光标行右侧不显示未完成的命令，而且 `'showcmd'` 的默认值是 off（vim 在 nocompatible 下默认 on，`optiondefs.h` 无 `P_VI_DEF` → `VIM_DEFAULT`） | 默认改为 on；TUI 在命令行行右端按 `normal.c display_showcmd()` 画出 10 列字段（`Columns-(SHOWCMD_COLS+1)` 起，超长取尾部）：计数（`2d`/`d2`）、操作符与文本对象前缀（`di`）、`g`/`z`/`]`/`[`/`<C-w>`（显示为 `^W`）、寄存器前缀（`"a`/`"ad`）、视觉模式选区大小（字符数/行数/`行x列`）；命令行编辑时让位给 `:` 提示符。回归用例 5 条（`m4_tui.rs`） |
 | 列选模式 `I`/`A` 无效 | TUI 的视觉模式分发里没有 `I`/`A` 分支（落到“动作”分支后什么都不做，随后 `x` 又把选区删掉）；即使进入插入模式也没有记录块，`<Esc>` 后不会把文本复制到块内其它行 | 视觉模式分发 `I`/`A`（仅 `VIsualBlock`）；`Editor` 新增 `BlockInsert`，`finish_insert` 在插入会话结束时按 `ops.c block_insert()` 把文本复制到块内其余行（`I` 跳过短行、`A` 先补空格到块右边界），整段仍是**一个** undo 步；视觉模式新增计数（`3I`、`v3j`）。回归用例 8 条（`m5_windows.rs`） |
 | 插入模式 `<CR>` 丢换行 | ① `Buffer::insert_text` 复用 `split_lines` 的**文件**约定（尾部换行不产生新行），所以行尾 `<CR>` 不分行、光标被钳回行首；② TUI 自己用 `replace_lines` 处理 `<CR>`，没有记入插入会话，导致 `3i%<CR><Esc>` 与 `.` 重复时换行被吞掉（只剩 `%`） | `insert_text` 在合并文本以换行结尾时补回空行（`edit.c ins_eol` 语义），`<CR>` 统一走 `insert::type_char('\n')` 记入插入会话；新增 `1000i%<CR><Esc>`、`3i%<CR>`、`. ` 重复换行与 `insert_text` 行尾换行的回归用例 |
 | 单窗口假设 | M1–M4 的 `Editor` 只有一个 `Window`，`winnr()`/`winheight()`/`getwininfo()` 等内置函数硬编码 1 和 -1 | 新增 `rvim-editor::window`（`TabPage`/`Layout` frame 树/`Window`/`Windows`），`Editor.windows` 取代单窗口字段；`host_win.rs` 全部窗口/标签内置函数改查真实模型 |

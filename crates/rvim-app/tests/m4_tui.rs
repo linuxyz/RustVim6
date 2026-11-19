@@ -837,3 +837,77 @@ fn the_search_prompt_starts_empty() {
         "vim does not pre-fill the prompt"
     );
 }
+
+// ------------------------------------------------------------- showcmd
+
+#[test]
+fn showcmd_shows_a_pending_operator_and_count() {
+    // Each case starts from a fresh editor so the pending state cannot leak.
+    let mut tui = Tui::new(open(&["alpha", "bravo"]));
+    let rows = screen(&mut tui, "d", 40, 5);
+    assert!(
+        rows[4].trim_end().ends_with("d"),
+        "pending d: {:?}",
+        rows[4]
+    );
+
+    let mut tui = Tui::new(open(&["alpha", "bravo"]));
+    let rows = screen(&mut tui, "2d", 40, 5);
+    assert!(
+        rows[4].trim_end().ends_with("2d"),
+        "count and operator: {:?}",
+        rows[4]
+    );
+
+    let mut tui = Tui::new(open(&["alpha", "bravo"]));
+    let rows = screen(&mut tui, "d2", 40, 5);
+    assert!(
+        rows[4].trim_end().ends_with("d2"),
+        "motion count after the operator: {:?}",
+        rows[4]
+    );
+}
+
+#[test]
+fn showcmd_shows_the_register_prefix_and_window_prefix() {
+    let mut tui = Tui::new(open(&["alpha"]));
+    let rows = screen(&mut tui, "\"a", 40, 5);
+    assert!(rows[4].ends_with("\"a"), "register prefix: {:?}", rows[4]);
+    let rows = screen(&mut tui, "<Esc><C-w>", 40, 5);
+    assert!(rows[4].ends_with("^W"), "CTRL-W prefix: {:?}", rows[4]);
+}
+
+#[test]
+fn showcmd_shows_the_visual_selection_size() {
+    let mut tui = Tui::new(open(&["alpha", "bravo", "charlie", "delta", "echo"]));
+    let rows = screen(&mut tui, "vll", 40, 7);
+    assert!(rows[6].ends_with('3'), "three characters: {:?}", rows[6]);
+
+    let mut tui = Tui::new(open(&["alpha", "bravo", "charlie", "delta", "echo"]));
+    let rows = screen(&mut tui, "v3j", 40, 7);
+    assert!(rows[6].ends_with('4'), "four lines: {:?}", rows[6]);
+
+    let mut tui = Tui::new(open(&["alpha", "bravo", "charlie", "delta", "echo"]));
+    let rows = screen(&mut tui, "<C-v>jjll", 40, 7);
+    assert!(rows[6].ends_with("3x3"), "block size: {:?}", rows[6]);
+}
+
+#[test]
+fn showcmd_is_on_by_default_and_can_be_disabled() {
+    let mut tui = Tui::new(open(&["alpha"]));
+    let rows = screen(&mut tui, ":set showcmd?<CR>", 40, 5);
+    assert!(rows[4].contains("showcmd"), "default is on: {:?}", rows[4]);
+    let rows = screen(&mut tui, ":set noshowcmd<CR>d", 40, 5);
+    assert!(
+        rows[4].trim().is_empty(),
+        "nothing is shown with 'noshowcmd': {:?}",
+        rows[4]
+    );
+}
+
+#[test]
+fn showcmd_is_hidden_while_the_command_line_is_open() {
+    let mut tui = Tui::new(open(&["alpha"]));
+    let rows = screen(&mut tui, ":", 40, 5);
+    assert_eq!(rows[4].trim_end(), ":", "the command line takes the row");
+}

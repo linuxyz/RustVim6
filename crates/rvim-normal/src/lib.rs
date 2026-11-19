@@ -63,6 +63,16 @@ impl NormalEngine {
         self.take_count()
     }
 
+    /// The count typed so far, without consuming it (`showcmd` displays it).
+    pub fn pending_count(&self) -> Option<u64> {
+        self.count
+    }
+
+    /// The register name typed after `"`, without consuming it.
+    pub fn pending_register(&self) -> Option<char> {
+        self.pending_register
+    }
+
     /// Set the repeat count for the next insert session (used by visual-block
     /// `I`/`A`, where the front-end owns the count, and by `.` replay).
     pub fn set_insert_repeat(&mut self, count: u64) {

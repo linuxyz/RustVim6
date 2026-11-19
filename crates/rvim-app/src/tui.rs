@@ -989,6 +989,119 @@ impl Tui {
         }
     }
 
+    /// 'showcmd' text: the (partial) command typed so far.
+    ///
+    /// vim shows the raw keys (normal.c add_to_showcmd): the count, the operator
+    /// or prefix key, and in Visual mode the size of the selection.
+    fn showcmd_text(&self) -> String {
+        if !self.session.editor.options.bool_or("showcmd", false) {
+            return String::new();
+        }
+        // Visual mode shows the selection size instead (normal.c clear_showcmd).
+        if let Some(state) = self.session.editor.visual {
+            let cursor = self.session.editor.cursor();
+            let (top, bot) = if state.anchor.line <= cursor.line {
+                (state.anchor.line, cursor.line)
+            } else {
+                (cursor.line, state.anchor.line)
+            };
+            let lines = bot - top + 1;
+            return match state.mode {
+                Mode::VisualBlock => {
+                    let left = state.anchor.col.min(cursor.col);
+                    let right = state.anchor.col.max(cursor.col);
+                    format!("{lines}x{}", right - left + 1)
+                }
+                Mode::VisualLine => format!("{lines}"),
+                _ if lines > 1 => format!("{lines}"),
+                _ => {
+                    // Inclusive selection: the cursor character counts too.
+                    let lo = state.anchor.col.min(cursor.col);
+                    let hi = state.anchor.col.max(cursor.col);
+                    let chars = self
+                        .session
+                        .editor
+                        .current_buffer()
+                        .line_str(top)
+                        .map(|line| {
+                            let start = lo.min(line.len());
+                            let end = if hi >= line.len() {
+                                line.len()
+                            } else {
+                                let snapped = rvim_core::text::snap_byte(line, hi);
+                                snapped
+                                    + line[snapped..]
+                                        .chars()
+                                        .next()
+                                        .map(char::len_utf8)
+                                        .unwrap_or(0)
+                            };
+                            line[start..end.max(start)].chars().count()
+                        })
+                        .unwrap_or(0);
+                    format!("{chars}")
+                }
+            };
+        }
+        // vim displays the typed keys: the operator count before the operator
+        // ("2d"), the motion count after it ("d2"), and no count at all for 1.
+        let operator_count = match self.session.editor.mode {
+            Mode::MotionPending { count, .. } => count,
+            _ => 1,
+        };
+        let pending_count = self.session.normal.pending_count().unwrap_or(0);
+        let leading = if operator_count > 1 {
+            operator_count
+        } else if self.pending_op.is_none() && pending_count > 1 {
+            pending_count
+        } else {
+            0
+        };
+        let mut out = String::new();
+        // The register name typed before the operator ("ad) stays visible: the
+        // engine parks it in the pending operator state.
+        if let Mode::MotionPending {
+            reg: Some(name), ..
+        } = self.session.editor.mode
+        {
+            out.push('"');
+            out.push(name);
+        }
+        if leading > 0 {
+            out.push_str(&leading.to_string());
+        }
+        match &self.pending_op {
+            Some(Pending::Operator(op)) => out.push(*op),
+            Some(Pending::OperatorGg(op)) => {
+                out.push(*op);
+                out.push('g');
+            }
+            Some(Pending::TextObject(op, around)) => {
+                out.push(*op);
+                out.push(if *around { 'a' } else { 'i' });
+            }
+            Some(Pending::G) | Some(Pending::VisualG) => out.push('g'),
+            Some(Pending::WindowCmd) => out.push_str("^W"),
+            Some(Pending::Fold) => out.push('z'),
+            Some(Pending::Bracket(forward)) => out.push(if *forward { ']' } else { '[' }),
+            None => {}
+        }
+        // The register prefix is displayed while it is being typed (" or "a).
+        if self.session.editor.mode == Mode::RegisterPending
+            || self.session.normal.pending_register().is_some()
+        {
+            out.push('"');
+            if let Some(name) = self.session.normal.pending_register() {
+                out.push(name);
+            }
+        }
+        // A count typed after the operator ("d2") follows it.
+        if self.pending_op.is_some() && pending_count > 0 {
+            out.push_str(&pending_count.to_string());
+        }
+        out
+    }
+
     /// Tabline: one entry per tabpage, like vim`s `1:file 2:other`.
     fn tabline(&self, cols: usize) -> String {
         let ed = &self.session.editor;
@@ -1552,6 +1665,7 @@ impl Tui {
             more: !self.message_queue.is_empty(),
             tabstop,
             popups: self.popup_overlays(),
+            showcmd: self.showcmd_text(),
         };
         render_layout(&model, cols, rows, &self.theme)
     }

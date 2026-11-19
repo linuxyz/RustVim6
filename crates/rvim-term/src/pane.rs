@@ -131,8 +131,11 @@ pub struct ScreenLayout {
     pub message: String,
     pub cmdline: Option<CmdlineText>,
     pub wildmenu: Option<WildmenuItems>,
-    /// Queued message output: append vim`s `-- More --` marker.
+    /// Queued message output: append vim's `-- More --` marker.
     pub more: bool,
+    /// 'showcmd' text: the (partial) command being typed, drawn in the last
+    /// right-hand columns of the command line row (normal.c display_showcmd).
+    pub showcmd: String,
     pub tabstop: usize,
     /// Overlay popups: (lines, rectangle) drawn on top of the panes.
     pub popups: Vec<(Vec<String>, PopupRect)>,
@@ -250,8 +253,28 @@ pub fn render_layout(model: &ScreenLayout, cols: usize, rows: usize, theme: &The
         }
     }
 
+    // ---- showcmd --------------------------------------------------------
+    // vim writes it at Columns - (SHOWCMD_COLS + 1) on the last row
+    // (screen.c comp_col(), normal.c display_showcmd()): a 10 column field plus
+    // one separating column at the right edge, left aligned inside the field.
+    if model.cmdline.is_none() && !model.showcmd.is_empty() && cols > SHOWCMD_GAP {
+        let start = cols - SHOWCMD_GAP;
+        let field = cols - start;
+        // A longer command keeps only its tail (normal.c add_to_showcmd()).
+        let chars: Vec<char> = model.showcmd.chars().collect();
+        let skip = chars.len().saturating_sub(field);
+        let text: String = chars[skip..].iter().collect();
+        fill_segment(&mut grid, bottom, start, field, ' ', theme.message);
+        grid.put(bottom, start, &text, theme.message);
+    }
+
     grid
 }
+
+/// Columns reserved for 'showcmd' (vim.h SHOWCMD_COLS).
+pub const SHOWCMD_COLS: usize = 10;
+/// Width taken from the right edge: the field plus its separating column.
+pub const SHOWCMD_GAP: usize = SHOWCMD_COLS + 1;
 
 fn draw_pane(
     grid: &mut Grid,

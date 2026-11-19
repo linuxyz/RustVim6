@@ -123,6 +123,7 @@ M0 脚手架 ─► M1 Headless 编辑内核 ─► M2 Ex 命令体系 ─► M3
 - ✅ **键位记法（:help notation）**：`rvim_editor::keynames` 镜像 vim `key_names_table[]` 全量名字（别名、`<Char-N>`、`<t_xx>`、鼠标键名、`<F37>`、`<k0>`-`<k9>`、`<xHome>` 等），修饰键任意顺序规范化，`:map` 按 vim 大小写输出；映射歧义在 timeoutlen 后回落为字面键。
 - ✅ **窗口 resize 跟随**：输入循环以 120ms 超时轮询控制台尺寸（std 无 select，用读线程 + channel），变化时清屏并按新几何重绘；`3dd`/`2yy`/`3gg` 等计数与前缀命令、`gg` 回首行均已修复并有回归用例。
 - ✅ **alternate screen**（`?1049h/l`）、256 色/真彩的 SGR 编码已就绪（高亮组在 M6 与 syntax 一起接）。
+- ✅ **`'showcmd'`**：命令行行右端 10 列显示未完成命令（计数 / 操作符 / `"a` 寄存器 / `<C-w>` 显示为 `^W` / 视觉选区大小），默认 on（nocompatible 语义，见 `m4_tui.rs` 的 5 条用例）。
 - ⚠️ 未做：视觉模式/鼠标/软换行/`relativenumber`/命令行历史键/`<expr>` 映射/`:!` 的 `Press ENTER`（全部登记在 compat_deviations §6）。
 
 > **复核轮 3（M4）**：以 `--keys` / `Tui` 逐帧对照 `reference/vim/src` 修复一批 TUI 行为——未知 `CSI … ~` 码不再卡死输入；Tab 与控制字符按 `'tabstop'` 展开为显示单元（消息行同规则）；`:echo` 瞬时消息与 `-- More --` 分页接回消息行；`/` 从光标后开始并支持 `?`/`n`/`N`（空模式复用上次模式，无则 `E35`）；操作符 + 动作（`dw`/`dj`/`d$`/`yw`/`cw`/`cc`/`dgg`/`dG`、`D`/`C`/`Y`、`d2w`/`d3l`）与 `<Esc>` 取消语义；状态行 `All`/`Top`/`Bot` 百分比；扣除行号栏的横向滚动与 `<C-f>`/`<C-b>`/`<PageDown>`/`<PageUp>` 翻页。逐条见 `docs/compat_deviations.md` §8，回归用例在 `m4_tui.rs`（46 例）与 `rvim-term` 单测。

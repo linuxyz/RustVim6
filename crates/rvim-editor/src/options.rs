@@ -152,7 +152,9 @@ fn defs() -> Vec<OptDef> {
             name: "showcmd",
             short: "sc",
             kind: OptKind::Bool,
-            default: OptValue::Bool(false),
+            // optiondefs.h: P_BOOL|P_VIM without P_VI_DEF, so the VIM_DEFAULT
+            // (on) applies: 'showcmd' is enabled by default in a nocompatible Vim.
+            default: OptValue::Bool(true),
         },
         OptDef {
             name: "tabstop",
