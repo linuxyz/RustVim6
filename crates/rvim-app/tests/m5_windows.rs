@@ -315,3 +315,54 @@ fn visual_count_extends_the_selection() {
     screen(&mut tui, "v3jd", 24, 8);
     assert_eq!(buffer_text(&tui), "kl\nmno");
 }
+
+// ------------------------------------------- visual g<C-a> / g<C-x>
+
+#[test]
+fn visual_g_ctrl_a_numbers_the_selection_sequentially() {
+    let mut tui = Tui::new(open(&["0", "0", "0"]));
+    screen(&mut tui, "Vjjg<C-a>", 20, 6);
+    assert_eq!(buffer_text(&tui), "1\n2\n3");
+}
+
+#[test]
+fn visual_g_ctrl_a_skips_lines_without_a_number() {
+    let mut tui = Tui::new(open(&["0", "x", "0"]));
+    screen(&mut tui, "Vjjg<C-a>", 20, 6);
+    assert_eq!(
+        buffer_text(&tui),
+        "1\nx\n2",
+        "a line without a number does not consume a step"
+    );
+}
+
+#[test]
+fn visual_g_ctrl_x_decrements_sequentially() {
+    let mut tui = Tui::new(open(&["5", "5", "5"]));
+    screen(&mut tui, "Vjjg<C-x>", 20, 6);
+    assert_eq!(buffer_text(&tui), "4\n3\n2");
+}
+
+#[test]
+fn visual_g_ctrl_a_uses_the_count_as_the_first_step() {
+    let mut tui = Tui::new(open(&["1", "2", "3"]));
+    screen(&mut tui, "Vjjg<C-a>", 20, 6);
+    assert_eq!(buffer_text(&tui), "2\n4\n6", "1+1, 2+2, 3+3");
+}
+
+#[test]
+fn visual_block_g_ctrl_a_numbers_the_selected_column() {
+    let mut tui = Tui::new(open(&["a0", "a0", "a0"]));
+    // Start on the digit column so the block covers it.
+    screen(&mut tui, "l<C-v>jjg<C-a>", 20, 6);
+    assert_eq!(buffer_text(&tui), "a1\na2\na3");
+}
+
+#[test]
+fn visual_g_ctrl_a_is_a_single_undo_step() {
+    let mut tui = Tui::new(open(&["0", "0", "0"]));
+    screen(&mut tui, "Vjjg<C-a>", 20, 6);
+    assert_eq!(buffer_text(&tui), "1\n2\n3");
+    screen(&mut tui, "u", 20, 6);
+    assert_eq!(buffer_text(&tui), "0\n0\n0");
+}

@@ -11,6 +11,7 @@
 use rvim_core::{Pos, VimError, VimResult};
 use rvim_editor::{Editor, Mode, RegType, Register, VisualState};
 
+use crate::addsub;
 use crate::operators::{self, OpRange};
 use crate::textobjects::{self, Which};
 
@@ -475,6 +476,85 @@ pub fn reselect(ed: &mut Editor) -> bool {
 pub fn ex_range_prefix(ed: &mut Editor) -> String {
     stop(ed);
     "'<,'>".to_string()
+}
+
+/// `g<C-a>` / `g<C-x>` in Visual mode: add/subtract a sequence of amounts,
+/// one line at a time (ops.c `op_addsub()` with `g_cmd` set).
+///
+/// The first line gets `count`, and every line that actually contains a number
+/// adds another `count` to the amount, so lines without numbers do not consume a
+/// step: selecting "0 / x / 0" and pressing `g<C-a>` gives "1 / x / 2".
+pub fn visual_addsub(ed: &mut Editor, add: bool, count: u64) -> VimResult<bool> {
+    let Some(state) = ed.visual else {
+        return Ok(false);
+    };
+    let cursor = ed.cursor();
+    let anchor = state.anchor;
+    let (top, bot) = if anchor.line <= cursor.line {
+        (anchor.line, cursor.line)
+    } else {
+        (cursor.line, anchor.line)
+    };
+    let step = count.max(1) as i128;
+    let mut amount: i128 = step;
+    let block = if state.mode == Mode::VisualBlock {
+        let left = anchor.col.min(cursor.col);
+        let right = anchor.col.max(cursor.col);
+        Some((left, right))
+    } else {
+        None
+    };
+    // The two ends of a charwise selection (inclusive byte columns).
+    let (start_pos, end_pos) = if (anchor.line, anchor.col) <= (cursor.line, cursor.col) {
+        (anchor, cursor)
+    } else {
+        (cursor, anchor)
+    };
+    ed.begin_undo_block();
+    let mut changed = false;
+    for line in top..=bot {
+        let text = ed.current_buffer().line_str(line)?.to_string();
+        let len = text.len();
+        let (from, to) = match state.mode {
+            Mode::VisualLine => (0, len),
+            Mode::VisualBlock => {
+                let (left, right) = block.expect("block geometry");
+                let end = if right >= len {
+                    len
+                } else {
+                    next_boundary(&text, right)
+                };
+                (left.min(len), end)
+            }
+            _ => {
+                let from = if line == top {
+                    start_pos.col.min(len)
+                } else {
+                    0
+                };
+                let to = if line == bot {
+                    if end_pos.col >= len {
+                        len
+                    } else {
+                        next_boundary(&text, end_pos.col)
+                    }
+                } else {
+                    len
+                };
+                (from, to)
+            }
+        };
+        if addsub::addsub_region(ed, line, from, to, add, amount.unsigned_abs() as u64)? {
+            changed = true;
+            amount += step;
+        }
+    }
+    ed.end_undo_block();
+    // vim leaves Visual mode and puts the cursor back where it was.
+    stop(ed);
+    let clamped = ed.current_buffer().clamp_pos(cursor);
+    ed.set_cursor(clamped);
+    Ok(changed)
 }
 
 /// Normal-mode `gq`/`gw` formatting helper: re-wrap the range to 'textwidth'.

@@ -284,6 +284,86 @@ fn render(
     out
 }
 
+/// Add `amount` to the first number inside `from..to` on `line` (the visual
+/// `g<C-a>` primitive, ops.c op_addsub() with an explicit region).
+///
+/// Unlike [`addsub`] the search never leaves the region and the number must fit
+/// inside it, which is what vim does for a Visual selection. The cursor is left
+/// alone; the caller decides where it goes.
+pub fn addsub_region(
+    ed: &mut Editor,
+    line: usize,
+    from: usize,
+    to: usize,
+    add: bool,
+    amount: u64,
+) -> VimResult<bool> {
+    let formats = FormatFlags::from_option(&ed.options.str_or("nrformats", "bin,hex"));
+    let text = ed.buffer(ed.current_bufnr())?.line_str(line)?.to_string();
+    let end = to.min(text.len());
+    if from >= end {
+        return Ok(false);
+    }
+    // Skip to the first digit (or letter with 'nrformats' alpha) in the region.
+    let bytes = text.as_bytes();
+    let mut start = from;
+    while start < end && !bytes[start].is_ascii_digit() {
+        if formats.alpha && bytes[start].is_ascii_alphabetic() {
+            break;
+        }
+        start += 1;
+    }
+    if start >= end {
+        return Ok(false);
+    }
+    // A '-' that is inside the region belongs to the number.
+    let mut sign = start;
+    if sign > from && bytes[sign - 1] == b'-' && !formats.unsigned {
+        sign -= 1;
+    }
+    let parsed = parse_number(&text[start..end], formats.bin, formats.oct, formats.hex);
+    if parsed.len == 0 {
+        return Ok(false);
+    }
+    let first_digit = bytes[start];
+    if formats.alpha && first_digit.is_ascii_alphabetic() {
+        let lower = first_digit.to_ascii_lowercase();
+        let ord = i128::from(lower - b'a');
+        let count = i128::from(amount.max(1));
+        let next = if add {
+            (ord + count).min(25)
+        } else {
+            (ord - count).max(0)
+        };
+        let base = if first_digit.is_ascii_uppercase() {
+            b'A'
+        } else {
+            b'a'
+        };
+        let ch = (base + next as u8) as char;
+        let mut new_line = text.clone();
+        new_line.replace_range(start..start + 1, &ch.to_string());
+        ed.set_line_text(line, new_line)?;
+        return Ok(true);
+    }
+    let mut value = i128::from(parsed.value);
+    if sign < start {
+        value = -value;
+    }
+    let count = i128::from(amount.max(1));
+    let mut value = if add { value + count } else { value - count };
+    let mut negative = value < 0;
+    if formats.unsigned && negative {
+        value = 0;
+        negative = false;
+    }
+    let new_text = render(parsed, negative, value, first_digit, formats);
+    let mut new_line = text.clone();
+    new_line.replace_range(sign..start + parsed.len, &new_text);
+    ed.set_line_text(line, new_line)?;
+    Ok(true)
+}
+
 /// Increment (`add`) or decrement the number under the cursor `count` times.
 ///
 /// Returns false when there is no number at or after the cursor (vim beeps).

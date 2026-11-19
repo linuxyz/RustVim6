@@ -503,6 +503,19 @@ impl Tui {
                 Ok(())
             }
             Pending::VisualG => {
+                // g<C-a>/g<C-x>: increment/decrement the selection line by line.
+                if let Key::Special(name) = &key {
+                    if matches!(name.as_str(), "C-A" | "C-X") {
+                        let add = name == "C-A";
+                        let mut engine =
+                            std::mem::replace(&mut self.session.normal, NormalEngine::new());
+                        let count = engine.take_pending_count();
+                        self.session.normal = engine;
+                        let count = count.max(self.visual_count.take().unwrap_or(1));
+                        rvim_normal::visual::visual_addsub(self.editor(), add, count)?;
+                        return Ok(());
+                    }
+                }
                 if matches!(&key, Key::Char('g')) {
                     let mut engine =
                         std::mem::replace(&mut self.session.normal, NormalEngine::new());
