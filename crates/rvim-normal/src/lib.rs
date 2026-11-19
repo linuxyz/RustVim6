@@ -353,28 +353,27 @@ impl NormalEngine {
         Ok(())
     }
 
-    /// Append `text` `times` more times after the cursor, for a counted insert.
+    /// Repeat a counted insert `times` more times (edit.c `ins_esc()`).
     ///
-    /// `o`/`O` opened a fresh line, so every repetition opens another line with
-    /// the same text; the other entries insert the text inline.
-    fn repeat_insert_text(ed: &mut Editor, text: &str, times: u64, entry: char) -> VimResult<()> {
-        if entry == 'o' || entry == 'O' {
-            let line = ed.cursor().line;
-            let copies: Vec<String> = (0..times).map(|_| text.to_string()).collect();
-            ed.replace_lines(line + 1, line + 1, copies)?;
-            let last = line + times as usize;
-            let len = ed.current_buffer().line(last)?.len_bytes();
-            ed.set_cursor(Pos::new(last, len));
-            return Ok(());
+    /// vim does not copy the text: it re-executes the whole insertion from the
+    /// redo buffer, so the entry key runs again at the current cursor. That is
+    /// what puts `3o` below the previous copy, `3O` above it (the cursor ends on
+    /// the last inserted line either way) and keeps a multi-line text intact.
+    fn repeat_insert_text(
+        &mut self,
+        ed: &mut Editor,
+        text: &str,
+        times: u64,
+        entry: char,
+    ) -> VimResult<()> {
+        for _ in 0..times {
+            insert::enter_insert(ed, entry)?;
+            for ch in text.chars() {
+                insert::type_char(ed, self, ch)?;
+            }
         }
-        // Inline entries: the cursor already sits just after the typed text, so
-        // the repetitions are inserted right at the cursor.
-        let pos = ed.cursor();
-        let repeated = text.repeat(times as usize);
-        ed.insert_text(pos, &repeated)?;
-        let end = Pos::new(pos.line, pos.col + repeated.len());
-        let clamped = ed.current_buffer().clamp_pos(end);
-        ed.set_cursor(clamped);
+        // The replay recorded the text again; this session already stored it.
+        self.insert_text.clear();
         Ok(())
     }
     /// While in RegisterPending after "m", bind the mark name.
@@ -412,7 +411,10 @@ impl NormalEngine {
         // A count on the insert command repeats the typed text (vim: "3iabc<Esc>"
         // inserts "abcabcabc"). The first copy is already in the buffer.
         if repeat > 1 && !text.is_empty() {
-            let _ = Self::repeat_insert_text(ed, &text, repeat - 1, entry);
+            let result = self.repeat_insert_text(ed, &text, repeat - 1, entry);
+            if let Err(e) = result {
+                ed.emsg(e.to_string());
+            }
         }
         // A visual-block insert (C-v I / A) repeats the typed text on the other
         // lines of the block (ops.c block_insert()); it also places the cursor

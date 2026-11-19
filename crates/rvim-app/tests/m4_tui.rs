@@ -496,6 +496,74 @@ fn dot_repeats_an_insert_that_contains_a_newline() {
 }
 
 #[test]
+fn counted_open_leaves_the_cursor_on_the_last_inserted_line() {
+    let mut tui = Tui::new(open(&["x", "y"]));
+    // 3oa<Esc>: vim opens the next line, then re-executes the whole insertion,
+    // so the cursor ends on the last inserted line (line 4 of 5), on the 'a'.
+    let rows = screen(&mut tui, "3oa<Esc>", 20, 8);
+    assert_eq!(rows[0], "x");
+    assert_eq!(rows[1], "a");
+    assert_eq!(rows[2], "a");
+    assert_eq!(rows[3], "a");
+    assert_eq!(rows[4], "y");
+    let cursor = tui.session.editor.cursor();
+    assert_eq!(
+        (cursor.line, cursor.col),
+        (3, 0),
+        "cursor on the last insert"
+    );
+}
+
+#[test]
+fn counted_open_above_leaves_the_cursor_on_the_top_inserted_line() {
+    let mut tui = Tui::new(open(&["x", "y"]));
+    // 3Oabc<Esc>: "O" inserts above, and each repeat goes above the previous
+    // copy, so the cursor ends on the topmost inserted line.
+    let rows = screen(&mut tui, "3Oabc<Esc>", 20, 8);
+    assert_eq!(rows[0], "abc");
+    assert_eq!(rows[1], "abc");
+    assert_eq!(rows[2], "abc");
+    assert_eq!(rows[3], "x");
+    let cursor = tui.session.editor.cursor();
+    assert_eq!(
+        (cursor.line, cursor.col),
+        (0, 2),
+        "cursor on the last insert"
+    );
+}
+
+#[test]
+fn counted_insert_with_a_newline_keeps_the_text_intact() {
+    let mut tui = Tui::new(open(&["x", "y"]));
+    // The typed text contains a <CR>: every repetition must reopen the two
+    // lines instead of splicing one string with an embedded newline.
+    let rows = screen(&mut tui, "3oabc<CR>d<Esc>", 20, 10);
+    assert_eq!(rows[0], "x");
+    assert_eq!(rows[1], "abc");
+    assert_eq!(rows[2], "d");
+    assert_eq!(rows[3], "abc");
+    assert_eq!(rows[4], "d");
+    assert_eq!(rows[5], "abc");
+    assert_eq!(rows[6], "d");
+    assert_eq!(rows[7], "y");
+    let cursor = tui.session.editor.cursor();
+    assert_eq!(
+        (cursor.line, cursor.col),
+        (6, 0),
+        "cursor on the last inserted line"
+    );
+}
+
+#[test]
+fn counted_append_leaves_the_cursor_on_the_last_inserted_character() {
+    let mut tui = Tui::new(open(&["x"]));
+    let rows = screen(&mut tui, "3Aab<Esc>", 20, 5);
+    assert_eq!(rows[0], "xababab");
+    let cursor = tui.session.editor.cursor();
+    assert_eq!((cursor.line, cursor.col), (0, 6), "cursor on the last 'b'");
+}
+
+#[test]
 fn counted_open_inserts_multiple_lines() {
     let session = open(&["x"]);
     let mut tui = Tui::new(session);
