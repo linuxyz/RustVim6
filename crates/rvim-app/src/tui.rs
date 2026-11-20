@@ -14,9 +14,14 @@ use rvim_normal::{NormalEngine, insert};
 use rvim_term::pane::{
     CmdlineText, PaneView, RowView, ScreenLayout, SelectionView, WildmenuItems, render_layout,
 };
-use rvim_term::{Grid, Input, KeySource, Theme, display_col, gutter_width};
+use rvim_term::{Color, Grid, Input, KeySource, Style, Theme, display_col, gutter_width};
 
 use crate::Session;
+
+/// Syntax spans of one buffer line, mapped to terminal styles.
+type LineHighlights = Vec<(usize, usize, Style)>;
+/// Visible syntax spans, keyed by (buffer, line).
+type SyntaxMap = std::collections::HashMap<(i32, usize), LineHighlights>;
 
 /// A two-key normal command waiting for its second key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1206,7 +1211,14 @@ impl Tui {
     }
 
     /// Build one window pane.
-    fn pane_for(&self, id: WindowId, rect: Rect, tabstop: usize, active: bool) -> PaneView {
+    fn pane_for(
+        &self,
+        id: WindowId,
+        rect: Rect,
+        tabstop: usize,
+        active: bool,
+        syntax: &SyntaxMap,
+    ) -> PaneView {
         let ed = &self.session.editor;
         let Some(win) = ed.windows.get(id) else {
             return PaneView::default();
@@ -1226,12 +1238,14 @@ impl Tui {
         let mut foldcol: Vec<String> = Vec::new();
         let text_rows = rect.text_rows().max(1);
         let mut content = Vec::with_capacity(text_rows);
+        let mut row_highlights: Vec<LineHighlights> = Vec::with_capacity(text_rows);
         let mut cursor_row = None;
         let mut row = 0usize;
         let mut line = win.top_line;
         while row < text_rows {
             if line >= line_count {
                 content.push(RowView::Eob);
+                row_highlights.push(Vec::new());
                 foldcol.push(self.fold_column_text(id, line, foldcolumn));
                 signs.push(String::new());
                 row += 1;
@@ -1246,6 +1260,7 @@ impl Tui {
                 foldcol.push(self.fold_column_text(id, line, foldcolumn));
                 signs.push(String::new());
                 content.push(RowView::Filler("^".to_string()));
+                row_highlights.push(Vec::new());
                 row += 1;
             }
             if row >= text_rows {
@@ -1262,6 +1277,7 @@ impl Tui {
                     end,
                     label,
                 });
+                row_highlights.push(Vec::new());
                 row += 1;
                 line = end + 1;
                 continue;
@@ -1277,7 +1293,9 @@ impl Tui {
             }
             foldcol.push(self.fold_column_text(id, line, foldcolumn));
             signs.push(sign_text.get(line).cloned().unwrap_or_default());
+            let spans = syntax.get(&(bufnr, line)).cloned().unwrap_or_default();
             content.push(RowView::Text { line, text });
+            row_highlights.push(spans);
             row += 1;
             line += 1;
         }
@@ -1318,6 +1336,22 @@ impl Tui {
                 tabstop,
             ),
             active,
+            highlights: row_highlights,
+        }
+    }
+
+    /// `rvim_term` style of a highlight group (`:hi` + vim's default links).
+    fn hl_style(&self, group: &str) -> Style {
+        let Some(attr) = self.session.editor.syntax_highlight(group) else {
+            return Style::NORMAL;
+        };
+        Style {
+            fg: attr.fg.map(hl_color).unwrap_or(Color::Default),
+            bg: attr.bg.map(hl_color).unwrap_or(Color::Default),
+            bold: attr.bold,
+            italic: attr.italic,
+            underline: attr.underline,
+            reverse: attr.reverse,
         }
     }
 
@@ -1543,10 +1577,33 @@ impl Tui {
         let current = self.session.editor.windows.current_id();
         let ids = self.session.editor.windows.ids();
         let rects = self.session.editor.windows.rects().clone();
+        // Syntax spans of the visible lines, once per (buffer, line) and frame.
+        let mut syntax: SyntaxMap = SyntaxMap::new();
+        if self.session.editor.syntax.enabled {
+            for id in &ids {
+                let Some(win) = self.session.editor.windows.get(*id) else {
+                    continue;
+                };
+                let bufnr = win.bufnr;
+                let top = win.top_line;
+                let rows = rects.get(id).map(|r| r.text_rows()).unwrap_or(0);
+                for line in top..top.saturating_add(rows.max(1)) {
+                    if syntax.contains_key(&(bufnr, line)) {
+                        continue;
+                    }
+                    let spans = self.session.editor.syntax_spans(bufnr, line);
+                    let styled = spans
+                        .into_iter()
+                        .map(|(start, end, group)| (start, end, self.hl_style(&group)))
+                        .collect();
+                    syntax.insert((bufnr, line), styled);
+                }
+            }
+        }
         let mut panes = Vec::with_capacity(ids.len());
         for id in ids {
             let rect = rects.get(&id).copied().unwrap_or_default();
-            panes.push(self.pane_for(id, rect, tabstop, id == current));
+            panes.push(self.pane_for(id, rect, tabstop, id == current, &syntax));
         }
         let message = self.message.clone();
         let cmdline = self.cmdline.as_ref().map(|c| CmdlineText {
@@ -1779,6 +1836,14 @@ fn motion_key(key: &Key) -> Option<char> {
             _ => None,
         },
         Key::Nop => None,
+    }
+}
+
+/// Map a syntax highlight colour onto the terminal colour model.
+fn hl_color(color: rvim_syntax::highlight::HlColor) -> Color {
+    match color {
+        rvim_syntax::highlight::HlColor::Rgb(r, g, b) => Color::Rgb(r, g, b),
+        rvim_syntax::highlight::HlColor::Indexed(index) => Color::Ansi(index),
     }
 }
 

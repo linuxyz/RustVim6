@@ -201,6 +201,7 @@ impl_implemented![
     "read",
     "redo",
     "normal",
+    "highlight",
     "rviminfo",
     "redraw",
     "registers",
@@ -720,7 +721,8 @@ pub fn run_command_ctx(
         "delfunction" => crate::handlers_viml::cmd_delfunction(ed, env, state, p),
         "setf" | "setfiletype" => crate::handlers_viml::cmd_setfiletype(ed, env, state, p),
         "echohl" => Ok(ExOutcome::Continue),
-        "syntax" => crate::handlers_viml::cmd_syntax_state(ed, p),
+        "syntax" => crate::handlers_syntax::cmd_syntax(ed, p),
+        "highlight" => crate::handlers_syntax::cmd_highlight(ed, p),
         "filetype" => crate::handlers_viml::cmd_filetype_state(ed, env, state, p),
         "if" | "elseif" | "else" | "endif" | "while" | "endwhile" | "for" | "endfor" | "try"
         | "catch" | "finally" | "endtry" | "break" | "continue" | "throw" | "return" => {

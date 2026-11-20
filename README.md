@@ -2,18 +2,20 @@
 
 A Vim-compatible editor written from scratch in Rust, with **no third-party crates**
 (`std` only) and an offline build. Behaviour is anchored to Vim `v8.2.5172`
-(`src/` + `runtime/` as the only reference).
+(`src/` + `runtime/` as the only reference). The sole dependency exception is the
+M8 encryption/compression work (see [docs/PLAN.md](docs/PLAN.md)).
 
-## Status: M5 (windows, tabs and advanced editing)
+## Status: M6 (syntax highlighting)
 
 | Milestone | Delivered |
 |---|---|
 | M0 | workspace, CI gates, golden-test harness `rvim --version` / `-es` |
 | M1 | headless editing core (buffers, undo tree, marks, registers, options) |
-| M2 | 589-entry Ex command table, 245 implemented, command line + completion, maps/abbrevs |
+| M2 | 589-entry Ex command table, 247 implemented, command line + completion, maps/abbrevs |
 | M3 | legacy VimL interpreter, 393/543 builtins, autocmd dispatch, `:source` of real runtime scripts |
 | M4 | terminal TUI (grid, keys, mappings, search, message paging, resize) |
 | M5 | windows/tabpages, folds, diff (`rvim -d`), quickfix/location lists, visual mode + text objects, `.` repeat, jumps/changes, viminfo, sign/textprop/popup APIs |
+| M6 | syntax highlighting: `rvim-syntax` (keyword/match/region, clusters, cross-line state), 20 built-in filetypes, `:syntax`/`:highlight`, coloured TUI cells |
 
 Coverage tables are generated, never hand-edited: `cargo run -p rvim-tools -- coverage`.
 Known deviations are enumerated in [docs/compat_deviations.md](docs/compat_deviations.md).

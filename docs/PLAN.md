@@ -2,6 +2,7 @@
 
 > 配套文档：架构见 [ARCH.md](ARCH.md)，Runtime 兼容清单见 [RUNTIME_COMPAT.md](RUNTIME_COMPAT.md)。
 > 参考基线：vim/vim `v8.2.5172`。约束：**std-only、零第三方依赖、离线可构建**；主平台 Windows，兼顾 Unix。
+> 唯一例外：M8 的加密/压缩允许外部依赖（见 M8 条目）。
 
 ## 0. 总体路线
 
@@ -156,16 +157,20 @@ M0 脚手架 ─► M1 Headless 编辑内核 ─► M2 Ex 命令体系 ─► M3
 4. **已知未做**（登记 `docs/compat_deviations.md` \9）：自定义 `'foldtext'` 表达式、`foldmethod=expr/syntax`、`:diffpatch`、popup 的 filter/回调、textprop 的高亮渲染、viminfo 只读写 RustVim 建模的字段子集。
 
 ---
+## M6 — 语法高亮、拼写、文件类型与标签
 
-## M6 — 语法高亮、拼写、文件类型与加密
-
-- 自研正则 NFA 引擎收口（`regexp_nfa.c` 语义），`:syntax` 引擎（keyword/match/region、contains、cluster、`syn-stack`）。
-- `filetype.vim`/ftplugin/indent/syntax 全量 runtime 消费；`filetype detection` 对照表测试。
+- ✅ **`rvim-syntax` 引擎**（对齐 `syntax.c`）：`syntax keyword` / `match` / `region`（`start=`/`end=`、`contains=`、`@cluster`、`syntax case`）；跨行状态（注释、多行字符串）、嵌套项覆盖容器、span 按「外层先、内层后」排序；模式复用 MVP 正则。
+- ✅ **20 种内置文件类型**（`rvim-syntax::lang`）：c cpp css go html java javascript json lua make markdown python ruby rust sh sql toml typescript vim yaml；按 `'filetype'` 或文件扩展名检测。
+- ✅ **`:syntax` 与 `:highlight`**：`on/off/enable/clear/reset`、`keyword/match/region/cluster/case/list`；`hi Group guifg=#RRGGBB`、`hi link`、`hi clear`、查询；默认深色配色 + vim 默认 link 表。
+- ✅ **TUI 渲染**：`rvim-term::pane` 的 span 覆盖层（`Grid::set_style`），横向滚动/行号栏/折叠列不受影响；`Style` 增加 italic。
+- ⏳ 未做：runtime `syntax/*.vim` 全量消费、`syn sync`、`nextgroup`/`contained`/`skip`/`transparent`、`\zs\ze`、`synID()` 系列内置函数。
+- 正则 NFA 收口（`regexp_nfa.c` 语义）、spell（`.spl`）、标签栈（`tags`）与 `cindent/smartindent` 仍在 M6 范围，见下：
 - spell：`.spl` 读取/拼写检查/建议（`spell.c/spellfile.c/spellsuggest.c`）。
 - 标签栈（`tagstack`、`tags` 文件格式）、`cindent/smartindent`。
-- 加密：bfish/blowfish2/zip 与 swapfile 格式（std-only 自研 SHA256/BF/XChaCha 等价实现，密文互读校验）。
 
-**出口标准**：常见 20 种文件类型高亮与 vim 截图级对比；加密 swap/文件可与真实 vim 互读。
+
+**出口标准**：常见 20 种文件类型高亮（`m6_syntax.rs` 的 20 文件类型矩阵 + TUI 颜色断言）；`:syntax`/`:highlight` 可被脚本与测试查询。
+**出口标准**：常见 20 种文件类型高亮与 vim 截图级对比；`:syntax`/`:highlight` 与 `synID()` 系列可被脚本查询。
 
 ---
 
@@ -186,7 +191,7 @@ M0 脚手架 ─► M1 Headless 编辑内核 ─► M2 Ex 命令体系 ─► M3
 - `vim9script` 语境、类型系统（`vim9type.c`）、编译器（`vim9compile.c`）、字节码 VM（`vim9execute.c/vim9instr.c`）、`def/enddef`、`import`（`runtime/import/`）、class（若基线含）。
 - legacy/vim9 互操作、`defcompile`、性能基准（对拍相同脚本的 vim 耗时）。
 - 兼容收口：剩余 Ex/options/functions 清零或显式标记「不支持+理由」；`src/testdir` 通过率报告；`+feature` 列表（`has()`）对齐。
-- 打包：Windows 单 exe、Unix tarball、安装器（NSIS 等价流程）、runtime 合并安装与 `$VIMRUNTIME` 解析。
+- **加密与压缩（从 M6 移入）**：`bfish`/`blowfish2`/`zip` 与 swapfile 加密格式，密文需与真实 vim 互读。此项**允许使用外部依赖**（例如 RustCrypto 家族的 `blowfish`/`zip`/`sha2`），是本仓「零第三方依赖」约束的**唯一例外**；其余模块仍保持 std-only。
 
 **出口标准**：对外发布 `rvim 1.0`，声明兼容等级（见 RUNTIME_COMPAT §7）。
 
@@ -219,7 +224,7 @@ M0 脚手架 ─► M1 Headless 编辑内核 ─► M2 Ex 命令体系 ─► M3
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| 无 crates.io，终端/正则/JSON 全自研 | 工期 | 严格分阶段；正则/JSON 先子集后全集；FFI 只碰 OS 原生 API |
+| 无 crates.io，终端/正则/JSON 全自研（M8 加密/压缩除外，允许外部依赖） | 工期 | 严格分阶段；正则/JSON 先子集后全集；FFI 只碰 OS 原生 API |
 | VimL 语义暗坑多（弱类型、作用域、异常） | M3 延期 | 以 testdir 用例驱动；先求语义正确再优化；建语义决策记录（`docs/adr/`） |
 | 正则 NFA 复杂度 | M6 瓶颈 | BT 引擎先行覆盖 90% 场景，NFA 仅在性能/特性需要时补 |
 | Windows ConPTY/控制台差异 | M4/M7 | VT 优先、API 降级；conhost 与 Windows Terminal 双验 |

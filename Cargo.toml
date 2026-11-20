@@ -1,5 +1,6 @@
 # RustVim workspace — Vim rewrite in Rust (reference: vim/vim v8.2.5172)
 # Hard constraint: std-only, zero third-party dependencies, offline-buildable.
+# Sole exception: M8 encryption/compression may use external crates (see docs/PLAN.md).
 [workspace]
 resolver = "2"
 members = [
@@ -8,6 +9,7 @@ members = [
     "crates/rvim-buffer",
     "crates/rvim-undo",
     "crates/rvim-diff",
+    "crates/rvim-syntax",
     "crates/rvim-editor",
     "crates/rvim-ex",
     "crates/rvim-normal",

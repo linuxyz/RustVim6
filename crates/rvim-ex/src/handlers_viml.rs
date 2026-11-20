@@ -575,21 +575,6 @@ pub fn cmd_setfiletype(
     Ok(ExOutcome::Continue)
 }
 
-/// `:syntax on|off|enable|clear|...` — records the state (highlighting is M6).
-pub fn cmd_syntax_state(ed: &mut Editor, p: &ParsedEx) -> VimResult<ExOutcome> {
-    let arg = p.args.trim().to_ascii_lowercase();
-    match arg.as_str() {
-        "on" | "enable" => ed.syntax_enabled = true,
-        "off" | "clear" => ed.syntax_enabled = false,
-        "" => ed.messages.info(format!(
-            "syntax: {}",
-            if ed.syntax_enabled { "ON" } else { "OFF" }
-        )),
-        _ => {}
-    }
-    Ok(ExOutcome::Continue)
-}
-
 /// `:filetype on|off|detect|plugin|indent ...`
 pub fn cmd_filetype_state(
     ed: &mut Editor,

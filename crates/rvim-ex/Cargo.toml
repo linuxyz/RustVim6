@@ -14,4 +14,5 @@ rvim-core = { path = "../rvim-core" }
 rvim-buffer = { path = "../rvim-buffer" }
 rvim-editor = { path = "../rvim-editor" }
 rvim-normal = { path = "../rvim-normal" }
+rvim-syntax = { path = "../rvim-syntax" }
 rvim-viml = { path = "../rvim-viml" }

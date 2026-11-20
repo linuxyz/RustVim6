@@ -23,6 +23,7 @@ dependencies = [
  "rvim-editor",
  "rvim-ex",
  "rvim-normal",
+ "rvim-syntax",
  "rvim-term",
  "rvim-termio",
  "rvim-viml",
@@ -59,6 +60,7 @@ dependencies = [
  "rvim-buffer",
  "rvim-core",
  "rvim-diff",
+ "rvim-syntax",
  "rvim-undo",
 ]
 
@@ -70,6 +72,7 @@ dependencies = [
  "rvim-core",
  "rvim-editor",
  "rvim-normal",
+ "rvim-syntax",
  "rvim-viml",
 ]
 
@@ -80,6 +83,14 @@ dependencies = [
  "rvim-buffer",
  "rvim-core",
  "rvim-editor",
+]
+
+[[package]]
+name = "rvim-syntax"
+version = "0.1.0-M5"
+dependencies = [
+ "rvim-core",
+ "rvim-viml",
 ]
 
 [[package]]

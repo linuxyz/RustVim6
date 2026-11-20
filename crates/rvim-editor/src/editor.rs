@@ -171,8 +171,8 @@ pub struct Editor {
     /// True once `:filetype on` has sourced the runtime `filetype.vim`
     /// (vim does this only on the first enable).
     pub filetype_script_loaded: bool,
-    /// `:syntax on/enable`
-    pub syntax_enabled: bool,
+    /// `:syntax on` state, the loaded definition and the `:highlight` table.
+    pub syntax: crate::syntax::SyntaxState,
     /// Argument list (`:args`, `:argadd`, ...).
     pub arglist: Vec<PathBuf>,
     /// Index of the current argument.
@@ -242,7 +242,7 @@ impl Editor {
             filetype_plugin: false,
             filetype_indent: false,
             filetype_script_loaded: false,
-            syntax_enabled: false,
+            syntax: crate::syntax::SyntaxState::new(),
             arglist: Vec::new(),
             arg_index: 0,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -1290,6 +1290,97 @@ impl Editor {
     /// `b:changedtick` of a specific buffer, `None` when it is not loaded.
     pub fn changedtick_of(&self, bufnr: i32) -> Option<u64> {
         self.buffer(bufnr).ok().map(Buffer::changedtick)
+    }
+
+    // --- syntax highlighting (M6) ----------------------------------------
+
+    /// `:syntax on|off`: toggling on detects the language for the buffer.
+    pub fn set_syntax_enabled(&mut self, on: bool) {
+        if on {
+            self.syntax.enabled = true;
+            self.ensure_syntax();
+        } else {
+            self.syntax.disable();
+        }
+    }
+
+    /// Load a named syntax (`:syntax on rust`, `:set syntax=rust`).
+    ///
+    /// Returns false when the name has no built-in definition; highlighting
+    /// stays enabled so a later `:syntax keyword ...` can build one.
+    pub fn set_syntax_language(&mut self, name: &str) -> bool {
+        let name = name.trim();
+        if name.is_empty() || name.eq_ignore_ascii_case("off") {
+            self.syntax.disable();
+            return true;
+        }
+        let known = self.syntax.enable(name);
+        if !known {
+            self.syntax.enabled = true;
+        }
+        known
+    }
+
+    /// Pick the syntax from 'filetype' (or the file name) when it changed.
+    pub fn ensure_syntax(&mut self) {
+        if !self.syntax.enabled {
+            return;
+        }
+        let filetype = self.options.str_or("filetype", "");
+        let name = if filetype.is_empty() {
+            let display = self.current_buffer().display_name();
+            crate::syntax::lang::from_filename(&display).map(str::to_string)
+        } else {
+            Some(filetype)
+        };
+        let key = format!(
+            "{}:{}",
+            self.current_bufnr(),
+            name.clone().unwrap_or_default()
+        );
+        if self.syntax.resolved == key && self.syntax.engine().is_some() {
+            return;
+        }
+        self.syntax.resolved = key;
+        match name {
+            Some(name) if !name.is_empty() => {
+                let _ = self.syntax.enable(&name);
+            }
+            _ => self.syntax.clear_engine(),
+        }
+    }
+
+    /// Highlighted byte ranges of one buffer line: (start, end, group).
+    ///
+    /// Spans are ordered outer-first: later spans win when they overlap.
+    pub fn syntax_spans(&mut self, bufnr: i32, line: usize) -> Vec<(usize, usize, String)> {
+        if !self.syntax.enabled {
+            return Vec::new();
+        }
+        self.ensure_syntax();
+        if self.syntax.engine().is_none() {
+            return Vec::new();
+        }
+        let Ok(buffer) = self.buffer(bufnr) else {
+            return Vec::new();
+        };
+        let tick = buffer.changedtick();
+        let last = buffer.line_count().saturating_sub(1);
+        let end = line.min(last);
+        let start = end.saturating_sub(crate::syntax::SYNC_LINES);
+        let window: Vec<(usize, String)> = (start..=end)
+            .map(|l| (l, buffer.line_str(l).unwrap_or("").to_string()))
+            .collect();
+        let spans = self.syntax.line_spans(bufnr, tick, end, &window);
+        spans
+            .iter()
+            .map(|s| (s.start, s.end, s.group.clone()))
+            .collect()
+    }
+
+    /// Attributes of a highlight group (`:highlight` + vim's default links).
+    pub fn syntax_highlight(&self, group: &str) -> Option<rvim_syntax::highlight::HlAttr> {
+        self.syntax.highlight(group)
     }
 
     /// `:set [no]modified`: 'modified' is an alias for `b_changed`

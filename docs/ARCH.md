@@ -95,6 +95,7 @@ RustVim6/
 │  ├─ rvim-buffer/           # L2 文档模型：Buffer/Line/变更/文件格式
 │  ├─ rvim-undo/             # L2 撤销树
 │  ├─ rvim-diff/            # L2 行级 diff（对齐 src/xdiff，M5）
+│  ├─ rvim-syntax/          # L2 语法高亮引擎：keyword/match/region、cluster、内置 20 种文件类型（M6）
 │  ├─ rvim-editor/           # L2/L4 聚合：Editor/Window/Option/Register/Mark/Mode
 │  ├─ rvim-regex/            # L2 正则（先字面量子集，后 BT/NFA）
 │  ├─ rvim-search/           # L2 搜索替换
@@ -119,6 +120,7 @@ RustVim6/
 rvim-core ◄── rvim-buffer ◄── rvim-undo
      ▲              ▲
      └── rvim-diff ─┘（纯函数，无依赖，仅用 std）
+        rvim-syntax ◄── rvim-viml（复用 MVP 正则）
      ▲              ▲
      ├──────────────┴── rvim-editor ◄── rvim-ex ◄── rvim-normal
      │                     ▲  ▲  ▲         ▲
@@ -126,6 +128,7 @@ rvim-core ◄── rvim-buffer ◄── rvim-undo
      ├─ rvim-search ───────────┘            │
      └─ rvim-termio            rvim-viml ────┘（viml 依赖 core/buffer 做 typval 与 getbufline）
 rvim-app 依赖以上全部领域 crate；rvim-term 依赖 termio+app；bin/rvim 依赖 app+term。
+rvim-editor 依赖 rvim-syntax（每缓冲的语法状态与缓存），rvim-ex 通过它实现 `:syntax`/`:highlight`。
 ```
 
 > 渐进落地：M1 阶段把 register/mark/map/autocmd/option 先放在 `rvim-editor` 内模块化，
@@ -318,6 +321,16 @@ Window  { id (>=1000), tabpage, bufnr, cursor, top_line, left, curswant,
 - **折叠**：每个窗口一份折叠列表 `{start, end, level, closed}`，`'foldmethod'` 支持 manual（`zf`）、indent（缩进/ `'shiftwidth'`，`'shiftwidth'=0` 时用 `'tabstop'`）、marker（`{{{ }}}`，含 `{{{1` 层级）、diff（diff 模式自动）；`syntax/expr` 明确报告不支持。折叠行由 TUI 渲染为 `+-- N lines: text`，`'foldcolumn'` 显示层级。
 - **diff**：`rvim-diff` 给出最短编辑脚本的变更块，编辑器据此计算每侧的 filler 行与变更行标记，`'foldmethod=diff'` 把连续变更行折起来；`]c`/`[c` 跳转变更，`:diffget`/`:diffput` 拷贝单个变更块。`vimdiff` 由 `rvim -d a b` 启动（每个文件一窗，全部 `:diffthis`）。
 - **quickfix/location list**：全局栈最多 10 份列表，`:cexpr`/`:cgetexpr`/`:cfile` 用 `rvim-ex::errorformat` 把文本解析成条目；`:copen` 把列表画成一个 `buftype=quickfix` 的窗口。
+
+### 5.9 语法高亮（rvim-syntax / rvim-editor::syntax，M6）
+
+- **引擎是纯函数**：`Engine::line(&State, &str) -> (Vec<Span>, State)` 返回本行的高亮字节区间与组名，外加要带到下一行的状态（未闭合 region 的栈），对应 `syntax.c` 的 `syn_state`。
+- **条目**：`keyword`（整词匹配，大小写由 `syntax case` 决定）、`match`（正则 + `contains`）、`region`（start/end 正则 + `contains`）；`@cluster` 在 `contains` 中展开为组名，`ALL`/`TOP` 表示全部。
+- **优先级**：后定义的条目覆盖先定义的（倒序扫描）；span 按「起点升序、同起点长区间在前」排序，渲染时后画的覆盖先画的，所以嵌套项压过容器。
+- **跨行**：行尾仍未闭合的 region 继续占用下一行（块注释、多行字符串），`State` 随行缓存；查询某行时从 `SYNC_LINES`（100）行前重启，等价于没有 `syn sync` 时的近似。
+- **文件类型**：`rvim-syntax::lang` 内置 20 种定义；`Editor::ensure_syntax()` 先看 `'filetype'`，为空再按文件名后缀（`filetype.vim` 的子集）；结果按 (缓冲区, `b:changedtick`) 缓存，换缓冲/编辑即失效。
+- **渲染**：`PaneView.highlights` 按内容行携带 `(start, end, Style)`；`draw_pane()` 先画文本再用 `Grid::set_style()` 覆盖，字节列经 `display_col()` 换算成显示列，因此 Tab 展开、横向滚动、行号/折叠/sign 栏都不受影响。
+- **颜色**：`rvim-syntax::highlight` 维护组表与 `:hi link`（默认深色配色 + vim 默认 link 表）；TUI 只把 `HlAttr` 映射成终端 `Style`（含 italic）。
 
 ### 5.7 线程模型
 - **单主线程 + 事件循环**：所有缓冲/模式状态只在主线程可变，避免重入锁——这与 Vim 单线程模型一致，保证 VimL 语义（`textlock`、定时器回调）简单正确。

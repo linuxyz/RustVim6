@@ -18,6 +18,7 @@ pub struct Style {
     pub fg: Color,
     pub bg: Color,
     pub bold: bool,
+    pub italic: bool,
     pub underline: bool,
     pub reverse: bool,
 }
@@ -27,6 +28,7 @@ impl Style {
         fg: Color::Default,
         bg: Color::Default,
         bold: false,
+        italic: false,
         underline: false,
         reverse: false,
     };
@@ -35,6 +37,7 @@ impl Style {
         fg: Color::Default,
         bg: Color::Default,
         bold: false,
+        italic: false,
         underline: false,
         reverse: true,
     };
@@ -43,6 +46,7 @@ impl Style {
         fg: Color::Default,
         bg: Color::Default,
         bold: true,
+        italic: false,
         underline: false,
         reverse: false,
     };
@@ -52,6 +56,9 @@ impl Style {
         let mut out = String::from("\u{1b}[0");
         if self.bold {
             out.push_str(";1");
+        }
+        if self.italic {
+            out.push_str(";3");
         }
         if self.underline {
             out.push_str(";4");

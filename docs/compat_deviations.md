@@ -308,30 +308,25 @@
 | quickfix | 缺失（`setqflist()` 返回空、`:copen` 未实现） | `rvim-ex::errorformat` + `rvim-editor::quickfix`（10 层栈、qflist/loclist、qf 窗口）+ `c*`/`l*` 全族命令与 4 个内置函数 |
 | 折叠 | M2 占位（`MoreState.folds` 从未填充，`foldclosed()` 永远 -1） | 新增 `rvim-editor::fold`（每窗口一份折叠表、manual/indent/marker/diff）、`rvim-normal::foldcmd`（z 系列）、`:fold*` 命令；TUI 渲染折叠摘要与 `'foldcolumn'` |
 | 跳转/change list | `jumplist` 只有空结构，`:jumps` 未实现 | `Editor` 新增真实 jump/change list，`<C-o>`/`<C-i>`、`:jumps`、`:changes` 可用；viminfo 读写（`:wviminfo`/`:rviminfo`/`-i`/`'viminfo'`） |
-## 10. M0–M5 补齐复核（执行层缺口）
+## 11. M6 语法高亮（本轮交付）
 
-> 复核方式：把 PLAN 里「已登记、留给后续里程碑」的条目逐条对照代码与 `reference/vim/src`，
-> 补齐真正缺失的执行层能力。回归用例集中在 `crates/rvim-app/tests/m4_tui.rs`（75 例）与
-> `m2_features.rs`（46 例），以及 `rvim-normal` 单测。
+> 复核方式：对照 `reference/vim/src/syntax.c`（`syn_cmd_keyword`/`syn_cmd_match`/`syn_cmd_region`、
+> `syn_finish_line` 的状态机）与 `highlight.c`（默认组与 `hi link`）实现，并用 TUI 单元格颜色断言验证
+> 渲染。回归用例：`crates/rvim-syntax/src/lib.rs`（6）、`lang.rs`（3）、`highlight.rs`（4）、
+> `rvim-editor::syntax`（2）、`crates/rvim-app/tests/m6_syntax.rs`（7）。
 
-| 主题 | 问题 | 修正 |
+| 主题 | Vim | RustVim |
 |---|---|---|
-| `:normal` / `:normal!` | M2 起登记为「→ M3/M4」，一直未实现（脚本与冒烟里的 `:normal` 会报未实现） | 新增 `rvim-ex::handlers_normal`，按 `ex_docmd.c ex_normal()` 用同一套状态机执行 normal/insert/visual 键：无范围只跑一次、有范围逐行从列 1 开始；`!` 关闭映射（REMAP_NONE，无 `!` 走 `Maps::expand`）；参数停在半截时按 `<Esc>` 收尾；整次调用是**一个** undo 步；计数、寄存器、`gg`/`dgg`、文本对象、`z*`、`]c`/`[c`、`<C-w>` 全部可用 |
-| 插入模式控制键 | `<C-w>` `<C-u>` `<C-r>` `<C-a>` `<C-t>` `<C-d>` 被无声丢弃 | `rvim-normal::insert::key()` 成为唯一入口（TUI、计数重放、`:normal` 共用），按 `edit.c ins_bs()/ins_reg()/ins_ctrl_a()/ins_shift()` 实现，含 `'backspace'` 的 `indent`/`eol` 语义 |
-| 插入会话的重放模型 | 按**文本**重放：`3ifoo<BS>x` 会把删掉的字符再插回去，`.` 同样 | 改为记录**键序**（`NormalEngine::insert_keys`，vim 的 redo buffer）：计数插入与 `.` 重放键序，删除类按键一并重放 |
-| `'autoindent'` | 选项存在但没有任何效果 | `<CR>`/`o`/`O`/`cc` 复制当前行缩进（`edit.c ins_eol()/open_line()`、`ops.c op_change()`） |
-| 命令行历史键 | `rvim-cmdline` 有历史模型，但 TUI 键盘没接线 | `<Up>`/`<Down>`/`<C-p>`/`<C-n>`（wildmenu 打开时仍是补全）、前缀匹配、`<Down>` 越过最新一条时恢复正在编辑的行、执行时入历史；顺带补 `<C-u>`/`<C-w>` 行编辑 |
-| `'relativenumber'` | 选项存在但 TUI 不画 | 行号栏按 `screen.c` 语义：光标行显示绝对号，其余行显示距离 |
-| `'scrolloff'`/`'sidescrolloff'` | 选项存在但滚动不理会 | `scroll_windows()` 保持光标与窗口边缘的距离（上限为半屏），并限制 `top` 使末行最多停在窗口底行 |
-| `'packpath'`/`'maxfuncdepth'` | 选项表缺失，`:set` 报 E518 | 补入选项表；`'maxfuncdepth'` 成为函数深度上限的选项来源 |
-| 视觉模式状态机 | 只在 TUI 里实现，`:normal` 无法执行 `Vjd` 一类命令 | `rvim-normal::visual::key()` 抽取为共享状态机（`VisualPending`/`VisualAction`），TUI 与 `:normal` 共用；文本对象同样经 `rvim-normal::textobjects::apply()` 共享 |
+| 条目类型 | keyword/match/region + nextgroup/contained/skip/transparent/display | ✅ keyword/match/region + `contains=`/`@cluster`/`case`；❌ nextgroup/contained/skip/transparent |
+| 优先级与嵌套 | 后定义优先，contained 项只在容器内 | ✅ 后定义优先、容器内限制、嵌套项覆盖外层 |
+| 跨行状态 | `syn sync` 系列（fromstart/minlines/ccomment/maxlines） | 固定 100 行重启窗口，等价于无 sync 方法的近似 |
+| 正则 | 完整 vim 正则（\zs\ze、\@!、反向引用…） | MVP 正则（无 \zs\ze/断言），模式里可用的元字符见 §7.5 |
+| runtime `syntax/*.vim` | 全量 source | ❌ 不消费；20 种文件类型用内置定义，用户可用 `:syntax` 子集扩展 |
+| `:syntax` 子命令 | 全量 | on/off/enable/clear/reset、keyword/match/region/cluster/case/list；sync/include 接受但忽略 |
+| `:highlight` | 全量（term/cterm/gui、start/stop、blend…） | guifg/guibg/ctermfg/ctermbg/gui/cterm、link、clear、查询；其余参数忽略 |
+| 颜色 | cterm + gui 双模型、`:hi clear` 恢复默认 | 单一 HlAttr（RGB 或调色板索引），默认深色配色 |
+| 渲染 | 逐单元格属性、cursorline/视觉选区叠加、`synID()` 查询 | ✅ 逐单元格覆盖 + 选区优先；`synID`/`synIDattr`/`synstack` 尚未接线（引擎已带条目 id） |
+| 文件类型检测 | `filetype.vim` 全量 | 20 种扩展名 + `'filetype'`；其余靠 `:setf`/`au FileType` |
 
-**本轮登记但未实现**：
-
-| 主题 | Vim | RustVim | 收口 |
-|---|---|---|---|
-| `:normal` 里的命令/搜索输入 | `:normal! :s/a/b/` 会进入命令行 | `:` 让序列提前结束；`/`/`?`/`n`/`N` 未执行（键被忽略） | 收口时把搜索与命令行接入共享状态机 |
-| `:normal` 的未实现普通命令 | `f/t/r`、`=`、`gq` 族等 | 引擎没有的命令键被忽略（vim 是 beep 后继续） | 随 normal 引擎扩充 |
-| `'smartindent'`/`'cindent'` | 智能缩进 | 未实现（`:set si`/E518 仍报未知选项） | M6 |
-| 软换行 `'wrap'` | 长行折行显示 | 只做横向滚动 | 收口时补 |
-| 鼠标与 `<expr>` 映射 | `set mouse`、RHS 求值 | 未实现（`<expr>` 显式 E15） | M5 收口后续 |
+**M6 其余条目状态**：正则 NFA 收口、spell（`.spl`）、标签栈（`tags`/`tagstack`）、
+`cindent`/`smartindent` 尚未开始（下一轮）；加密与压缩已按计划移到 M8，并允许外部依赖。

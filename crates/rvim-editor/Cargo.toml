@@ -14,3 +14,4 @@ rvim-core = { path = "../rvim-core" }
 rvim-buffer = { path = "../rvim-buffer" }
 rvim-undo = { path = "../rvim-undo" }
 rvim-diff = { path = "../rvim-diff" }
+rvim-syntax = { path = "../rvim-syntax" }

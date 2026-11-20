@@ -12,7 +12,7 @@
 //!   exist, and the command line / message row are the last one.
 
 use crate::grid::Grid;
-use crate::render::{Theme, expand_cells};
+use crate::render::{Theme, display_col, expand_cells};
 use crate::style::Style;
 
 /// One content row of a pane.
@@ -88,6 +88,11 @@ pub struct PaneView {
     pub selection: Option<SelectionView>,
     /// True for the current window: reverse-video status line and the cursor.
     pub active: bool,
+    /// Syntax spans per content row: (start byte, end byte, style).
+    ///
+    /// Rows are matched to `content` by index; later spans override earlier
+    /// ones (that is how a contained syntax item wins over its region).
+    pub highlights: Vec<Vec<(usize, usize, Style)>>,
 }
 
 impl PaneView {
@@ -346,6 +351,25 @@ fn draw_pane(
             let visible: String = cells.iter().skip(pane.left).take(text_width).collect();
             grid.put(screen_row, pane.col + gutter, &visible, style);
         }
+        // Syntax labels sit on top of the plain text: later spans win.
+        if let RowView::Text { .. } = entry {
+            if let Some(spans) = pane.highlights.get(index) {
+                for (start, end, span_style) in spans {
+                    let from = display_col(text, *start, pane.tabstop);
+                    let to = display_col(text, *end, pane.tabstop);
+                    let from = from.saturating_sub(pane.left).min(text_width);
+                    let to = to.saturating_sub(pane.left).min(text_width);
+                    if to > from {
+                        grid.set_style(
+                            screen_row,
+                            pane.col + gutter + from,
+                            pane.col + gutter + to,
+                            *span_style,
+                        );
+                    }
+                }
+            }
+        }
     }
 
     // ---- visual selection ------------------------------------------------
@@ -450,6 +474,7 @@ mod tests {
             number_width: 0,
             relative: false,
             cursor_line: None,
+            highlights: Vec::new(),
             foldcolumn: 0,
             signcolumn: 0,
             signs: Vec::new(),

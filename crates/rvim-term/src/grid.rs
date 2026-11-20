@@ -78,6 +78,19 @@ impl Grid {
         }
     }
 
+    /// Re-style the cells [from, to) of a row, leaving their characters alone
+    /// (used by syntax highlighting, which paints over the text already drawn).
+    pub fn set_style(&mut self, row: usize, from: usize, to: usize, style: Style) {
+        if row >= self.rows {
+            return;
+        }
+        let start = from.min(self.cols);
+        let end = to.min(self.cols);
+        for col in start..end {
+            self.cells[row * self.cols + col].style = style;
+        }
+    }
+
     /// Fill a whole row with `ch`.
     pub fn fill_row(&mut self, row: usize, ch: char, style: Style) {
         if row >= self.rows {

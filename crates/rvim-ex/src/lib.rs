@@ -18,6 +18,7 @@ pub mod handlers_normal;
 pub mod handlers_qf;
 pub mod handlers_script;
 pub mod handlers_session;
+pub mod handlers_syntax;
 pub mod handlers_viml;
 pub mod handlers_win;
 pub mod host_meta;
