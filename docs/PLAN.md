@@ -8,9 +8,12 @@
 
 ```
 M0 脚手架 ─► M1 Headless 编辑内核 ─► M2 Ex 命令体系 ─► M3 VimL 解释器
-        ─► M4 TUI 终端前端 ─► M5 窗口/高级编辑 ─► M6 语法/拼写/加密
-        ─► M7 Job/Channel/Terminal ─► M8 Vim9 script 与兼容收口
+        ─► M4 TUI 终端前端 ─► M5 窗口/高级编辑 ─► M6 语法/拼写/标签
+        ─► M7 Job/Channel/Terminal ─► M8 兼容收口/加密/发布（1.0） ─► M9 Vim9 script（1.1）
 ```
+
+> **路线变更**：Vim9 script 原属 M8，现拆分为独立里程碑 **M9**；M8 收敛为「兼容收口 + 加密/压缩 + 发布（1.0）」，Vim9 以 1.1 增量交付，不阻塞 1.0。
+
 每个里程碑都要求：**可编译、可测试、有演示、有覆盖率数字**。兼容是连续过程——M1 起每个 PR 都更新三张覆盖率表（Ex 命令 / options / 内置函数）。
 
 ---
@@ -93,7 +96,7 @@ M0 脚手架 ─► M1 Headless 编辑内核 ─► M2 Ex 命令体系 ─► M3
 1. `:source runtime/defaults.vim` 与 `filetype.vim`：✅ 全部零错误 source（`m3_features.rs` 断言无 E 错误、选项/映射/autocmd/函数/`did_load_filetypes` 生效）。
 2. 内置函数覆盖率 ≥70%：✅ **389/543（71.6%）**（`crates/rvim-tools/tests/builtin_coverage.rs` 门禁测试确保不再回退），见 `docs/COVERAGE.md`。
 3. **脚本兼容通过率统计**：官方 `testdir` 驱动依赖 M4 的输入层（`:normal`/按键循环）暂未接入，改用**当前可运行的口径**：`reference/vim/runtime/autoload/**/*.vim` 共 52 个脚本，**33 个零错误 source（63.5%）**（`cargo test -p rvim-app --test m3_dispatch` 只覆盖其中样本，完整统计用 `scripts/smoke.ps1` 的手工口径复核）。未通过的 19 个分成三类，均已登记：
-   - **Vim9 script（3 个）**：`autoload/dist/ft.vim`、`autoload/dist/script.vim`、`autoload/ccomplete.vim` → 显式 `ERV338`；
+   - **Vim9 script（3 个）**：`autoload/dist/ft.vim`、`autoload/dist/script.vim`、`autoload/ccomplete.vim` → 显式 `ERV338`（M9 恢复）；
    - **嵌入式语言 heredoc**（`python << EOF`、`perl` 等，如 `pythoncomplete.vim`、`netrw.vim`）→ 解释器不支持宿主语言，正文被当作 Ex 行解析；
    - **Vim5 时代遗留**（`ada.vim` 等使用裸 `version` 变量）。
 
@@ -186,14 +189,25 @@ M0 脚手架 ─► M1 Headless 编辑内核 ─► M2 Ex 命令体系 ─► M3
 
 ---
 
-## M8 — Vim9 script 与兼容收口
+## M8 — 兼容收口、加密/压缩与发布（1.0）
+
+- **兼容收口**：剩余 Ex/options/functions 清零或显式标记「不支持+理由」；`src/testdir` 通过率报告；`+feature` 列表（`has()`）对齐；三张覆盖率表的分母与口径冻结。
+- **加密与压缩（从 M6 移入）**：`bfish`/`blowfish2`/`zip` 与 swapfile 加密格式，密文需与真实 vim 互读。此项**允许使用外部依赖**（例如 RustCrypto 家族的 `blowfish`/`zip`/`sha2`），是本仓「零第三方依赖」约束的**唯一例外**；其余模块仍保持 std-only。
+- **打包与发布**：Windows 单 exe、Unix tarball、安装器（NSIS 等价流程）、runtime 合并安装与 `$VIMRUNTIME` 解析。
+- 本里程碑**不包含 Vim9 script**：Vim9 是 M9 的增量能力，不阻塞 1.0。
+
+**出口标准**：对外发布 `rvim 1.0`（legacy Vim 8.2 兼容等级，见 RUNTIME_COMPAT §7）；加密/压缩与真实 vim 互读通过；Windows/Linux 安装包可用。
+
+---
+
+## M9 — Vim9 script（1.1）
 
 - `vim9script` 语境、类型系统（`vim9type.c`）、编译器（`vim9compile.c`）、字节码 VM（`vim9execute.c/vim9instr.c`）、`def/enddef`、`import`（`runtime/import/`）、class（若基线含）。
 - legacy/vim9 互操作、`defcompile`、性能基准（对拍相同脚本的 vim 耗时）。
-- 兼容收口：剩余 Ex/options/functions 清零或显式标记「不支持+理由」；`src/testdir` 通过率报告；`+feature` 列表（`has()`）对齐。
-- **加密与压缩（从 M6 移入）**：`bfish`/`blowfish2`/`zip` 与 swapfile 加密格式，密文需与真实 vim 互读。此项**允许使用外部依赖**（例如 RustCrypto 家族的 `blowfish`/`zip`/`sha2`），是本仓「零第三方依赖」约束的**唯一例外**；其余模块仍保持 std-only。
+- 让 runtime 中仅有的 3 个 Vim9 autoload（`autoload/dist/ft.vim`、`autoload/dist/script.vim`、`autoload/ccomplete.vim`）可执行，从而恢复 `.c` 等依赖 `dist#ft#*` 的 filetype 检测。
+- 与 M6 的语法/拼写收口互不阻塞：M9 只承担脚本引擎本身。
 
-**出口标准**：对外发布 `rvim 1.0`，声明兼容等级（见 RUNTIME_COMPAT §7）。
+**出口标准**：上述 3 个 autoload 零错误 source；Vim9 脚本测试子集（`test_vim9_*`）可跑并公开通过率；发布 `rvim 1.1`。
 
 ---
 
@@ -224,14 +238,15 @@ M0 脚手架 ─► M1 Headless 编辑内核 ─► M2 Ex 命令体系 ─► M3
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| 无 crates.io，终端/正则/JSON 全自研（M8 加密/压缩除外，允许外部依赖） | 工期 | 严格分阶段；正则/JSON 先子集后全集；FFI 只碰 OS 原生 API |
 | VimL 语义暗坑多（弱类型、作用域、异常） | M3 延期 | 以 testdir 用例驱动；先求语义正确再优化；建语义决策记录（`docs/adr/`） |
+| 无 crates.io，终端/正则/JSON 全自研（M8 加密/压缩除外，允许外部依赖） | 工期 | 严格分阶段；正则/JSON 先子集后全集；FFI 只碰 OS 原生 API |
 | 正则 NFA 复杂度 | M6 瓶颈 | BT 引擎先行覆盖 90% 场景，NFA 仅在性能/特性需要时补 |
 | Windows ConPTY/控制台差异 | M4/M7 | VT 优先、API 降级；conhost 与 Windows Terminal 双验 |
 | 兼容范围无止境 | 永远无法收口 | 固定 v8.2.5172 基线；覆盖率表驱动；不支持项显式登记而非静默偏离 |
 | 人力有限 | 整体节奏 | 每里程碑独立可交付可用；headless 内核本身即长期有用（可作库/编辑器组件） |
+| Vim9 script 语义与编译复杂（类型、闭包、字节码） | M9 延期 | 从 1.0 拆出为独立里程碑：legacy 兼容先发 1.0，Vim9 以增量方式交付（见 M9） |
 
 ## 版本与兼容策略
-- 语义化版本：0.x 期里程碑即 minor；1.0 对应 M8 出口。
+- 语义化版本：0.x 期里程碑即 minor；**1.0 = M8 出口**（legacy Vim 8.2 兼容 + 打包），**1.1 = M9 出口**（Vim9 script）。
 - `--version` 同时报告 RustVim 版本与锚定的 Vim tag/patch（`Included patches: 1-5172` 兼容展示）。
 - 升级 Vim 基线需走 RFC：更新三张表分母、全量对拍、文档标注差异。

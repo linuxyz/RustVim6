@@ -91,7 +91,7 @@
 | **filetype 检测** | `:filetype on` source `$VIMRUNTIME/filetype.vim`，`au BufRead *.py setf python` 类规则生效 | ⚠️ `setf` 直连规则生效（`.py`/`.vim`/`.sh` 等）；依赖 `dist#ft#*` 的规则（`.c` 等）因该 autoload 为 Vim9 而不可用 | `filetype_vim_detects_a_python_file` |
 | `\\|\\|` 与命令分隔符 | 先解析表达式（消耗 `\\|\\|`）再找 `\\|`（`ex_docmd.c:check_nextcmd`） | ✅ `split_bars`/`find_bar` 跳过 `\\|\\|`；此前 `:echo 1 \\|\\| 0` 被切成两条命令 | `logical_or_is_not_a_command_separator` |
 | `.` 的成员/连接判定 | 依被求值左侧类型：字典→成员访问，否则连接（`eval.c:6420`） | ✅ 求值期判定；`'a' . strlen('b')` 不再误判为变量（E121） | `dot_concatenation_with_a_function_call`、`dict_member_access_still_works` |
-| Vim9 script | vim 8.2 可直接执行 | ❌ 显式 `ERV338`（旧版解释器仅支持 legacy VimL）；运行时中仅 3 个 autoload 文件属 Vim9 | `vim9_scripts_are_rejected_with_one_clear_error` |
+| Vim9 script | vim 8.2 可直接执行 | ❌ 显式 `ERV338`（旧版解释器仅支持 legacy VimL）；运行时中仅 3 个 autoload 文件属 Vim9；**计划 M9 实现** | `vim9_scripts_are_rejected_with_one_clear_error` |
 
 ### M3 已知偏差
 

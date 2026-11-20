@@ -59,7 +59,7 @@
 | `ex_getln.c` `cmdexpand.c` `cmdhist.c` | 命令行/补全/历史 | **rvim-cmdline** |
 | `eval.c` `evalfunc.c` `evalvars.c` `typval.c` `list.c` `dict.c` `float.c` `blob.c` `json.c` | VimL 求值/类型/内置函数/JSON | **rvim-viml** |
 | `ex_eval.c` `scriptfile.c` `userfunc.c` `debugger.c` | 脚本控制流/source/函数/调试 | **rvim-viml** |
-| `vim9*.c`（8 个文件） | Vim9 script 编译/字节码/执行 | **rvim-viml::vim9**（后置） |
+| `vim9*.c`（8 个文件） | Vim9 script 编译/字节码/执行 | **rvim-viml::vim9**（M9） |
 | `option.c` `optionstr.c` `optiondefs.h`（429 项） | options | **rvim-editor::option** |
 | `autocmd.c` | 自动命令 | **rvim-autocmd**（先并入 rvim-editor） |
 | `map.c` | 映射/缩写 | **rvim-map**（先并入 rvim-editor） |
@@ -287,7 +287,7 @@ M2 已落地**完整 589 条声明表**：`crates/rvim-ex/src/cmd_table.rs` 由 
 - 作用域链 `g:/b:/w:/t:/v:/s:/a:/l:`、`let/unlet/if/while/for/try/catch/function/lambda/closure/echo/execute`。
 - 内置函数表对齐 `evalfunc.c`（350+），按功能域分批实现，未实现项抛 `E883` 并登记覆盖率。
 - 命令式 `:call` 与表达式 `func()` 共用同一求值核；`silent!/verbose` 修饰在调用栈帧上标记。
-- **Vim9 script（后置独立模块）**：`vim9script` 词法语境切换 → 类型检查 → 字节码 → 栈式 VM，文件划分镜像 `vim9compile/vim9execute/vim9instr/vim9type`。legacy 与 vim9 互操作边界严格按官方规则。
+- **Vim9 script（M9 独立模块）**：`vim9script` 词法语境切换 → 类型检查 → 字节码 → 栈式 VM，文件划分镜像 `vim9compile/vim9execute/vim9instr/vim9type`。legacy 与 vim9 互操作边界严格按官方规则。
 
 ### 5.5 autocmd / map / 启动序列（rvim-app）
 - 事件名表对齐 `autocmd.c` 的 `event_names[]`；嵌套深度、`nested`、`++once`、模式匹配（`*`/`?`/`[char]`，复用通配匹配器）。

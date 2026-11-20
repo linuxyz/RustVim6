@@ -17,6 +17,8 @@ M8 encryption/compression work (see [docs/PLAN.md](docs/PLAN.md)).
 | M5 | windows/tabpages, folds, diff (`rvim -d`), quickfix/location lists, visual mode + text objects, `.` repeat, jumps/changes, viminfo, sign/textprop/popup APIs |
 | M6 | syntax highlighting: `rvim-syntax` (keyword/match/region, clusters, cross-line state), 20 built-in filetypes, `:syntax`/`:highlight`, coloured TUI cells |
 
+Next: **M7** Job/Channel/Terminal → **M8** compatibility closure + encryption + packaging (`rvim 1.0`) → **M9** Vim9 script (`rvim 1.1`).
+
 Coverage tables are generated, never hand-edited: `cargo run -p rvim-tools -- coverage`.
 Known deviations are enumerated in [docs/compat_deviations.md](docs/compat_deviations.md).
 
