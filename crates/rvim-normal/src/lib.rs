@@ -499,6 +499,26 @@ impl NormalEngine {
         ed.mode = Mode::Normal;
     }
 
+    /// `<Esc>` ends the insert session: vim leaves the cursor on the last
+    /// inserted character (edit.c ins_esc() -> the cursor steps left once).
+    pub fn finish_insert_esc(&mut self, ed: &mut Editor) {
+        // A block insert already parked the cursor on the block's first column
+        // (ops.c op_insert), so the usual left step is skipped.
+        let block_insert = ed.block_insert.is_some();
+        self.finish_insert(ed);
+        if block_insert {
+            return;
+        }
+        let pos = ed.cursor();
+        if pos.col > 0 {
+            let line = ed.current_line();
+            ed.set_cursor(Pos::new(
+                pos.line,
+                rvim_core::text::move_chars(&line, pos.col, -1),
+            ));
+        }
+    }
+
     /// Replay the last change `count` times (".").
     ///
     /// Vim stores the command, not the resulting text, so the repeat runs the

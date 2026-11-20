@@ -87,7 +87,7 @@ fn run_keys(ed: &mut Editor, engine: &mut NormalEngine, keys: &[Key]) -> VimResu
     engine.cancel_pending();
     engine.clear_visual_count();
     if ed.mode.is_insert_like() {
-        engine.finish_insert(ed);
+        engine.finish_insert_esc(ed);
     } else if ed.mode.is_visual() {
         visual::stop(ed);
     } else if ed.mode != Mode::Normal {
@@ -105,6 +105,22 @@ fn run_key(
     vpending: &mut Option<VisualPending>,
     key: Key,
 ) -> VimResult<bool> {
+    // <Esc> ends insert/visual mode and cancels a pending command, wherever it
+    // appears in the argument (normal.c nv_esc / edit.c ins_esc).
+    if key == Key::Special("ESC".into()) {
+        *pending = None;
+        *vpending = None;
+        engine.cancel_pending();
+        engine.clear_visual_count();
+        if ed.mode.is_insert_like() {
+            engine.finish_insert_esc(ed);
+        } else if ed.mode.is_visual() {
+            visual::stop(ed);
+        } else {
+            ed.mode = Mode::Normal;
+        }
+        return Ok(true);
+    }
     if ed.mode.is_visual() {
         let action = visual::key(ed, engine, vpending, key)?;
         return Ok(action != VisualAction::CommandLine);

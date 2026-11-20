@@ -603,3 +603,11 @@ fn normal_closes_an_unfinished_insert_like_escape() {
     assert_eq!(text(&s), "abc");
     assert!(matches!(s.editor.mode, rvim_editor::Mode::Normal));
 }
+#[test]
+fn normal_esc_ends_insert_and_keeps_going() {
+    let mut s = Session::new();
+    seed(&mut s, &[""]);
+    // <Esc> leaves the cursor on the last inserted char, then x deletes it.
+    s.ex("normal! ifoo<Esc>x").unwrap();
+    assert_eq!(text(&s), "fo");
+}

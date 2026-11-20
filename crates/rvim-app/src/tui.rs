@@ -650,25 +650,11 @@ impl Tui {
     }
 
     fn finish_insert_mode(&mut self) {
-        // A block insert already parked the cursor on the block's first column
-        // (ops.c op_insert), so the usual "one char to the left" step is skipped.
-        let block_insert = self.session.editor.block_insert.is_some();
+        // The <Esc> semantics (one undo step, cursor on the last inserted
+        // character) live in rvim-normal so ":normal" matches the TUI.
         let mut engine = std::mem::replace(&mut self.session.normal, NormalEngine::new());
-        engine.finish_insert(self.editor());
+        engine.finish_insert_esc(self.editor());
         self.session.normal = engine;
-        if block_insert {
-            return;
-        }
-        // vim leaves the cursor on the last inserted character (ins_esc()),
-        // while the buffer parks it just past the inserted text.
-        let pos = self.editor().cursor();
-        if pos.col > 0 {
-            let line = self.editor().current_line();
-            self.editor().set_cursor(Pos::new(
-                pos.line,
-                rvim_core::text::move_chars(&line, pos.col, -1),
-            ));
-        }
     }
 
     // --------------------------------------------------------- command line
