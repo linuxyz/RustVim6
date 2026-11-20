@@ -66,7 +66,7 @@ M0 脚手架 ─► M1 Headless 编辑内核 ─► M2 Ex 命令体系 ─► M3
 - ✅ **解析器扩展**：范围（`. $ % N +N -N`、`,`/`;`、`/pat/` `?pat?` `'a` 及其组合的延迟解析）、TRLBAR 感知的 `|` 切分（`:!echo a|b` 的 bar 属于参数）、注释（`EX_NOTRLCOM` 遵守）、`++opt=val` 与 `+cmd`（`EX_ARGOPT`/`EX_CMDARG`）、`:dl`/`:dp`/`:d` 与 `:fina`→`:finally` 两个 vim 怪癖、自研 glob（`* ? [a-z] [^..] \`，`crates/rvim-ex/src/wildcard.rs`）。
 - ✅ **命令族**（165 条落地，复核轮新增 `:k`/`:mark`；其余见 `docs/COVERAGE.md`）：缓冲区/参数列表（`args argadd argdelete badd bfirst blast bmodified bnext bprevious bunload bwipeout buffer buffers ls files`）、编辑（`s copy move retab sort global vglobal join left right center > < # & ~`）、写盘/退出（`write wq xit wall update saveas wqall quitall exit`）、脚本生态（`autocmd augroup doautocmd command delcommand comclear source runtime finish`）。
 - ✅ **`rvim-cmdline`**：`: /` 历史（按 kind 独立限额、前缀召回）、命令名补全（含用户命令）、参数补全分类、文件名补全、`set` 选项补全、wildmenu 循环、路径展开。
-- ✅ **map/abbrev**：`:map/nmap/vmap/xmap/smap/omap/imap/lmap/cmap` 全族 + `noremap` 变体 + `unmap/mapclear` + `map!` 记为 insert/cmdline 变体；`:abbreviate` 全族；`<buffer>/<nowait>/<silent>/<special>/<script>/<expr>/<unique>` 存储；递归/非递归展开引擎（深度上限 E223，`<expr>` 明确报 E15，评估器接线待后续里程碑）。
+- ✅ **map/abbrev**：`:map/nmap/vmap/xmap/smap/omap/imap/lmap/cmap` 全族 + `noremap` 变体 + `unmap/mapclear` + `map!` 记为 insert/cmdline 变体；`:abbreviate` 全族；`<buffer>/<nowait>/<silent>/<special>/<script>/<expr>/<unique>` 存储；递归/非递归展开引擎（深度上限 E223）；`<expr>` 映射由 TUI 展开循环调用求值器后按键序列重放（`m4_expr_map.rs`）。
 - ✅ **`:source` 跑通简单 vimrc**：`-u {vimrc}` / `-S` / `:source` / `:runtime`，`\` 续行、`finish` 只结束当前脚本、UTF-8 BOM 容错、嵌套深度上限；`scripts/smoke.ps1` 覆盖 vimrc/`:g`/`:source`/`:command` 场景。
 
 **M2 出口标准（已达成）**：
@@ -143,7 +143,7 @@ M0 脚手架 ─► M1 Headless 编辑内核 ─► M2 Ex 命令体系 ─► M3
 
 - ✅ **多窗口/tabpage**（`rvim-editor::window`）：`TabPage` + `Layout` frame 树（`Row` 并排 = `:vsplit`、`Col` 堆叠 = `:split`）、`Window` 携带光标/视口/窗口局部选项/矩形。命令：`:split :vsplit :sview :new :vnew :close :only :hide :resize :vertical :wincmd :tabnew :tabedit :tabclose :tabonly :tabnext :tabprevious :tabfirst :tablast :tabmove :tabs :windo :tabdo :bufdo :argdo`；键位 `<C-w>` 后接 `h j k l w W t b p c q o n s v x r H J K L = + - _ |`。
 - ✅ **窗口局部选项与 `win_execute()`**：`Options::WINDOW_LOCAL` 表 + `Window.local`；`:set` 写全局与当前窗口、`:setlocal` 只写窗口、`&opt` 读窗口值；`w:` 变量按窗口 id 分开存放。
-- ✅ **折叠**（`rvim-editor::fold`）：manual/indent/marker/diff 四种 `'foldmethod'`（`syntax/expr` 显式报告不支持），`zf zF zo zc za zR zM zd zE zj zk zO zC zv`、`:fold :foldopen :foldclose :folddoopen :folddoclosed`、`foldclosed() foldclosedend() foldlevel() foldtext() foldtextresult()`；TUI 把闭合折叠画成 `+-- N lines: text`，`'foldcolumn'` 画层级。
+- ✅ **折叠**（`rvim-editor::fold`）：manual/indent/marker/syntax/diff 五种 `'foldmethod'`（syntax 由带 `fold` 标记的语法 region 计算；`expr` 显式报告不支持），`zf zF zo zc za zR zM zd zE zj zk zO zC zv`、`:fold :foldopen :foldclose :folddoopen :folddoclosed`、`foldclosed() foldclosedend() foldlevel() foldtext() foldtextresult()`；TUI 把闭合折叠画成 `+-- N lines: text`，`'foldcolumn'` 画层级。
 - ✅ **diff 模式**（`rvim-diff` + `rvim-editor::diff`）：Myers 最短编辑脚本（对齐 `src/xdiff` 的变更块、滑动归并与 unified 输出），`:diffthis :diffoff :diffsplit :diffupdate :diffget :diffput`、filler 行对齐、变更行标记、`'foldmethod=diff'`、`]c`/`[c` 导航；`rvim -d a b` 即 `vimdiff` 工作流。
 - ✅ **quickfix/location list**（`rvim-ex::errorformat` + `rvim-editor::quickfix`）：`'errorformat'` 编译器（`%f %l %c %v %m %t %n %r %p %o %s`、`%*` skip、`%#` 量词、`%-G` 忽略、E372/E373/E374），`:copen :cclose :cnext :cprevious :cfirst :clast :cc :cwindow :cexpr :caddexpr :cgetexpr :cfile :cgetfile :clist :colder :cnewer` 与 `l*` 全族，`setqflist()/getqflist()/setloclist()/getloclist()`，quickfix 窗口。
 - ✅ **视觉模式与高级编辑**（`rvim-normal::visual`）：`v/V/<C-v>`、`o/O` 换端、`gv`、`d y c x s p P > < ~ u U J`、块选择的行列操作与块 `I/A`（`I` 跳过短行、`A` 补齐到块右边界，整段一个 undo 步）、视觉模式计数（`3I`/`v3j`）、`:'<,'>` 命令行前缀；**文本对象全集**（`rvim-normal::textobjects`，覆盖 `iw aw iW aW is as ip ap it at`、各类括号与引号对象）同时用于 `d/y/c` 与视觉模式；**`.` 重复**（`RepeatChange`：插入会话、操作符+动作、`x D C`、`p P`，带计数）。
@@ -157,46 +157,53 @@ M0 脚手架 ─► M1 Headless 编辑内核 ─► M2 Ex 命令体系 ─► M3
 1. **`vimdiff` 等价工作流**：✅ `rvim -d a b` 打开两个窗口并全部 `:diffthis`，filler 对齐、`]c`/`[c`、`:diffget`/`:diffput`、`zo`/`zR` 展开 diff 折叠可用（`m5_diff.rs`）。
 2. **窗口/折叠类用例通过率**：⚠️ 官方 `src/testdir` 依赖 `term_start`/GUI 与完整 `:normal` 键循环，本环境无法运行；改用等价自研用例统计并公开口径（各 `m5_*.rs` 的 `#[test]` 数量与 `scripts/smoke.ps1` 场景）。
 3. **量化口径（`cargo run -p rvim-tools -- coverage`）**：Ex 命令 **246/589（41.8%）**、options **80/429（18.6%）**、内置函数 **393/543（72.4%）**；M2 出口的用户语料对数桶加权仍为 **104/122（85.2%）**。TUI 特性用例 49 例（windows 21 / folds 9 / diff 6 / quickfix 7 / signs 6），crate 单测新增约 200 例（rvim-diff 18、fold 18、foldcmd 10、handlers_fold 9、errorformat 31、quickfix 17、handlers_qf 28、diff 16、handlers_diff 12、textobjects 21、viminfo 17、window 12、handlers_win 6、handlers_session 4），全仓 **1021** 个测试（补齐复核后）。
-4. **已知未做**（登记 `docs/compat_deviations.md` \9）：自定义 `'foldtext'` 表达式、`foldmethod=expr/syntax`、`:diffpatch`、popup 的 filter/回调、textprop 的高亮渲染、viminfo 只读写 RustVim 建模的字段子集。
+4. **已知未做**（登记 `docs/compat_deviations.md` §9）：自定义 `'foldtext'` 表达式、`foldmethod=expr`、popup 的 filter/回调、textprop 的高亮渲染、viminfo 只读写 RustVim 建模的字段子集。`foldmethod=syntax` 与 `:diffpatch` 已补齐。
 
 ---
 ## M6 — 语法高亮、拼写、文件类型与标签
 
-- ✅ **`rvim-syntax` 引擎**（对齐 `syntax.c`）：`syntax keyword` / `match` / `region`（`start=`/`end=`、`contains=`、`@cluster`、`syntax case`）；跨行状态（注释、多行字符串）、嵌套项覆盖容器、span 按「外层先、内层后」排序；模式复用 MVP 正则。
+**M6 已收口**（本轮补齐了语法引擎剩余项、正则收口、spell、标签栈与 C 缩进）：
+
+- ✅ **`rvim-syntax` 引擎**（对齐 `syntax.c`）：`keyword` / `match` / `region`（`start=`/`end=`、`contains=`、`@cluster`、`syntax case`），以及 `contained`、`transparent`、`skip=`/`skipwhite`/`skipnl`/`skipempty`、`nextgroup=`、`\zs`/`\ze`；跨行状态（注释、多行字符串）、嵌套项覆盖容器、span 按「外层先、内层后」排序。
+- ✅ **`syntax sync`**：`fromstart` / `minlines=N` / `maxlines=N` / `ccomment` / `linebreaks=N` 均被记录并按 `minlines` 决定状态重建窗口。
+- ✅ **runtime `syntax/*.vim`**：`rvim-syntax::script` 直接解析声明式子集（`syn keyword/match/region/cluster/case/sync`、`hi def link`）；未知文件类型或 `:syntax include @Cluster file` 会从 'runtimepath' 读取真实语法脚本。
+- ✅ **`:syntax` 与 `:highlight`**：`on/off/enable/clear/reset`、`keyword/match/region/cluster/case/list/sync/include`；`hi Group guifg=#RRGGBB`、`hi link`、`hi def link`、`hi clear`（无参数恢复默认）、查询；默认深色配色 + vim 默认 link 表 + Spell* 组。
+- ✅ **`synID()` 系列**：`synID()`、`synIDattr()`、`synIDtrans()`、`synstack()`、`synconcealed()` 由编辑器真实 span/组表驱动。
+- ✅ **正则收口**（`rvim-viml::regex_mvp`）：捕获组与 `\1..\9` 反向引用、`\zs`/`\ze`、`\@=`/`\@!` 断言、`\_.` 与 `find_multiline()`、`\v`/`\V`/`\m`/`\M` 魔法级别；`find_from()`/`find_captures()` 供 `:s`、`matchlist()`、语法与标签共用。
+- ✅ **`:s` 替换特殊项**：`\1..\9`、`\0`、`&`、`~`、`\u\l\U\L\e\E`、`\n`（拆行）、`\=` 表达式（可调用 `submatch()`）。
 - ✅ **20 种内置文件类型**（`rvim-syntax::lang`）：c cpp css go html java javascript json lua make markdown python ruby rust sh sql toml typescript vim yaml；按 `'filetype'` 或文件扩展名检测。
-- ✅ **`:syntax` 与 `:highlight`**：`on/off/enable/clear/reset`、`keyword/match/region/cluster/case/list`；`hi Group guifg=#RRGGBB`、`hi link`、`hi clear`、查询；默认深色配色 + vim 默认 link 表。
-- ✅ **TUI 渲染**：`rvim-term::pane` 的 span 覆盖层（`Grid::set_style`），横向滚动/行号栏/折叠列不受影响；`Style` 增加 italic。
-- ⏳ 未做：runtime `syntax/*.vim` 全量消费、`syn sync`、`nextgroup`/`contained`/`skip`/`transparent`、`\zs\ze`、`synID()` 系列内置函数。
-- 🔶 **正则 MVP 已按 vimregex.com 补齐**（`<`/`>` 词边界、完整字符类表、`\{-}` 非贪婪、`\%(...)`、`\%d/\%o/\%x/\%u`），并以 `crates/rvim-viml/tests/vimregex.rs`（22 例）+ `m6_regex.rs`（4 例）作为规格回归；NFA 收口（反向引用、`\zs\ze`、`\@=` 断言、多行、magic 级别）仍待做。spell（`.spl`）、标签栈（`tags`）与 `cindent/smartindent` 同样仍在 M6 范围：
-- spell：`.spl` 读取/拼写检查/建议（`spell.c/spellfile.c/spellsuggest.c`）。
-- 标签栈（`tagstack`、`tags` 文件格式）、`cindent/smartindent`。
+- ✅ **TUI 渲染**：`rvim-term::pane` 的 span 覆盖层（`Grid::set_style`），横向滚动/行号栏/折叠列不受影响；`Style` 增加 italic；`'spell'` 开着时叠加 `SpellBad`/`SpellCap`/`SpellRare`。
+- ✅ **spell**（`rvim-editor::spell`，对齐 `spell.c/spellfile.c`）：纯文本词表与 Vim `.spl` v50 LWORDTREE 读取（含 BY_INDEX/BY_FLAGS/BY_FLAGS2/共享节点）、大小写与句首大写检查、Damerau-Levenshtein 建议、`:spellgood/:spellwrong/:spellrare/:spellundo/:spellinfo/:spelldump/:spellrepall/:mkspell`、`spellbadword()/spellsuggest()/soundfold()`。
+- ✅ **标签**（`rvim-editor::tags` + `rvim-ex::handlers_tags`，对齐 `tag.c`）：ctags 解析（`file:` 静态标记、kind、`tagrelative` 路径）、`:tag/:tselect/:tjump/:tnext/:tprevious/:tfirst/:tlast/:trewind/:pop/:tags/:ltag/:ptag/:stag/:stselect/:dlist/:djump`、真实标签栈与 `gettagstack()/settagstack()`、TUI `<C-]>`/`<C-t>`/`g]`。
+- ✅ **C 缩进**（`rvim-editor::indent`，对齐 `indent.c/cindent.c`）：`cindent()`、`'cindent'`/`'smartindent'`/`'autoindent'`、`'cinoptions'`/`'cinwords'` 常用项、`<CR>`/`o`/`O` 自动缩进、标签/预处理/switch-case/续行。
+- ✅ **`:vimgrep`/`:lvimgrep`**：行级正则搜索，通配符展开，填充 quickfix/location list 并可跳转。
 
-
-**出口标准**：常见 20 种文件类型高亮（`m6_syntax.rs` 的 20 文件类型矩阵 + TUI 颜色断言）；`:syntax`/`:highlight` 可被脚本与测试查询。
-**出口标准**：常见 20 种文件类型高亮与 vim 截图级对比；`:syntax`/`:highlight` 与 `synID()` 系列可被脚本查询。
+**出口标准（已达成）**：常见 20 种文件类型高亮（`m6_syntax.rs` 的 20 文件类型矩阵 + TUI 颜色断言）；`:syntax`/`:highlight` 与 `synID()` 系列可被脚本查询；`m6_spell/m6_tags/m6_indent/m6_regex/m6_substitute/m6_syntax_more/m6_vimgrep` 全部回归通过。
 
 ---
 
 ## M7 — Job / Channel / Terminal / 网络
 
-- `job_start/term_start`：std::process + pty（Unix posix/openpty FFI；Windows ConPTY FFI）。
-- channel：TCP（std::net）、JSON-RPC、socket/pipe（Windows named pipe FFI）、`ch_sendraw/ch_evalexpr`。
-- `:terminal` 内置终端（移植 libvterm 屏幕解析为 Rust）、`term_wait/term_getline`。
-- 定时器 `timer_start`、`:!cmd`、`system()`、clientserver（命名管道/socket）。
-- 线程模型严格遵守 ARCH §5.7：子线程只投递字节事件，主线程单写 Editor。
+- ✅ **Job**（`rvim-ex::m7`）：`job_start`（字符串走 shell，List 直接 exec）、`job_status`/`job_stop`/`job_getchannel`/`job_info`，stdout/stderr 读取线程 + `out_cb/err_cb/exit_cb/close_cb`；`job_start` 的 `cwd/env/out_mode` 已支持。
+- ✅ **Channel**：TCP（`std::net`）`ch_open/ch_sendraw/ch_sendexpr/ch_evalraw/ch_evalexpr/ch_read/ch_readraw/ch_canread/ch_status/ch_close/ch_getjob`，JSON-RPC 消息帧 `[id,expr]`；`:terminal` 的 stdio 也暴露为 channel。
+- ✅ **Timer**：`timer_start/timer_stop/timer_stopall/timer_pause/timer_info`，支持 `repeat`、回调在主线程序列化执行；`:sleep` 会驱动事件循环（job/timer 在等待期间照常回调）。
+- ✅ **Terminal（最小）**：`term_start`/`:terminal` 创建 terminal 缓冲区，`term_wait/term_getline/term_getsize/term_getstatus/term_getjob/term_list/term_sendkeys/term_scrape/terminalprops` 可用；stdin 可写、stdout 捕获为行。
+- ✅ **线程模型**（ARCH §5.7）：子线程只读 pipe/socket 并通过 `mpsc` 投递字节，主线程 `pump()` 排空并执行 VimL 回调；Editor 不跨线程。
+- ⚠️ 未做：Unix PTY/Windows ConPTY（无真实交互式 TTY，terminal 不是 libvterm 屏幕模拟器）、named pipe/UDP/socket 服务端、clientserver、`ch_open` 的 TLS/Unix socket。LSP 骨架可通过 TCP + JSON-RPC 驱动。
 
-**出口标准**：JSON-RPC 插件（如 LSP 客户端骨架）可跑；终端里可交互运行 `python`/`pwsh`。
+**出口标准进度**：TCP JSON-RPC（`ch_sendexpr/ch_evalexpr`）可跑；job/timer 回调与最小 terminal 缓冲区回归通过（`m7_jobs.rs`）。真实 TTY 交互（python/pwsh）待 PTY 阶段。
 
 ---
 
 ## M8 — 兼容收口、加密/压缩与发布（1.0）
 
-- **兼容收口**：剩余 Ex/options/functions 清零或显式标记「不支持+理由」；`src/testdir` 通过率报告；`+feature` 列表（`has()`）对齐；三张覆盖率表的分母与口径冻结。
-- **加密与压缩（从 M6 移入）**：`bfish`/`blowfish2`/`zip` 与 swapfile 加密格式，密文需与真实 vim 互读。此项**允许使用外部依赖**（例如 RustCrypto 家族的 `blowfish`/`zip`/`sha2`），是本仓「零第三方依赖」约束的**唯一例外**；其余模块仍保持 std-only。
-- **打包与发布**：Windows 单 exe、Unix tarball、安装器（NSIS 等价流程）、runtime 合并安装与 `$VIMRUNTIME` 解析。
+- ✅ **加密与压缩**（std-only 自研，未引入第三方 crate）：`zip`（PKZIP 流密码）、`blowfish`、`blowfish2`（SHA-256 1001 轮密钥强化 + Blowfish CFB）与 Vim 文件头 `VimCrypt~01/02/03!`；`:set key=`/`:X`/`:set cryptmethod=`，读写与真实 Vim **双向互读**。`.spl`/swapfile 不涉及；xchacha20（libsodium）显式不支持。
+- ✅ **兼容收口**：`:redir`（变量/寄存器/文件）、`:mksession`/`:mkvimrc`/`:mkview`/`:loadview`、`:noautocmd`、`:packadd`/`:packloadall`/`:behave`/`:legacy`/`:mode`/`:open` 与菜单类空操作；`has()` 特性表对齐（crypt-*、spell、syntax、quickfix、folding、diff、windows、tabpages、patch-*、平台）；`:version` 输出 feature 行；覆盖率分母冻结。
+- ✅ **打包与发布**：`scripts/package.ps1` 生成 Windows zip / Unix tar.gz（含可执行文件、docs 与合并的 runtime），`default_runtimepath()` 支持 exe 同目录/上级的 `runtime` 与 `$RVIM_RUNTIME`；Windows release 单 exe 可直接运行。
+- 明确不支持并登记：libsodium xchacha20、swapfile 加密（无 swapfile 子系统）、GUI、Vim9（M9）；作业/通道/定时器/最小 terminal 在 M7 已提供（无 PTY/ConPTY 交互式终端）。
 - 本里程碑**不包含 Vim9 script**：Vim9 是 M9 的增量能力，不阻塞 1.0。
 
-**出口标准**：对外发布 `rvim 1.0`（legacy Vim 8.2 兼容等级，见 RUNTIME_COMPAT §7）；加密/压缩与真实 vim 互读通过；Windows/Linux 安装包可用。
+**出口标准（已达成）**：`rvim 1.0`；加密/压缩与真实 Vim 互读通过（三种方法）；`scripts/package.ps1` 生成 Windows/Linux 包；`has()`/`:version`/`:redir`/`:mksession` 回归通过。
 
 ---
 

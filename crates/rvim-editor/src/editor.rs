@@ -173,6 +173,8 @@ pub struct Editor {
     pub filetype_script_loaded: bool,
     /// `:syntax on` state, the loaded definition and the `:highlight` table.
     pub syntax: crate::syntax::SyntaxState,
+    /// Loaded spell word lists and the user's good/bad/rare words (M6).
+    pub spell: crate::spell::SpellState,
     /// Argument list (`:args`, `:argadd`, ...).
     pub arglist: Vec<PathBuf>,
     /// Index of the current argument.
@@ -243,6 +245,7 @@ impl Editor {
             filetype_indent: false,
             filetype_script_loaded: false,
             syntax: crate::syntax::SyntaxState::new(),
+            spell: crate::spell::SpellState::default(),
             arglist: Vec::new(),
             arg_index: 0,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -322,6 +325,20 @@ impl Editor {
     }
 
     /// Open a file into a fresh buffer and switch the window to it.
+    /// Load a file into buffer `id`, decrypting it with the current 'key'
+    /// option and recording the method found in the file header.
+    pub fn load_buffer_file(&mut self, id: i32, path: &Path) -> VimResult<Buffer> {
+        let key = self.options.str_or("key", "");
+        let (buf, method) = Buffer::open_crypt(id, path, &key)?;
+        if let Some(method) = method {
+            let _ = self.options.set(
+                "cryptmethod",
+                crate::OptValue::Str(method.name().to_string()),
+            );
+        }
+        Ok(buf)
+    }
+
     pub fn open_file(&mut self, path: &Path) -> VimResult<i32> {
         // Reuse an existing buffer for the same canonical path when possible.
         if let Some(existing) = self
@@ -346,13 +363,13 @@ impl Editor {
                 .unwrap_or(false);
         let id = if reusable {
             let id = self.buffers[0].id;
-            let fresh = Buffer::open(id, path)?;
+            let fresh = self.load_buffer_file(id, path)?;
             self.buffers[0] = fresh;
             id
         } else {
             let id = self.next_bufnr;
             self.next_bufnr += 1;
-            let buf = Buffer::open(id, path)?;
+            let buf = self.load_buffer_file(id, path)?;
             self.buffers.push(buf);
             self.undo.insert(id, UndoHistory::new());
             id
@@ -1268,9 +1285,25 @@ impl Editor {
             None => true,
             Some(p) => self.buffer(bufnr)?.name.as_deref() == Some(p),
         };
-        match path {
-            Some(p) => self.buffer_mut(bufnr)?.save(p, bang)?,
-            None => self.buffer_mut(bufnr)?.save_named(bang)?,
+        let source = self.options.str_or("key", "");
+        if source.is_empty() {
+            match path {
+                Some(p) => self.buffer_mut(bufnr)?.save(p, bang)?,
+                None => self.buffer_mut(bufnr)?.save_named(bang)?,
+            }
+        } else {
+            let method = rvim_buffer::crypt::CryptMethod::from_name(
+                &self.options.str_or("cryptmethod", "blowfish2"),
+            )?;
+            let target = match path {
+                Some(p) => Some(p.to_path_buf()),
+                None => self.buffer(bufnr)?.name.clone(),
+            };
+            let Some(target) = target else {
+                return Err(VimError::no_name());
+            };
+            self.buffer_mut(bufnr)?
+                .save_crypt(&target, bang, &source, method)?;
         }
         // ":w!" to the buffer's own file resets 'readonly' (bufwrite.c:1624).
         if bang && own_file && readonly {
@@ -1317,8 +1350,42 @@ impl Editor {
         let known = self.syntax.enable(name);
         if !known {
             self.syntax.enabled = true;
+            if self.load_runtime_syntax(name, None) {
+                return true;
+            }
         }
         known
+    }
+
+    /// The first `syntax/<name>.vim` found on 'runtimepath', if any.
+    pub fn runtime_syntax_file(&self, name: &str) -> Option<PathBuf> {
+        if name.is_empty() {
+            return None;
+        }
+        let rtp = self.options.str_or("runtimepath", "");
+        for dir in rtp.split(',').filter(|d| !d.is_empty()) {
+            let path = Path::new(dir).join("syntax").join(format!("{name}.vim"));
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    /// Load a syntax definition from `syntax/<name>.vim` on 'runtimepath'.
+    pub fn load_runtime_syntax(&mut self, name: &str, cluster: Option<&str>) -> bool {
+        let Some(path) = self.runtime_syntax_file(name) else {
+            return false;
+        };
+        let Ok(bytes) = std::fs::read(&path) else {
+            return false;
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        if cluster.is_some() {
+            self.syntax.include_script(name, &text, cluster) > 0
+        } else {
+            self.syntax.load_script(name, &text)
+        }
     }
 
     /// Pick the syntax from 'filetype' (or the file name) when it changed.
@@ -1326,8 +1393,11 @@ impl Editor {
         if !self.syntax.enabled {
             return;
         }
+        let explicit = self.options.str_or("syntax", "");
         let filetype = self.options.str_or("filetype", "");
-        let name = if filetype.is_empty() {
+        let name = if !explicit.is_empty() {
+            Some(explicit)
+        } else if filetype.is_empty() {
             let display = self.current_buffer().display_name();
             crate::syntax::lang::from_filename(&display).map(str::to_string)
         } else {
@@ -1344,7 +1414,10 @@ impl Editor {
         self.syntax.resolved = key;
         match name {
             Some(name) if !name.is_empty() => {
-                let _ = self.syntax.enable(&name);
+                if !self.syntax.enable(&name) {
+                    self.syntax.enabled = true;
+                    let _ = self.load_runtime_syntax(&name, None);
+                }
             }
             _ => self.syntax.clear_engine(),
         }
@@ -1367,15 +1440,107 @@ impl Editor {
         let tick = buffer.changedtick();
         let last = buffer.line_count().saturating_sub(1);
         let end = line.min(last);
-        let start = end.saturating_sub(crate::syntax::SYNC_LINES);
+        let sync = self.syntax.sync_start();
+        let start = if sync == usize::MAX {
+            0
+        } else {
+            end.saturating_sub(sync)
+        };
         let window: Vec<(usize, String)> = (start..=end)
             .map(|l| (l, buffer.line_str(l).unwrap_or("").to_string()))
             .collect();
-        let spans = self.syntax.line_spans(bufnr, tick, end, &window);
-        spans
+        let line_text = window
+            .iter()
+            .find(|(lnum, _)| *lnum == end)
+            .map(|(_, text)| text.clone())
+            .unwrap_or_default();
+        let mut out: Vec<(usize, usize, String)> = self
+            .syntax
+            .line_spans(bufnr, tick, end, &window)
             .iter()
             .map(|s| (s.start, s.end, s.group.clone()))
+            .collect();
+        // Spell checking is drawn on top of the syntax colours (spell.c puts
+        // the SpellBad/SpellCap group on the word).
+        if self.options.bool_or("spell", false) && !line_text.is_empty() {
+            out.extend(crate::spell::bad_word_spans(self, &line_text));
+        }
+        out
+    }
+
+    /// The syntax item ids covering a 1-based (lnum, col), outermost first.
+    /// `col` is a 1-based byte column, like Vim's `synstack(lnum, col)`.
+    pub fn syntax_stack(&mut self, bufnr: i32, lnum: i64, col: i64) -> Vec<i64> {
+        if lnum < 1 || col < 1 {
+            return Vec::new();
+        }
+        if !self.syntax.enabled {
+            return Vec::new();
+        }
+        self.ensure_syntax();
+        if self.syntax.engine().is_none() {
+            return Vec::new();
+        }
+        let Ok(buffer) = self.buffer(bufnr) else {
+            return Vec::new();
+        };
+        let total = buffer.line_count();
+        let line = (lnum as usize - 1).min(total.saturating_sub(1));
+        let byte_col = col as usize - 1;
+        let tick = buffer.changedtick();
+        let sync = self.syntax.sync_start();
+        let start = if sync == usize::MAX {
+            0
+        } else {
+            line.saturating_sub(sync)
+        };
+        let window: Vec<(usize, String)> = (start..=line)
+            .map(|l| (l, buffer.line_str(l).unwrap_or("").to_string()))
+            .collect();
+        let spans = self.syntax.line_items(bufnr, tick, line, &window);
+        spans
+            .iter()
+            .filter(|span| span.start <= byte_col && byte_col < span.end)
+            .map(|span| span.id)
             .collect()
+    }
+
+    /// The innermost syntax item id at (lnum, col), 0 when none.
+    pub fn syntax_id_at(&mut self, bufnr: i32, lnum: i64, col: i64) -> i64 {
+        self.syntax_stack(bufnr, lnum, col)
+            .last()
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// The group name of a syntax item id (`synIDattr(id, "name")`).
+    pub fn syntax_group_of(&self, id: i64) -> Option<&str> {
+        self.syntax.engine().and_then(|engine| engine.group_of(id))
+    }
+
+    /// The flags of a syntax item id.
+    pub fn syntax_options_of(&self, id: i64) -> rvim_syntax::ItemOptions {
+        self.syntax
+            .engine()
+            .map(|engine| engine.options_of(id))
+            .unwrap_or_default()
+    }
+
+    /// `synIDtrans()`: the id of the group an item resolves to after
+    /// `:hi link` resolution.  RustVim links groups (not items), so a defined
+    /// group keeps its own id and an unknown one becomes 0.
+    pub fn syntax_trans(&self, id: i64) -> i64 {
+        if id == 0 {
+            return 0;
+        }
+        let Some(group) = self.syntax_group_of(id) else {
+            return 0;
+        };
+        if self.syntax.highlights.exists(group) {
+            id
+        } else {
+            0
+        }
     }
 
     /// Attributes of a highlight group (`:highlight` + vim's default links).

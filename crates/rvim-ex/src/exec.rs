@@ -270,6 +270,53 @@ impl_implemented![
     "yank",
     "jumps",
     "wviminfo",
+    "tag",
+    "tags",
+    "tselect",
+    "tjump",
+    "tnext",
+    "tprevious",
+    "tfirst",
+    "tlast",
+    "trewind",
+    "pop",
+    "ltag",
+    "ptag",
+    "stselect",
+    "stag",
+    "dlist",
+    "djump",
+    "spellgood",
+    "spellwrong",
+    "spellundo",
+    "spellrare",
+    "mkspell",
+    "spelldump",
+    "spellinfo",
+    "spellrepall",
+    "vimgrep",
+    "vimgrepadd",
+    "diffpatch",
+    "lvimgrep",
+    "lvimgrepadd",
+    "X",
+    "redir",
+    "mksession",
+    "mkvimrc",
+    "mkview",
+    "loadview",
+    "packadd",
+    "packloadall",
+    "behave",
+    "legacy",
+    "mode",
+    "aunmenu",
+    "menutranslate",
+    "tlunmenu",
+    "open",
+    "noautocmd",
+    "sleep",
+    "terminal",
 ];
 
 /// Outcome of running an Ex line, letting the front-end decide process exit.
@@ -332,6 +379,8 @@ fn run_line_impl(
     line: &str,
     allow_structural: bool,
 ) -> VimResult<ExOutcome> {
+    // Deliver pending job/timer/channel events before parsing the next command.
+    crate::m7::pump(ed, env, state);
     let mut remaining = line.trim().to_string();
     let mut outcome = ExOutcome::Continue;
     while !remaining.is_empty() {
@@ -631,7 +680,7 @@ pub fn run_command_ctx(
         "yank" => cmd_yank(ed, p),
         "copy" | "t" | "move" => cmd_copy_move(ed, p, def.name == "move"),
         "print" | "list" | "number" | "p" => cmd_print(ed, p, def.name),
-        "substitute" => cmd_substitute(ed, p),
+        "substitute" => cmd_substitute(ed, env, state, p),
         "undo" => {
             ed.undo()?;
             Ok(ExOutcome::Continue)
@@ -677,8 +726,27 @@ pub fn run_command_ctx(
         "jumps" | "changes" | "rviminfo" | "wviminfo" => {
             crate::handlers_session::cmd_session(ed, env, state, p, def.name)
         }
+        "redir" => crate::handlers_session::cmd_redir(ed, env, state, p),
+        "mksession" | "mkvimrc" => crate::handlers_compat::cmd_session_write(ed, p, def.name),
+        "mkview" => crate::handlers_compat::cmd_mkview(ed, p),
+        "loadview" => crate::handlers_compat::cmd_loadview(ed, env, state, p),
+        "packadd" | "packloadall" | "behave" | "legacy" | "mode" | "aunmenu" | "menutranslate"
+        | "tlunmenu" | "open" => crate::handlers_compat::cmd_compat_noop(ed, p, def.name),
+        "sleep" => crate::handlers_compat::cmd_sleep(ed, env, state, p),
+        "terminal" => crate::m7::cmd_terminal(ed, env, state, p),
+        "noautocmd" => {
+            if p.args.trim().is_empty() {
+                return Err(VimError::new("E471", "Argument required"));
+            }
+            let busy = ed.autocmd_busy;
+            ed.autocmd_busy = true;
+            let out = crate::exec::run_line_with(ed, env, state, p.args.trim());
+            ed.autocmd_busy = busy;
+            out
+        }
         // --- M5: diff mode -------------------------------------------------
-        "diffthis" | "diffoff" | "diffsplit" | "diffupdate" | "diffget" | "diffput" => {
+        "diffthis" | "diffoff" | "diffsplit" | "diffupdate" | "diffget" | "diffput"
+        | "diffpatch" => {
             let name = if typed_command == "diff" {
                 "diff"
             } else {
@@ -839,6 +907,32 @@ pub fn run_command_ctx(
         }
         "redraw" => Ok(ExOutcome::Continue),
         "normal" => crate::handlers_normal::cmd_normal(ed, p),
+        // --- M6: tags and spell checking ---------------------------------
+        "tag" | "tags" | "tselect" | "tjump" | "tnext" | "tprevious" | "tfirst" | "tlast"
+        | "trewind" | "pop" | "ltag" | "ptag" | "stselect" | "stag" | "dlist" | "djump" => {
+            crate::handlers_tags::cmd_tag(ed, env, state, p, def.name)
+        }
+        "spellgood" | "spellwrong" | "spellundo" | "spellrare" | "mkspell" | "spelldump"
+        | "spellinfo" | "spellrepall" => {
+            crate::handlers_spell::cmd_spell(ed, env, state, p, def.name)
+        }
+        "vimgrep" | "vimgrepadd" | "lvimgrep" | "lvimgrepadd" => {
+            crate::handlers_grep::cmd_vimgrep(ed, env, state, p, def.name)
+        }
+        // :X asks for a key interactively in Vim.  In headless use accept an
+        // argument (a convenience for scripts) and otherwise report how to set
+        // it; no dispatched command returns ERV001.
+        "X" => {
+            let key = p.args.trim();
+            if !key.is_empty() {
+                ed.options
+                    .set("key", rvim_editor::OptValue::Str(key.to_string()))?;
+            } else {
+                ed.messages
+                    .info("Enter encryption key: use :set key={key}".to_string());
+            }
+            Ok(ExOutcome::Continue)
+        }
         "!" => cmd_shell(ed, p),
         other if crate::handlers_map::is_map_command(other) => {
             crate::handlers_map::map_command(ed, p)
@@ -1059,7 +1153,7 @@ fn cmd_edit(
         let name = ed.current_buffer().name.clone();
         if let Some(path) = name {
             let id = ed.new_buffer();
-            let buf = rvim_buffer::Buffer::open(id, &path)?;
+            let buf = ed.load_buffer_file(id, &path)?;
             ed.replace_buffer(id, buf)?;
             crate::autodispatch::switch_buffer(ed, env, state, id)?;
             apply_fileopts(ed, p)?;
@@ -1129,8 +1223,12 @@ fn cmd_read(ed: &mut Editor, p: &ParsedEx) -> VimResult<ExOutcome> {
     if p.args.is_empty() {
         return Err(VimError::range_required());
     }
-    let text = std::fs::read_to_string(&p.args)
-        .map_err(|e| VimError::new("E484", format!("Can't open file {}: {e}", p.args)))?;
+    let key = ed.options.str_or("key", "");
+    let path = PathBuf::from(p.args.trim());
+    let text = rvim_buffer::fileio::read_file_opt_crypt(&path, &key)
+        .map_err(|e| VimError::new(e.code, e.message))?
+        .map(|(text, _)| text)
+        .ok_or_else(|| VimError::new("E484", format!("Can't open file {}", p.args)))?;
     let lines: Vec<String> = text.lines().map(str::to_string).collect();
     let (_, e) = resolve_range(ed, &p.range, false)?;
     // ":read" inserts *after* the addressed line; with a range the last address
@@ -1389,8 +1487,8 @@ fn parse_sub_flags(flags: &str) -> VimResult<(SubFlags, Option<usize>)> {
     Ok((out, None))
 }
 
-/// Replace literal `pattern` occurrences in `[start, end)`; returns the number
-/// of changed lines. Never fails on "no match" (the caller decides about E486).
+/// Replace occurrences in `[start, end)`; returns the number of changed lines.
+/// Never fails on "no match" (the caller decides about E486).
 fn substitute_lines(
     ed: &mut Editor,
     start: usize,
@@ -1400,6 +1498,62 @@ fn substitute_lines(
     global: bool,
     ignorecase: Option<bool>,
 ) -> VimResult<usize> {
+    substitute_lines_impl(
+        ed,
+        None,
+        None,
+        start,
+        end,
+        pattern,
+        replacement,
+        global,
+        ignorecase,
+        "",
+    )
+}
+
+/// The `:s` form with a script context, so \= replacements can call
+/// submatch() and friends.
+#[allow(clippy::too_many_arguments)]
+fn substitute_lines_expr(
+    ed: &mut Editor,
+    env: &mut Env,
+    state: &mut ScriptState,
+    start: usize,
+    end: usize,
+    pattern: &str,
+    replacement: &str,
+    global: bool,
+    ignorecase: Option<bool>,
+    previous_replacement: &str,
+) -> VimResult<usize> {
+    substitute_lines_impl(
+        ed,
+        Some(env),
+        Some(state),
+        start,
+        end,
+        pattern,
+        replacement,
+        global,
+        ignorecase,
+        previous_replacement,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn substitute_lines_impl(
+    ed: &mut Editor,
+    mut env: Option<&mut Env>,
+    mut state: Option<&mut ScriptState>,
+    start: usize,
+    end: usize,
+    pattern: &str,
+    replacement: &str,
+    global: bool,
+    ignorecase: Option<bool>,
+    previous_replacement: &str,
+) -> VimResult<usize> {
     let ignorecase = ignorecase.unwrap_or_else(|| ed.options.bool_or("ignorecase", false));
     // One ":s" command is one undo step even across many lines (undo.c u_sync()
     // runs once per Ex command, not per edited line).
@@ -1407,15 +1561,52 @@ fn substitute_lines(
     let mut matched = 0usize;
     let mut last_changed = None;
     let mut failure = None;
-    for i in start..end {
+    let mut limit = end;
+    let mut i = start;
+    while i < limit {
         match ed.current_buffer().line_str(i) {
             Ok(text) => {
                 let original = text.to_string();
-                let replaced = literal_replace(&original, pattern, replacement, global, ignorecase);
-                if replaced != original {
-                    matched += 1;
-                    last_changed = Some(i);
-                    if let Err(e) = ed.set_line_text(i, replaced) {
+                let replaced = match (env.as_deref_mut(), state.as_deref_mut()) {
+                    (Some(env), Some(state)) => replace_line(
+                        ed,
+                        Some(env),
+                        Some(state),
+                        &original,
+                        pattern,
+                        replacement,
+                        global,
+                        ignorecase,
+                        previous_replacement,
+                    ),
+                    _ => replace_line(
+                        ed,
+                        None,
+                        None,
+                        &original,
+                        pattern,
+                        replacement,
+                        global,
+                        ignorecase,
+                        previous_replacement,
+                    ),
+                };
+                match replaced {
+                    Ok((lines, had_match)) => {
+                        if had_match {
+                            matched += 1;
+                            last_changed = Some(i);
+                        }
+                        if lines.len() != 1 || lines[0] != original {
+                            let delta = lines.len() as isize - 1;
+                            if let Err(e) = ed.replace_lines(i, i + 1, lines) {
+                                failure = Some(e);
+                                break;
+                            }
+                            limit = (limit as isize + delta).max(0) as usize;
+                        }
+                    }
+                    Err(e) => {
                         failure = Some(e);
                         break;
                     }
@@ -1426,6 +1617,7 @@ fn substitute_lines(
                 break;
             }
         }
+        i += 1;
     }
     ed.end_undo_block();
     if failure.is_none() {
@@ -1441,7 +1633,12 @@ fn substitute_lines(
     }
 }
 
-fn cmd_substitute(ed: &mut Editor, p: &ParsedEx) -> VimResult<ExOutcome> {
+fn cmd_substitute(
+    ed: &mut Editor,
+    env: &mut Env,
+    state: &mut ScriptState,
+    p: &ParsedEx,
+) -> VimResult<ExOutcome> {
     let body = p.args.trim();
     let (subst, flags, trailing_count) = if body.is_empty() {
         // ":s" repeats the previous substitute with the default flags
@@ -1493,6 +1690,12 @@ fn cmd_substitute(ed: &mut Editor, p: &ParsedEx) -> VimResult<ExOutcome> {
         };
         (subst, flags, count)
     };
+    // The previous replacement is what '~' in the replacement string expands to.
+    let previous_replacement = ed
+        .last_sub
+        .as_ref()
+        .map(|last| last.replacement.clone())
+        .unwrap_or_default();
     // ":s/pat/repl/" records the pattern/replacement even when nothing matches
     // (ex_cmds.c saves them before searching).
     ed.last_sub = Some(subst.clone());
@@ -1510,7 +1713,7 @@ fn cmd_substitute(ed: &mut Editor, p: &ParsedEx) -> VimResult<ExOutcome> {
         let mut hits = 0usize;
         for i in s..e {
             let original = ed.current_buffer().line_str(i)?.to_string();
-            if literal_replace(&original, &subst.pattern, "", true, ignorecase) != original {
+            if rvim_viml::regex_mvp::find(&subst.pattern, &original, ignorecase).is_some() {
                 hits += 1;
             }
         }
@@ -1518,14 +1721,17 @@ fn cmd_substitute(ed: &mut Editor, p: &ParsedEx) -> VimResult<ExOutcome> {
             .info(format!("{hits} match{}", if hits == 1 { "" } else { "es" }));
         return Ok(ExOutcome::Continue);
     }
-    let matched = substitute_lines(
+    let matched = substitute_lines_expr(
         ed,
+        env,
+        state,
         s,
         e,
         &subst.pattern,
         &subst.replacement,
         subst.global,
         flags.ignorecase,
+        &previous_replacement,
     )?;
     if matched == 0 && !flags.no_error {
         return Err(VimError::pattern_not_found(&subst.pattern));
@@ -1580,50 +1786,153 @@ pub fn substitute_lines_public(
     substitute_lines(ed, start, end, pattern, replacement, global, ignorecase)
 }
 
-/// Expand the `:s` replacement string: `&` stands for the matched text and a
-/// backslash quotes the next character (ex_cmds.c regtilde/do_sub handling of
-/// '&').
-fn expand_replacement(repl: &str, matched: &str) -> String {
-    let mut out = String::new();
-    let mut chars = repl.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '&' => out.push_str(matched),
-            '\\' => match chars.next() {
-                Some('&') => out.push('&'),
-                Some('\\') => out.push('\\'),
-                Some(other) => out.push(other),
-                None => out.push('\\'),
-            },
-            _ => out.push(c),
-        }
-    }
-    out
+/// Case modifiers in a `:s` replacement (`\u`, `\l`, `\U`, `\L`,
+/// `\e`/`\E`).
+#[derive(Default)]
+struct CaseFlags {
+    one_upper: bool,
+    one_lower: bool,
+    all_upper: bool,
+    all_lower: bool,
 }
 
-/// Replace `:s` matches in one line.
+impl CaseFlags {
+    fn push(&mut self, out: &mut String, text: &str) {
+        for ch in text.chars() {
+            if self.all_upper || (self.one_upper && !self.one_lower) {
+                out.extend(ch.to_uppercase());
+            } else if self.all_lower || self.one_lower {
+                out.extend(ch.to_lowercase());
+            } else {
+                out.push(ch);
+            }
+            self.one_upper = false;
+            self.one_lower = false;
+        }
+    }
+
+    fn clear_one_shot(&mut self) {
+        self.one_upper = false;
+        self.one_lower = false;
+    }
+}
+
+/// Expand one match in a `:s` replacement.
 ///
-/// The pattern uses vim's magic syntax through the shared MVP regexp engine
-/// (`rvim_viml::regex_mvp`, the same subset the runtime scripts use), and the
-/// replacement expands `&` to the matched text.
-fn literal_replace(
+/// Supports `&` (whole match), `\0`-`\9` (groups), `~` (previous
+/// replacement), the case modifiers and `\=` (expression).
+#[allow(clippy::type_complexity)]
+fn expand_replacement(
+    repl: &str,
+    text: &str,
+    base: usize,
+    m: &rvim_viml::regex_mvp::Match,
+    previous_replacement: &str,
+    mut expr: Option<&mut dyn FnMut(&str) -> VimResult<String>>,
+) -> VimResult<String> {
+    let matched_start = base + m.start;
+    let matched_end = base + m.end;
+    let matched = text.get(matched_start..matched_end).unwrap_or("");
+    let group_text = |n: usize| -> String {
+        m.groups
+            .get(n.saturating_sub(1))
+            .and_then(|group| *group)
+            .and_then(|(start, end)| text.get(base + start..base + end))
+            .unwrap_or("")
+            .to_string()
+    };
+    let mut out = String::new();
+    let mut flags = CaseFlags::default();
+    let mut chars = repl.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '&' => flags.push(&mut out, matched),
+            '~' => flags.push(&mut out, previous_replacement),
+            '\\' => {
+                let Some(next) = chars.next() else {
+                    out.push('\\');
+                    break;
+                };
+                match next {
+                    '0' => flags.push(&mut out, matched),
+                    '1'..='9' => flags.push(
+                        &mut out,
+                        &group_text(next.to_digit(10).unwrap_or(0) as usize),
+                    ),
+                    '&' => out.push('&'),
+                    '\\' => out.push('\\'),
+                    'n' => flags.push(&mut out, "\n"),
+                    't' => flags.push(&mut out, "\t"),
+                    'r' => flags.push(&mut out, "\r"),
+                    'u' => flags.one_upper = true,
+                    'l' => flags.one_lower = true,
+                    'U' => {
+                        flags.all_upper = true;
+                        flags.all_lower = false;
+                    }
+                    'L' => {
+                        flags.all_lower = true;
+                        flags.all_upper = false;
+                    }
+                    'e' | 'E' => {
+                        flags.all_upper = false;
+                        flags.all_lower = false;
+                        flags.clear_one_shot();
+                    }
+                    '=' => {
+                        // The rest of the replacement is the expression.
+                        let expression: String = chars.collect();
+                        let Some(eval) = expr.as_deref_mut() else {
+                            return Err(VimError::new(
+                                "E15",
+                                "Invalid expression: no script context",
+                            ));
+                        };
+                        let value = eval(expression.trim())?;
+                        flags.push(&mut out, &value);
+                        break;
+                    }
+                    other => out.push(other),
+                }
+            }
+            other => {
+                let mut buf = String::new();
+                buf.push(other);
+                flags.push(&mut out, &buf);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Replace `:s` matches in one line, returning the resulting lines (a `\n`
+/// in the replacement splits the line).
+#[allow(clippy::too_many_arguments)]
+fn replace_line(
+    ed: &mut Editor,
+    mut env: Option<&mut Env>,
+    mut state: Option<&mut ScriptState>,
     haystack: &str,
     pat: &str,
     repl: &str,
     global: bool,
     ignorecase: bool,
-) -> String {
+    previous_replacement: &str,
+) -> VimResult<(Vec<String>, bool)> {
     if pat.is_empty() {
-        return haystack.to_string();
+        return Ok((vec![haystack.to_string()], false));
     }
     let mut out = String::new();
     let mut pos = 0usize;
+    let mut had_match = false;
     // End of the previous match; an empty match directly after it is not
     // replaced again (ex_cmds.c do_sub "prev_matchcol" rule).
     let mut prev_end: Option<usize> = None;
-    while let Some((s, e)) = rvim_viml::regex_mvp::find(pat, &haystack[pos..], ignorecase) {
-        let abs_start = pos + s;
-        if e == s && prev_end == Some(abs_start) {
+    while let Some(m) = rvim_viml::regex_mvp::find_captures(pat, &haystack[pos..], ignorecase) {
+        let abs_start = pos + m.start;
+        let abs_end = pos + m.end;
+        had_match = true;
+        if abs_start == abs_end && prev_end == Some(abs_start) {
             match haystack[abs_start..].chars().next() {
                 Some(ch) => {
                     let next = abs_start + ch.len_utf8();
@@ -1635,14 +1944,48 @@ fn literal_replace(
                 None => break,
             }
         }
+        // Make the match visible to submatch() while \= is evaluated.
+        let mut groups = Vec::with_capacity(m.groups.len() + 1);
+        groups.push(Some((abs_start, abs_end)));
+        for group in &m.groups {
+            groups.push(group.map(|(start, end)| (pos + start, pos + end)));
+        }
+        rvim_viml::regex_mvp::set_last_match(haystack, &groups);
         out.push_str(&haystack[pos..abs_start]);
-        out.push_str(&expand_replacement(repl, &haystack[abs_start..pos + e]));
-        pos += e;
+        let mut eval = |expression: &str| -> VimResult<String> {
+            match (env.as_deref_mut(), state.as_deref_mut()) {
+                (Some(env), Some(state)) => {
+                    let value = crate::script::eval_expr(ed, env, state, expression)?;
+                    Ok(match value {
+                        rvim_viml::Value::List(items) => items
+                            .borrow()
+                            .iter()
+                            .map(rvim_viml::Value::to_string_value)
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        other => other.to_string_value(),
+                    })
+                }
+                _ => Err(VimError::new(
+                    "E15",
+                    "Invalid expression: no script context",
+                )),
+            }
+        };
+        out.push_str(&expand_replacement(
+            repl,
+            haystack,
+            pos,
+            &m,
+            previous_replacement,
+            Some(&mut eval),
+        )?);
+        pos = abs_end;
         prev_end = Some(pos);
         if !global {
             break;
         }
-        if e == s {
+        if abs_start == abs_end {
             // Empty match: copy one character so the loop makes progress.
             let Some(ch) = haystack[pos..].chars().next() else {
                 break;
@@ -1653,7 +1996,7 @@ fn literal_replace(
         }
     }
     out.push_str(&haystack[pos..]);
-    out
+    Ok((out.split('\n').map(str::to_string).collect(), had_match))
 }
 
 fn cmd_put(
@@ -1779,8 +2122,15 @@ fn cmd_set(ed: &mut Editor, args: &str, scope: SetScope) -> VimResult<()> {
                 rvim_editor::OptValue::Str(value.to_string())
             };
             ed.set_option(name, resolved, scope)?;
-            if rvim_editor::Options::canonical(name)? == "fileformat" {
-                sync_buffer_fileformat(ed);
+            match rvim_editor::Options::canonical(name)?.as_str() {
+                "fileformat" => sync_buffer_fileformat(ed),
+                // ':set syntax=rust' loads the syntax immediately (optionstr.c
+                // did_set_syntax calls syntax_start).
+                "syntax" => {
+                    let value = ed.options.str_or("syntax", "");
+                    ed.set_syntax_language(&value);
+                }
+                _ => {}
             }
         } else if let Some(name) = token.strip_prefix("inv") {
             // ":set inv{option}" toggles a boolean option (option.c).
@@ -1804,6 +2154,7 @@ fn render_option(ed: &Editor, name: &str) -> VimResult<String> {
         rvim_editor::OptValue::Bool(true) => canon,
         rvim_editor::OptValue::Bool(false) => format!("no{canon}"),
         rvim_editor::OptValue::Num(n) => format!("{canon}={n}"),
+        rvim_editor::OptValue::Str(s) if canon == "key" && !s.is_empty() => "key=*****".to_string(),
         rvim_editor::OptValue::Str(s) => format!("{canon}={s:?}"),
     })
 }

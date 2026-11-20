@@ -7,6 +7,7 @@ use std::path::Path;
 use rvim_core::{VimError, VimResult};
 
 use crate::buffer::{Buffer, FileFormat};
+use crate::crypt::{self, CryptMethod};
 
 /// UTF-8 byte-order mark (`U+FEFF` encoded as EF BB BF).
 const UTF8_BOM: char = '\u{feff}';
@@ -49,6 +50,15 @@ pub fn normalise_input(raw: &str) -> (FileFormat, String, bool) {
 /// Read a file as UTF-8. `Ok(None)` means the file does not exist, which Vim
 /// treats as a new (empty) buffer rather than an error (fileio.c:500-512).
 pub fn read_file_opt(path: &Path) -> VimResult<Option<String>> {
+    Ok(read_file_opt_crypt(path, "")?.map(|(text, _)| text))
+}
+
+/// Read a file, decrypting it when it starts with a Vim encryption header.
+/// Returns the text plus the method that was used (None for a plain file).
+pub fn read_file_opt_crypt(
+    path: &Path,
+    key: &str,
+) -> VimResult<Option<(String, Option<CryptMethod>)>> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
@@ -59,9 +69,10 @@ pub fn read_file_opt(path: &Path) -> VimResult<Option<String>> {
             ));
         }
     };
+    let (bytes, method) = crypt::decrypt_if_needed(&bytes, key)?;
     // M1 assumes UTF-8; the encoding subsystem (M6) will plug in here.
     String::from_utf8(bytes)
-        .map(Some)
+        .map(|text| Some((text, method)))
         .map_err(|e| VimError::new("E474", format!("Invalid UTF-8 in {}: {e}", path.display())))
 }
 
@@ -87,27 +98,49 @@ pub fn read_file(path: &Path) -> VimResult<String> {
 /// default `'fixendofline'` behaviour applies — a file read without a trailing
 /// newline gains one when written back.
 pub fn write_file(path: &Path, buffer: &Buffer) -> VimResult<()> {
-    let mut body = String::new();
-    if buffer.is_bomb() {
-        body.push(UTF8_BOM);
-    }
-    if !buffer.is_empty_buffer() {
-        let format = buffer.fileformat();
-        for line in buffer.lines() {
-            body.push_str(line.as_str());
-            match format {
-                FileFormat::Unix => body.push('\n'),
-                FileFormat::Dos => body.push_str("\r\n"),
-                FileFormat::Mac => body.push('\r'),
-            }
-        }
-    }
+    let body = serialize_buffer(buffer);
     fs::write(path, body).map_err(|e| {
         VimError::new(
             "E212",
             format!("Can't open file for writing: {}: {e}", path.display()),
         )
     })
+}
+
+/// Write a file using Vim's encryption format.
+pub fn write_file_crypt(
+    path: &Path,
+    buffer: &Buffer,
+    key: &str,
+    method: CryptMethod,
+) -> VimResult<()> {
+    let body = crypt::encrypt(&serialize_buffer(buffer), key, method);
+    fs::write(path, body).map_err(|e| {
+        VimError::new(
+            "E212",
+            format!("Can't open file for writing: {}: {e}", path.display()),
+        )
+    })
+}
+
+/// The exact bytes `:write` stores for `buffer` (BOM + lines + EOLs).
+pub fn serialize_buffer(buffer: &Buffer) -> Vec<u8> {
+    let mut body = Vec::new();
+    if buffer.is_bomb() {
+        body.extend_from_slice(UTF8_BOM.to_string().as_bytes());
+    }
+    if !buffer.is_empty_buffer() {
+        let format = buffer.fileformat();
+        for line in buffer.lines() {
+            body.extend_from_slice(line.as_str().as_bytes());
+            match format {
+                FileFormat::Unix => body.push(b'\n'),
+                FileFormat::Dos => body.extend_from_slice(b"\r\n"),
+                FileFormat::Mac => body.push(b'\r'),
+            }
+        }
+    }
+    body
 }
 
 #[cfg(test)]

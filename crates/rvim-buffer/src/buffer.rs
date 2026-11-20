@@ -116,12 +116,22 @@ impl Buffer {
     }
 
     pub fn open(id: BufferId, path: &Path) -> VimResult<Self> {
-        match fileio::read_file_opt(path)? {
-            Some(raw) => {
+        Ok(Self::open_crypt(id, path, "")?.0)
+    }
+
+    /// Open a file, decrypting it with `key` when it is Vim-encrypted.
+    /// Returns the buffer and the method found in the file header.
+    pub fn open_crypt(
+        id: BufferId,
+        path: &Path,
+        key: &str,
+    ) -> VimResult<(Self, Option<crate::crypt::CryptMethod>)> {
+        match fileio::read_file_opt_crypt(path, key)? {
+            Some((raw, method)) => {
                 let mut buf = Self::from_text(id, &raw);
                 buf.name = Some(path.to_path_buf());
                 buf.changed = false;
-                Ok(buf)
+                Ok((buf, method))
             }
             None => {
                 // ENOENT is not an error: Vim starts a new, empty and
@@ -129,7 +139,7 @@ impl Buffer {
                 // (fileio.c:500-512, `BF_NEW`). Other read errors stay E484.
                 let mut buf = Self::new(id);
                 buf.name = Some(path.to_path_buf());
-                Ok(buf)
+                Ok((buf, None))
             }
         }
     }
@@ -357,6 +367,23 @@ impl Buffer {
             return Err(VimError::read_only());
         }
         fileio::write_file(path, self)?;
+        self.name = Some(path.to_path_buf());
+        self.changed = false;
+        Ok(())
+    }
+
+    /// Save encrypted with `key`/`method` (Vim's `:set key=` + `:w`).
+    pub fn save_crypt(
+        &mut self,
+        path: &Path,
+        bang: bool,
+        key: &str,
+        method: crate::crypt::CryptMethod,
+    ) -> VimResult<()> {
+        if self.readonly && !bang {
+            return Err(VimError::read_only());
+        }
+        fileio::write_file_crypt(path, self, key, method)?;
         self.name = Some(path.to_path_buf());
         self.changed = false;
         Ok(())

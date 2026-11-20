@@ -309,11 +309,19 @@ impl Tui {
         let pending = self.pending_keys.clone();
         if entries.iter().any(|(lhs, _)| lhs == &pending) {
             // Exact match: expand the whole buffer (handles recursion + <Nop>).
-            let keys = self
-                .session
-                .editor
-                .maps
-                .expand(mode, &pending)
+            // <expr> mappings are evaluated with the real VimL evaluator.
+            let maps = self.session.editor.maps.clone();
+            let mut evaluate = |expression: &str| -> VimResult<String> {
+                let value = rvim_ex::script::eval_expr(
+                    &mut self.session.editor,
+                    &mut self.session.viml.env,
+                    &mut self.session.viml.state,
+                    expression,
+                )?;
+                Ok(value.to_string_value())
+            };
+            let keys = maps
+                .expand_with(mode, &pending, &mut evaluate)
                 .unwrap_or_else(|_| pending.clone());
             self.pending_keys.clear();
             return Expand::Replaced(keys);
@@ -477,6 +485,29 @@ impl Tui {
                 // CTRL-O / CTRL-I walk the jump list (mark.c).
                 "C-O" => self.session.editor.jump_back().map(|_| true),
                 "C-I" => self.session.editor.jump_forward().map(|_| true),
+                // CTRL-] jumps to the tag of the keyword under the cursor and
+                // CTRL-T pops the tag stack (tag.c do_tag DT_TAG / DT_POP).
+                "C-]" => {
+                    let count = engine.take_pending_count() as usize;
+                    rvim_ex::handlers_tags::jump_to_tag(
+                        &mut self.session.editor,
+                        &mut self.session.viml.env,
+                        &mut self.session.viml.state,
+                        "",
+                        count.max(1),
+                    )
+                    .map(|()| true)
+                }
+                "C-T" => {
+                    let count = engine.take_pending_count() as usize;
+                    rvim_ex::handlers_tags::tag_pop(
+                        &mut self.session.editor,
+                        &mut self.session.viml.env,
+                        &mut self.session.viml.state,
+                        count.max(1),
+                    )
+                    .map(|()| true)
+                }
                 // <C-w> starts a window command; the next key selects it.
                 "C-W" => {
                     self.pending_op = Some(Pending::WindowCmd);
@@ -577,6 +608,18 @@ impl Tui {
             }
             Pending::G => {
                 let mut engine = std::mem::replace(&mut self.session.normal, NormalEngine::new());
+                // g] is :tjump (tag.c): jump when there is one match, list the rest.
+                if matches!(&key, Key::Char(']')) {
+                    let count = engine.take_pending_count() as usize;
+                    self.session.normal = engine;
+                    return rvim_ex::handlers_tags::tag_select_or_jump(
+                        &mut self.session.editor,
+                        &mut self.session.viml.env,
+                        &mut self.session.viml.state,
+                        "",
+                        count.max(1),
+                    );
+                }
                 let result = if matches!(&key, Key::Char('g')) {
                     self.session.editor.push_jump();
                     engine.feed_pair(self.editor(), 'g', 'g')
@@ -1765,6 +1808,12 @@ impl Tui {
         out.write_all(self.grid(cols, rows).to_ansi().as_bytes())?;
         out.flush()?;
         loop {
+            // Deliver pending job/timer/channel callbacks on the main thread.
+            rvim_ex::m7::pump(
+                &mut self.session.editor,
+                &mut self.session.viml.env,
+                &mut self.session.viml.state,
+            );
             // A timeout (rather than a blocking read) lets us notice a resize.
             let input = source.next_input(std::time::Duration::from_millis(120))?;
             match &input {

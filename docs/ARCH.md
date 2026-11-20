@@ -73,12 +73,12 @@
 | `fold.c` `diff.c`(`xdiff/`) `quickfix.c` | 折叠/diff/quickfix | **rvim-editor::fold** / **rvim-diff** + **rvim-editor::diff** / **rvim-ex::errorformat** + **rvim-editor::quickfix**（M5） |
 | `sign.c` `textprop.c` `popupwin.c` | 标志/文本属性/弹窗 | **rvim-ex::host_meta** 数据面（M5，TUI 渲染 sign 列与 popup 覆盖层） |
 | `syntax.c` `spell*.c` `tag.c` `cindent.c` | 语法/拼写/标签/C 缩进 | 后置（M5-M7） |
-| `channel.c` `job.c` `terminal.c` `pty.c` | 通道/作业/终端 | 后置（M7，std::process + 自研协议） |
+| `channel.c` `job.c` `terminal.c` `pty.c` | 通道/作业/终端 | **rvim-ex::m7**（M7：std::process + TCP + mpsc 事件；无 PTY/ConPTY） |
 | `os_win32.c` `os_unix.c` | 平台层 | `cfg(windows)`/`cfg(unix)` 条件编译 |
 | `main.c` | 入口/参数/启动序列 | **bin/rvim** + rvim-app::startup |
 | `if_python*.c` `if_lua.c` `if_perl.xs` `if_ruby.c` `if_mzsch.c` `if_tcl.c` | 脚本语言接口 | **不移植**（ABI/嵌入风险高；以 JSON-RPC channel 替代） |
 | `gui_*.c` `GvimExt/` `VisVim/` | 原生 GUI/OLE | 远期或不做（TUI 优先） |
-| `crypt*.c` `blowfish.c` `sha256.c` | 加密/哈希 | std-only 自研（M6） |
+| `crypt*.c` `blowfish.c` `sha256.c` | 加密/哈希 | **rvim-buffer::crypt**（M8，std-only 自研：zip/blowfish/blowfish2 + SHA-256） |
 | `xxd/` | 十六进制工具 | 独立小工具 `rxxd`（可选） |
 
 ---

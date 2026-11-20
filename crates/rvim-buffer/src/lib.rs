@@ -5,7 +5,9 @@
 //! are general enough to express every mutation, and file (de)serialisation for
 //! the unix/dos/mac file formats.
 
+pub mod blowfish_tables;
 pub mod buffer;
+pub mod crypt;
 pub mod edit;
 pub mod fileio;
 pub mod line;

@@ -18,6 +18,14 @@ fn text(s: &Session) -> String {
 }
 
 #[test]
+fn group_find_probe() {
+    assert_eq!(
+        rvim_viml::regex_mvp::find("\\(b\\)", "abc", false),
+        Some((1, 2))
+    );
+}
+
+#[test]
 fn substitute_respects_word_boundaries() {
     let mut s = Session::new();
     seed(&mut s, &["vi is vi", "a navigator"]);

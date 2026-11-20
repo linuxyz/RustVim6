@@ -1022,7 +1022,7 @@ pub fn cmd_badd(ed: &mut Editor, p: &ParsedEx) -> VimResult<ExOutcome> {
     // Buffer::open would switch to it; open the file into the new buffer by
     // reusing :edit semantics without switching.
     let name = PathBuf::from(path);
-    let buf = rvim_buffer::Buffer::open(id, &name)?;
+    let buf = ed.load_buffer_file(id, &name)?;
     ed.replace_buffer(id, buf)?;
     Ok(ExOutcome::Continue)
 }

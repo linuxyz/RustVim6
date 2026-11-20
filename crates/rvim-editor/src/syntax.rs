@@ -93,21 +93,116 @@ impl SyntaxState {
 
     /// Append one `:syntax` item, returning its id (`synID()`).
     pub fn add_item(&mut self, group: &str, kind: rvim_syntax::ItemKind) -> i64 {
-        let id = self
-            .def_mut()
-            .items
-            .iter()
-            .map(|item| item.id)
-            .max()
-            .unwrap_or(0)
-            + 1;
-        self.def_mut().items.push(rvim_syntax::Item {
+        self.add_item_with_options(group, kind, rvim_syntax::ItemOptions::default())
+    }
+
+    /// Append one item together with its `contained`/`nextgroup`/... flags.
+    pub fn add_item_with_options(
+        &mut self,
+        group: &str,
+        kind: rvim_syntax::ItemKind,
+        options: rvim_syntax::ItemOptions,
+    ) -> i64 {
+        let def = self.def_mut();
+        let id = def.items.iter().map(|item| item.id).max().unwrap_or(0) + 1;
+        def.items.push(rvim_syntax::Item {
             id,
             group: group.to_string(),
             kind,
         });
+        if !options.is_default() {
+            def.item_options.insert(id, options);
+        }
         self.invalidate();
         id
+    }
+
+    /// `syntax sync ...` configuration.
+    pub fn set_sync(&mut self, sync: rvim_syntax::SyncSpec) {
+        self.def_mut().sync = sync;
+        self.invalidate();
+    }
+
+    /// How many lines before a requested line the state must be rebuilt from.
+    pub fn sync_start(&self) -> usize {
+        let Some(engine) = &self.engine else {
+            return SYNC_LINES;
+        };
+        let sync = &engine.def().sync;
+        if sync.from_start {
+            return usize::MAX;
+        }
+        if let Some(min) = sync.minlines {
+            return min;
+        }
+        SYNC_LINES
+    }
+
+    /// Load a definition parsed from a runtime `syntax/<name>.vim`.
+    pub fn load_script(&mut self, name: &str, text: &str) -> bool {
+        let parsed = rvim_syntax::script::parse(name, text);
+        if parsed.def.items.is_empty() && parsed.def.clusters.is_empty() {
+            return false;
+        }
+        for (from, to) in &parsed.links {
+            self.highlights.link(from, to);
+        }
+        self.load(parsed.def);
+        true
+    }
+
+    /// `:syntax include`: merge another syntax file's items.  When a cluster
+    /// name is given every included group is added to it.
+    pub fn include_script(&mut self, name: &str, text: &str, cluster: Option<&str>) -> usize {
+        let parsed = rvim_syntax::script::parse(name, text);
+        for (from, to) in &parsed.links {
+            self.highlights.link(from, to);
+        }
+        if parsed.def.items.is_empty() && parsed.def.clusters.is_empty() {
+            return 0;
+        }
+        let def = self.def_mut();
+        let base = def.items.iter().map(|item| item.id).max().unwrap_or(0) + 1;
+        let mut groups = Vec::new();
+        for (offset, mut item) in parsed.def.items.into_iter().enumerate() {
+            let old = item.id;
+            item.id = base + offset as i64;
+            groups.push(item.group.clone());
+            if let Some(options) = parsed.def.item_options.get(&old) {
+                def.item_options.insert(item.id, options.clone());
+            }
+            def.items.push(item);
+        }
+        for (name, members) in parsed.def.clusters {
+            let entry = def.clusters.entry(name).or_default();
+            for member in members {
+                if !entry.contains(&member) {
+                    entry.push(member);
+                }
+            }
+        }
+        let count = groups.len();
+        if let Some(cluster) = cluster {
+            let entry = def.clusters.entry(cluster.to_string()).or_default();
+            for group in groups {
+                if !entry.contains(&group) {
+                    entry.push(group);
+                }
+            }
+        }
+        self.invalidate();
+        count
+    }
+
+    /// The spans of one line including item ids (`synstack()`).
+    pub fn line_items(
+        &mut self,
+        bufnr: i32,
+        tick: u64,
+        line: usize,
+        window: &[(usize, String)],
+    ) -> Vec<Span> {
+        self.line_spans(bufnr, tick, line, window).to_vec()
     }
 
     /// `:syntax cluster Name add=Group,...`

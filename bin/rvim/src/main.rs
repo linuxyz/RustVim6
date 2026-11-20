@@ -267,6 +267,17 @@ fn run() -> ExitCode {
     let mut session = Session::new();
     session.editor.exmode = cli.exmode || cli.silent_ex;
 
+    // --cmd arguments run before the vimrc *and* before the first file is
+    // read (main.c:416).  This matters for 'key': an encrypted file must be
+    // decrypted with the key that --cmd just set.
+    for cmd in &cli.pre_commands {
+        match session.ex(cmd) {
+            Ok(ExOutcome::Continue) => {}
+            Ok(_) => return ExitCode::from(final_exit_code(&session.report)),
+            Err(_) => continue,
+        }
+    }
+
     // Positional files go on the argument list; Vim edits the first one and
     // leaves the others reachable with :next/:args (main.c create_windows()).
     if let Some(first) = cli.files.first() {
@@ -330,15 +341,6 @@ fn run() -> ExitCode {
     // "Ex starts at last line of the file" (main.c:719-721).
     if cli.exmode || cli.silent_ex {
         session.editor.start_ex_mode_cursor();
-    }
-
-    // --cmd arguments run before any vimrc (main.c:416).
-    for cmd in &cli.pre_commands {
-        match session.ex(cmd) {
-            Ok(ExOutcome::Continue) => {}
-            Ok(_) => return ExitCode::from(final_exit_code(&session.report)),
-            Err(_) => continue,
-        }
     }
 
     // -u {vimrc}: source the user configuration before the +cmd/-c queue.

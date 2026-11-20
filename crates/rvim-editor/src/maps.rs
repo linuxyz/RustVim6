@@ -126,7 +126,7 @@ impl MapEntry {
 }
 
 /// All mappings, kept per mode in declaration order.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct MapStore {
     entries: Vec<MapEntry>,
 }
@@ -233,6 +233,58 @@ impl MapStore {
     /// recursively (depth-limited). `<expr>` entries need the M3 evaluator.
     pub fn expand(&self, mode: MapMode, input: &[Key]) -> VimResult<Vec<Key>> {
         self.expand_depth(mode, input, 0)
+    }
+
+    /// Like [expand], but evaluates `<expr>` right-hand sides with `eval`.
+    /// The evaluator returns the key text (for example `"3j"`) to insert.
+    pub fn expand_with<F>(&self, mode: MapMode, input: &[Key], eval: &mut F) -> VimResult<Vec<Key>>
+    where
+        F: FnMut(&str) -> VimResult<String>,
+    {
+        self.expand_depth_with(mode, input, 0, eval)
+    }
+
+    fn expand_depth_with<F>(
+        &self,
+        mode: MapMode,
+        input: &[Key],
+        depth: usize,
+        eval: &mut F,
+    ) -> VimResult<Vec<Key>>
+    where
+        F: FnMut(&str) -> VimResult<String>,
+    {
+        if depth > MAX_EXPAND_DEPTH {
+            return Err(VimError::new(
+                "E223",
+                "Recursive mapping detected".to_string(),
+            ));
+        }
+        let mut out = Vec::with_capacity(input.len());
+        let mut i = 0;
+        while i < input.len() {
+            match self.longest_match(mode, &input[i..]) {
+                Some(entry) => {
+                    i += entry.lhs.len();
+                    let keys = if entry.opts.expr {
+                        let text = eval(&entry.rhs_raw)?;
+                        parse_keys(&text)
+                    } else {
+                        entry.rhs.clone()
+                    };
+                    if entry.opts.recursive || entry.opts.expr {
+                        out.extend(self.expand_depth_with(mode, &keys, depth + 1, eval)?);
+                    } else {
+                        out.extend(keys);
+                    }
+                }
+                None => {
+                    out.push(input[i].clone());
+                    i += 1;
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn expand_depth(&self, mode: MapMode, input: &[Key], depth: usize) -> VimResult<Vec<Key>> {

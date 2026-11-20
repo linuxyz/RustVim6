@@ -2,6 +2,7 @@
 //! API with real key events).
 
 use rvim_core::{Pos, VimResult};
+use rvim_editor::indent::{cindent, indent_string, new_line_indent};
 use rvim_editor::maps::Key;
 use rvim_editor::{Editor, Mode, RegType};
 
@@ -34,12 +35,77 @@ fn indent_len(line: &str) -> usize {
     indent_of(line).len()
 }
 
+/// Screen columns of the leading white space of `line`.
+fn indent_cols(line: &str, tabstop: usize) -> usize {
+    let ts = tabstop.max(1);
+    let mut col = 0usize;
+    for ch in line.chars() {
+        match ch {
+            ' ' => col += 1,
+            '\t' => col += ts - col % ts,
+            _ => break,
+        }
+    }
+    col
+}
+
+/// Typing '}' or '#' at the start of a line reindents it, like Vim's
+/// 'cinkeys' ("0}", "0#") and 'smartindent'.
+fn reindent_start_char(ed: &mut Editor, ch: char) -> VimResult<()> {
+    if ch != '}' && ch != '#' {
+        return Ok(());
+    }
+    let cindent_on = ed.bool_option("cindent", false);
+    let smart_on = ed.bool_option("smartindent", false);
+    if !cindent_on && !smart_on {
+        return Ok(());
+    }
+    let pos = ed.cursor();
+    let line = ed.current_line();
+    let body = line.trim_start_matches([' ', '\t']);
+    if !body.starts_with(ch) {
+        return Ok(());
+    }
+    let indent_bytes = line.len() - body.len();
+    if pos.col != indent_bytes + ch.len_utf8() {
+        return Ok(());
+    }
+    let tabstop = ed.options.num_or("tabstop", 8).max(1) as usize;
+    let sw = {
+        let sw = ed.options.num_or("shiftwidth", 8).max(0) as usize;
+        if sw == 0 { tabstop } else { sw }
+    };
+    let expandtab = ed.options.bool_or("expandtab", false);
+    let shiftround = ed.options.bool_or("shiftround", false);
+    let cols = if ch == '#' {
+        0
+    } else if cindent_on {
+        cindent(ed, pos.line as i64 + 1, 0)
+    } else {
+        let mut cols = indent_cols(&line[..indent_bytes], tabstop).saturating_sub(sw);
+        if shiftround {
+            cols -= cols % sw;
+        }
+        cols as i64
+    };
+    let new_indent = indent_string(cols, expandtab, tabstop as i64);
+    if new_indent == line[..indent_bytes] {
+        return Ok(());
+    }
+    let new_text = format!("{new_indent}{}", &line[indent_bytes..]);
+    ed.set_line_text(pos.line, new_text)?;
+    ed.set_cursor(Pos::new(pos.line, new_indent.len() + ch.len_utf8()));
+    Ok(())
+}
+
 /// Enter insert mode for the i/a/A/o/O/I entry points.
 pub fn enter_insert(ed: &mut Editor, key: char) -> VimResult<()> {
     let mut pos = ed.cursor();
-    // 'o'/'O' copy the indent of the line they were opened from, so it has to be
-    // read before the new empty line replaces it.
-    let indent = autoindent(ed);
+    // 'o'/'O' copy the indent of the line they were opened from with
+    // 'autoindent', so it has to be read before the new empty line replaces
+    // it.  'cindent'/'smartindent' compute it from the line above instead.
+    let auto = autoindent(ed);
+    let smart_indent = ed.bool_option("cindent", false) || ed.bool_option("smartindent", false);
     match key {
         'i' => {}
         'a' => {
@@ -53,13 +119,27 @@ pub fn enter_insert(ed: &mut Editor, key: char) -> VimResult<()> {
             pos.col = ed.current_buffer().first_nonblank_byte(pos.line)?;
         }
         'o' => {
-            // open below: insert an empty line and land on it
+            // open below: insert one line with the computed indent
             let at = pos.line + 1;
+            let indent = if smart_indent {
+                new_line_indent(ed, pos.line).unwrap_or_default()
+            } else {
+                auto
+            };
             ed.replace_lines(at, at, vec![indent.clone()])?;
             pos = Pos::new(at, indent.len());
         }
         'O' => {
             let at = pos.line;
+            let indent = if smart_indent {
+                if at == 0 {
+                    String::new()
+                } else {
+                    new_line_indent(ed, at - 1).unwrap_or_default()
+                }
+            } else {
+                auto
+            };
             ed.replace_lines(at, at, vec![indent.clone()])?;
             pos = Pos::new(at, indent.len());
         }
@@ -85,17 +165,21 @@ pub fn type_char(ed: &mut Editor, engine: &mut NormalEngine, ch: char) -> VimRes
             pos.line,
             rvim_core::text::move_chars(&line, pos.col, 1),
         ));
+        reindent_start_char(ed, ch)?;
     }
     Ok(())
 }
 
-/// `<CR>`: split the line and, with 'autoindent', copy the indent
-/// (edit.c ins_eol() -> open_line()).
+/// `<CR>`: split the line and give the new line the indent chosen by
+/// 'cindent', 'smartindent' or 'autoindent' (edit.c ins_eol() -> open_line()).
 pub fn newline(ed: &mut Editor, engine: &mut NormalEngine) -> VimResult<()> {
-    let indent = autoindent(ed);
+    // The indent is computed from the line being left, before the split.
+    let indent = new_line_indent(ed, ed.cursor().line);
     type_char(ed, engine, '\n')?;
-    for ch in indent.chars() {
-        type_char(ed, engine, ch)?;
+    if let Some(indent) = indent {
+        for ch in indent.chars() {
+            type_char(ed, engine, ch)?;
+        }
     }
     Ok(())
 }

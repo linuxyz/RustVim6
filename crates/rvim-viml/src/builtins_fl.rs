@@ -1591,6 +1591,16 @@ fn trim_json_float(text: &str) -> String {
     out
 }
 
+/// Public JSON encoder used by the channel layer (M7).
+pub fn json_encode_public(value: &Value) -> VimResult<String> {
+    json_encode_value(value, false)
+}
+
+/// Public JSON decoder used by the channel layer (M7).
+pub fn json_decode_public(text: &str) -> ValueResult {
+    json_decode_value(text, false)
+}
+
 fn json_decode_value(text: &str, js: bool) -> ValueResult {
     let mut parser = JsonParser::new(text, js);
     parser.skip_ws();

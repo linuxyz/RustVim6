@@ -38,6 +38,22 @@ pub fn default_runtimepath() -> String {
     if let Ok(path) = std::env::var("RVIM_RUNTIME") {
         return path;
     }
+    // Installed layouts (M8 packaging): next to the executable or in ../share.
+    if let Ok(exe) = std::env::current_exe() {
+        let dir = exe.parent().unwrap_or_else(|| std::path::Path::new("."));
+        for candidate in [
+            dir.join("runtime"),
+            dir.join("../runtime"),
+            dir.join("../share/vim/runtime"),
+        ] {
+            if candidate.join("filetype.vim").is_file() || candidate.join("syntax").is_dir() {
+                if let Ok(canonical) = candidate.canonicalize() {
+                    return canonical.display().to_string();
+                }
+            }
+        }
+    }
+    // Development tree: the vendored baseline (not versioned).
     let vendored =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference/vim/runtime");
     if let Ok(canonical) = vendored.canonicalize() {

@@ -184,6 +184,40 @@ impl HighlightTable {
                 ..HlAttr::default()
             },
         );
+        // Spell groups (highlight.c init_highlight): bad words are underlined,
+        // capitalisation errors and rare words get their own colour.
+        table.set(
+            "SpellBad",
+            HlAttr {
+                fg: rgb(255, 106, 106),
+                underline: true,
+                ..HlAttr::default()
+            },
+        );
+        table.set(
+            "SpellCap",
+            HlAttr {
+                fg: rgb(255, 196, 0),
+                underline: true,
+                ..HlAttr::default()
+            },
+        );
+        table.set(
+            "SpellRare",
+            HlAttr {
+                fg: rgb(160, 160, 255),
+                underline: true,
+                ..HlAttr::default()
+            },
+        );
+        table.set(
+            "SpellLocal",
+            HlAttr {
+                fg: rgb(120, 220, 120),
+                underline: true,
+                ..HlAttr::default()
+            },
+        );
         // vim's default links (highlight.c hl_init).
         table.link("String", "Constant");
         table.link("Character", "Constant");

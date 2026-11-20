@@ -1,16 +1,14 @@
-//! Unit tests for the MVP regex engine derived from <https://vimregex.com/>.
+//! Unit tests for the Vim-compatible regex engine.
 //!
-//! The tutorial's sections are the specification: \4.1 anchors and word
-//! boundaries, \4.2 the metacharacter/class table, \4.3 quantifiers (greedy and
-//! non-greedy), \4.4 character ranges, \4.5 grouping and backreferences, \4.6
-//! alternation and \4.7 precedence. Each test quotes the tutorial example it
-//! checks, so the suite doubles as a compatibility record.
-//!
-//! The engine implements vim's "magic" dialect (what VimL patterns and `:s`
-//! use): `.` `*` `[` are special, `+` `?` `|` `(` need a backslash, and the
-//! extra classes and `\{-}` are the vim forms.
+//! The tutorial at <https://vimregex.com/> is the specification for the basic
+//! sections: \4.1 anchors and word boundaries, \4.2 the metacharacter/class
+//! table, \4.3 quantifiers (greedy and non-greedy), \4.4 character ranges,
+//! \4.5 grouping and backreferences, \4.6 alternation and \4.7 precedence.
+//! Later sections cover the extensions: capture offsets, \zs / \ze,
+//! back-references, \@= / \@!, multiline atoms and magic levels.  Behaviour
+//! matches Vim 9.9 (checked with the vim binary as an oracle).
 
-use rvim_viml::regex_mvp::find;
+use rvim_viml::regex_mvp::{Match, find, find_captures, find_from, find_multiline};
 
 /// Byte range of the first match.
 fn m(pattern: &str, text: &str) -> Option<(usize, usize)> {
@@ -20,6 +18,11 @@ fn m(pattern: &str, text: &str) -> Option<(usize, usize)> {
 /// The text of the first match.
 fn matched<'a>(pattern: &str, text: &'a str) -> Option<&'a str> {
     m(pattern, text).map(|(start, end)| &text[start..end])
+}
+
+/// The first match with capture groups.
+fn caps(pattern: &str, text: &str) -> Option<Match> {
+    find_captures(pattern, text, false)
 }
 
 fn is_match(pattern: &str, text: &str) -> bool {
@@ -138,6 +141,9 @@ fn greedy_quantifiers_take_as_much_as_possible() {
     assert_eq!(matched(r"a\{,2\}", "aaa"), Some("aa"));
     assert_eq!(matched(r"a\{2,\}", "aaaa"), Some("aaaa"));
     assert_eq!(matched(r"a\{2,3\}", "a"), None);
+    // Vim accepts the closing brace without a backslash too.
+    assert_eq!(matched(r"a\{2,3}", "aaaa"), Some("aaa"));
+    assert_eq!(matched(r"a\{2,3}", "a"), None);
 }
 
 #[test]
@@ -178,8 +184,8 @@ fn character_ranges_are_sets_of_single_characters() {
     assert_eq!(matched(r"[a-z]", "Q"), None);
     assert_eq!(matched(r"[a-zA-Z]", "Q"), Some("Q"));
     assert_eq!(matched(r"[0-9a-zA-Z]", "-"), None);
-    // The tutorial's \"[65]\" example: each character is replaced alone,
-    // while the literal pattern "65" replaces both.
+    // The tutorial's "[65]" example: each character is replaced alone, while
+    // the literal pattern "65" replaces both.
     assert_eq!(m(r"[65]", "High 65 to 70"), Some((5, 6)));
     assert_eq!(m(r"65", "High 65 to 70"), Some((5, 7)));
 }
@@ -240,10 +246,248 @@ fn swapping_two_words_matches_its_three_groups() {
 }
 
 #[test]
-fn backreferences_are_not_supported_yet() {
-    // vimregex \4.5 relies on \1..\9, but the engine has no capture tracking
-    // yet (docs/compat_deviations.md \7.5: the NFA engine will add it).
-    assert!(!is_match(r"\(a\)\1", "aa"));
+fn backreferences_repeat_the_text_of_a_group() {
+    // vimregex \4.5: \1 refers back to the text matched by the first group.
+    assert_eq!(matched(r"\(a\)\1", "aa"), Some("aa"));
+    assert_eq!(matched(r"\(ab\)\1", "abab"), Some("abab"));
+    assert_eq!(m(r"\(a\)\1", "ab"), None);
+    assert_eq!(
+        matched(r"\(foo\)\(bar\)\2\1", "foobarbarfoo"),
+        Some("foobarbarfoo")
+    );
+    assert_eq!(matched(r"\<\(\w\+\)\s\+\1\>", "the the"), Some("the the"));
+    // A backreference to a group that did not participate matches the empty
+    // string, exactly like Vim.
+    assert_eq!(m(r"\(a\)\?b\1", "b"), Some((0, 1)));
+    assert_eq!(matched(r"\(a\)\?b\1", "aba"), Some("aba"));
+    assert_eq!(m(r"\(a\)\@!\1", "b"), Some((0, 0)));
+    // \0 is not a backreference.
+    assert!(is_match(r"\(a\)\0", "a0"));
+}
+
+#[test]
+fn backreferences_honour_ignorecase() {
+    assert_eq!(m(r"\(a\)\1", "aA"), None);
+    assert_eq!(m(r"\c\(a\)\1", "aA"), Some((0, 2)));
+    assert!(find(r"\(a\)\1", "aA", true).is_some());
+    // \C overrides 'ignorecase'.
+    assert!(find(r"\C\(a\)\1", "aA", true).is_none());
+}
+
+// ------------------------------------------------------ capture group offsets
+
+#[test]
+fn capture_groups_are_reported() {
+    let hit = caps(r"\(\w\+\)\s\+\(\w\+\)", "  hello   world").unwrap();
+    assert_eq!((hit.start, hit.end), (2, 15));
+    assert_eq!(hit.groups, vec![Some((2, 7)), Some((10, 15))]);
+    // A non-capturing group does not consume a slot.
+    let hit = caps(r"\%(a\)\(b\)", "ab").unwrap();
+    assert_eq!(hit.groups, vec![Some((1, 2))]);
+    // An optional group that did not participate is None.
+    let hit = caps(r"\(a\)\=b", "b").unwrap();
+    assert_eq!(hit.groups, vec![None]);
+    // A group that matched an empty string is Some((pos, pos)).
+    let hit = caps(r"\(a*\)b", "b").unwrap();
+    assert_eq!(hit.groups, vec![Some((0, 0))]);
+    // No groups at all.
+    let hit = caps("abc", "xabcx").unwrap();
+    assert_eq!((hit.start, hit.end), (1, 4));
+    assert!(hit.groups.is_empty());
+}
+
+#[test]
+fn nested_groups_are_numbered_in_open_order() {
+    let hit = caps(r"\(a\(b\)\(c\)\)", "zabc").unwrap();
+    assert_eq!(hit.groups, vec![Some((1, 4)), Some((2, 3)), Some((3, 4))]);
+}
+
+// -------------------------------------------------------- \zs / \ze markers
+
+#[test]
+fn zero_width_markers_adjust_the_match() {
+    assert_eq!(matched(r"foo\zs bar", "foo bar"), Some(" bar"));
+    assert_eq!(m(r"foo\zs bar", "foo bar"), Some((3, 7)));
+    assert_eq!(matched(r"foo\ze bar", "foo bar"), Some("foo"));
+    assert_eq!(m(r"foo\ze bar", "foo bar"), Some((0, 3)));
+    // \ze cuts the reported match short while matching continues past it.
+    assert_eq!(m(r"foo\zebar", "foobar"), Some((0, 3)));
+    // The last \zs encountered wins.
+    assert_eq!(m(r"foo\zsbar\zs", "foobar"), Some((6, 6)));
+    // Markers inside groups move the overall match, not the capture offsets.
+    let hit = caps(r"foo\(ba\zsr\)", "foobar").unwrap();
+    assert_eq!((hit.start, hit.end), (5, 6));
+    assert_eq!(hit.groups, vec![Some((3, 6))]);
+    let hit = caps(r"foo\(ba\zer\)", "foobar").unwrap();
+    assert_eq!((hit.start, hit.end), (0, 5));
+    assert_eq!(hit.groups, vec![Some((3, 6))]);
+    // A leading \zs makes the match start where it stands.
+    assert_eq!(m(r"\zsfoo", "xxfoo"), Some((2, 5)));
+}
+
+#[test]
+fn markers_work_inside_lookahead_and_alternation() {
+    // A \zs after a successful assertion still moves the reported start.
+    assert_eq!(m(r"\(foo\)\@=foo\zsbar", "foobar"), Some((3, 6)));
+    assert_eq!(m(r"foo\zs\(bar\)\@=", "foobar"), Some((3, 3)));
+    // Vim discards \zs / \ze recorded inside \@= (the assertion is zero
+    // width and does not move the outer match boundaries).
+    assert_eq!(m(r"\(foo\zs\)\@=foobar", "foobar"), Some((0, 6)));
+}
+
+// -------------------------------------------------------- \@= and \@! lookahead
+
+#[test]
+fn lookahead_assertions_are_zero_width() {
+    assert_eq!(m(r"foo\(bar\)\@=", "foobar"), Some((0, 3)));
+    assert_eq!(m(r"foo\(bar\)\@=", "foobaz"), None);
+    assert_eq!(m(r"foo\(bar\)\@!", "foobaz"), Some((0, 3)));
+    assert_eq!(m(r"foo\(bar\)\@!", "foobar"), None);
+    assert_eq!(m(r"\(foo\)\@=foobar", "foobar"), Some((0, 6)));
+    // Captures made inside \@= are kept, as in Vim.
+    let hit = caps(r"\(foo\)\@=foobar", "foobar").unwrap();
+    assert_eq!(hit.groups, vec![Some((0, 3))]);
+    // Nested assertions.
+    assert_eq!(m(r"\(a\(b\)\@=\)\@=ab", "ab"), Some((0, 2)));
+    // The assertion applies to the atom before it, not the whole pattern.
+    assert_eq!(m(r"ab\@=", "ab"), Some((0, 1)));
+    assert_eq!(m(r"ba\@=", "ab"), None);
+}
+
+// --------------------------------------------------------------- multiline
+
+#[test]
+fn multiline_matches_cross_line_breaks() {
+    let text = "one\ntwo\nthree";
+    assert_eq!(matched(r"one\ntwo", text), Some("one\ntwo"));
+    assert_eq!(
+        find_multiline(r"one\_.two", text, false).map(|m| (m.start, m.end)),
+        Some((0, 7))
+    );
+    // \_. matches any character including a newline.
+    assert_eq!(
+        find_multiline(r"\_.", "a\nb", false).map(|m| (m.start, m.end)),
+        Some((0, 1))
+    );
+    // \n only matches a newline.
+    assert!(find_multiline(r"\n", text, false).is_some());
+    assert!(m(r"\n", "abc").is_none());
+}
+
+#[test]
+fn underscore_classes_include_the_newline() {
+    assert!(find_multiline(r"\_s", "a\nb", false).is_some());
+    assert!(find_multiline(r"a\_s\+b", "a \n\tb", false).is_some());
+    assert!(find_multiline(r"a\_p", "a\n", false).is_some());
+    assert!(find_multiline(r"a\_[a-z]", "a\n", false).is_some());
+    // Without the underscore the same atoms do not match a newline.
+    assert!(m(r"a\p", "a\n").is_none());
+    assert!(m(r"a[a-z]", "a\n").is_none());
+    assert!(m(r"a\s", "a\n").is_none());
+    // A plain negated collection does match an end-of-line (Vim/Vi compatible).
+    assert_eq!(m(r"a[^x]", "a\n"), Some((0, 2)));
+}
+
+#[test]
+fn multiline_anchors_bind_lines() {
+    let text = "alpha\nbeta\ngamma";
+    assert_eq!(
+        find_multiline(r"^beta", text, false).map(|m| (m.start, m.end)),
+        Some((6, 10))
+    );
+    assert_eq!(
+        find_multiline(r"alpha$", text, false).map(|m| (m.start, m.end)),
+        Some((0, 5))
+    );
+    assert_eq!(
+        find_multiline(r"^gamma$", text, false).map(|m| (m.start, m.end)),
+        Some((11, 16))
+    );
+    // find stays line oriented: ^ and $ only bind the ends of the text.
+    assert!(m(r"^beta", text).is_none());
+    assert!(m(r"alpha$", text).is_none());
+    // \_^ and \_$ are line anchors even in line-oriented mode.
+    assert_eq!(m(r"a\_$", "a\nb"), Some((0, 1)));
+    assert_eq!(m(r"\_^beta", "alpha\nbeta"), Some((6, 10)));
+    // \%^ and \%$ are text anchors.
+    assert!(find_multiline(r"\%^alpha", text, false).is_some());
+    assert!(find_multiline(r"gamma\%$", text, false).is_some());
+}
+
+#[test]
+fn multiline_star_spans_the_whole_text() {
+    let text = "a\nb\nc";
+    let hit = find_multiline(r"\_.*", text, false).unwrap();
+    assert_eq!((hit.start, hit.end), (0, text.len()));
+    // In line-oriented mode '.' stops at the first newline.
+    assert_eq!(m(r"a.*", text), Some((0, 1)));
+}
+
+// ------------------------------------------------------------- magic levels
+
+#[test]
+fn very_magic_makes_punctuation_special() {
+    assert_eq!(matched(r"\v(a|b)+", "abab"), Some("abab"));
+    assert_eq!(matched(r"\v\d+\.\d+", "pi 3.14"), Some("3.14"));
+    // As in Vim the switch lasts until the end of the pattern.
+    assert_eq!(m(r"\v(a|b)c|d", "x|d"), Some((2, 3)));
+    // A backslash makes very-magic punctuation literal again.
+    assert_eq!(matched(r"\vfoo\.bar", "foo.bar"), Some("foo.bar"));
+    assert_eq!(m(r"\vfoo\.bar", "fooXbar"), None);
+    // Bare braces, '=' and '+' are quantifiers in very magic.
+    assert_eq!(matched(r"\va{2,3}", "aaaa"), Some("aaa"));
+    assert_eq!(matched(r"\vab=", "ab"), Some("ab"));
+    assert!(is_match(r"\vab=", "a"));
+}
+
+#[test]
+fn very_nomagic_treats_everything_literally() {
+    assert_eq!(matched(r"\Vfoo.bar", "foo.bar and more"), Some("foo.bar"));
+    assert!(!is_match(r"\Vfoo.bar", "fooXbar"));
+    assert!(!is_match(r"\Vfoo*bar", "foooobar"));
+    assert!(is_match(r"\Vfoo*bar", "foo*bar"));
+    // Parentheses are literal too (Vim 9.9 behaviour).
+    assert_eq!(matched(r"\V(foo)", "x(foo)y"), Some("(foo)"));
+    // A backslash re-enables a special meaning: \. is "any character", so it
+    // matches the dot as well as any other character.
+    assert_eq!(matched(r"\Vfoo\.bar", "fooXbar"), Some("fooXbar"));
+    assert_eq!(matched(r"\Vfoo\.bar", "foo.bar"), Some("foo.bar"));
+    assert!(!is_match(r"\Vfoo\.bar", "fooXbaz"));
+}
+
+#[test]
+fn magic_levels_can_be_switched_inside_a_pattern() {
+    // \M is nomagic: '.' is literal, '\.' is any character.
+    assert_eq!(matched(r"\Mfoo.bar", "foo.bar"), Some("foo.bar"));
+    assert!(!is_match(r"\Mfoo.bar", "fooXbar"));
+    assert!(is_match(r"\Mfoo\.bar", "fooXbar"));
+    // Default magic: '\+' works, '+' is literal.
+    assert!(is_match(r"a\+b", "aaab"));
+    assert!(is_match(r"a+b", "a+b"));
+    // Switching back and forth.
+    assert!(is_match(r"\v(a|b)\m\|c", "c"));
+    assert!(is_match(r"\v(a|b)\m\|c", "b"));
+}
+
+// -------------------------------------------------------------- find_from
+
+#[test]
+fn find_from_starts_at_the_requested_offset() {
+    let hit = find_from("b", "abab", 1, false).unwrap();
+    assert_eq!((hit.start, hit.end), (1, 2));
+    let hit = find_from("b", "abab", 2, false).unwrap();
+    assert_eq!((hit.start, hit.end), (3, 4));
+    assert!(find_from("b", "abab", 4, false).is_none());
+    // Capture offsets stay relative to the whole text.
+    let hit = find_from(r"\(b\)", "abab", 2, false).unwrap();
+    assert_eq!(hit.groups, vec![Some((3, 4))]);
+    // Byte offsets do not need to be char boundaries; a position inside a
+    // multi-byte character rounds up to the next boundary.
+    assert_eq!(
+        find_from("\u{e9}", "a\u{e9}", 1, false).map(|m| (m.start, m.end)),
+        Some((1, 3))
+    );
+    assert!(find_from("\u{e9}", "a\u{e9}", 2, false).is_none());
 }
 
 // --------------------------------------------- vim-specific escapes and UTF-8
@@ -254,6 +498,8 @@ fn percent_escapes_are_single_characters() {
     assert_eq!(matched(r"\%x41", "A"), Some("A"));
     assert_eq!(matched(r"\%o101", "A"), Some("A"));
     assert_eq!(matched(r"\%u00e9", "caf\u{e9}"), Some("\u{e9}"));
+    // A zero code point is how vim spells a newline.
+    assert_eq!(matched(r"\%d0", "\n"), Some("\n"));
 }
 
 #[test]
@@ -279,4 +525,111 @@ fn empty_pattern_and_anchors_are_zero_width() {
     assert_eq!(m("^", "abc"), Some((0, 0)));
     assert_eq!(m("$", "abc"), Some((3, 3)));
     assert_eq!(m("^$", ""), Some((0, 0)));
+}
+
+// ------------------------------------------------- collections and classes
+
+#[test]
+fn posix_classes_and_escapes_inside_collections() {
+    assert_eq!(matched(r"[[:alpha:]]\+", "123abc456"), Some("abc"));
+    assert_eq!(matched(r"[[:alnum:]_]\+", "  foo_1  "), Some("foo_1"));
+    assert!(is_match(r"[[:digit:]]", "7"));
+    assert!(!is_match(r"[[:digit:]]", "x"));
+    assert!(is_match(r"[[:space:]]", "\t"));
+    assert!(is_match(r"[[:punct:]]", "!"));
+    assert!(is_match(r"[\x41-\x5a]\+", "HELLO"));
+    assert!(is_match(r"[\n]", "a\nb"));
+    // A collection without a closing bracket is a literal '['.
+    assert!(is_match(r"[abc", "[abc"));
+    assert!(is_match(r"[]]", "]"));
+}
+
+// ------------------------------------------------------- pathological input
+
+#[test]
+fn zero_width_repeats_terminate() {
+    // An empty-able body must not make the matcher loop forever.
+    assert_eq!(m(r"\(a*\)*", "aaa"), Some((0, 3)));
+    assert_eq!(m(r"\(a*\)*b", "aaab"), Some((0, 4)));
+    assert_eq!(m(r"\(\)*", "abc"), Some((0, 0)));
+    assert_eq!(m(r"\(a*\)\{2,3\}", "aa"), Some((0, 2)));
+    assert_eq!(m(r"\(a*\)\+", "aaa"), Some((0, 3)));
+    // The step budget cuts off catastrophic backtracking instead of hanging.
+    let text = "a".repeat(60);
+    assert!(find(r"\(a*\)*b", &text, false).is_none());
+}
+
+// ----------------------------------------- oracle-checked corner cases (Vim 9.9)
+
+#[test]
+fn very_magic_percent_and_braces() {
+    // Bare %(...) is the non-capturing group in very magic.
+    assert_eq!(matched(r"\v%(a|b)+", "ab"), Some("ab"));
+    assert!(!is_match(r"\v%(a|b)c", "ad"));
+    // \% is a literal percent in very magic.
+    assert_eq!(matched(r"\v\%d65", "%d65"), Some("%d65"));
+    assert!(!is_match(r"\v\%d65", "A"));
+    // Bare braces are quantifiers; the closing brace may be plain or escaped.
+    assert_eq!(matched(r"\v(a|b){2}", "abab"), Some("ab"));
+    assert_eq!(matched(r"a\{2}b", "aab"), Some("aab"));
+    assert_eq!(matched(r"a\{2\}b", "aab"), Some("aab"));
+    assert_eq!(matched(r"a\{3,2\}b", "aab"), Some("aab"));
+}
+
+#[test]
+fn case_flags_follow_vims_precedence() {
+    // Vim's \c wins over \C regardless of where it appears.
+    assert_eq!(m(r"\c\(a\)\1\C", "aA"), Some((0, 2)));
+    assert_eq!(m(r"\C\(a\)\1\c", "aA"), Some((0, 2)));
+    assert!(find(r"\cFOO\C", "foo", false).is_some());
+    assert!(find(r"\CFOO\c", "foo", false).is_some());
+    // A lone \C overrides 'ignorecase'.
+    assert!(find(r"\CFOO", "foo", true).is_none());
+}
+
+#[test]
+fn repeated_groups_keep_the_last_iteration() {
+    let hit = caps(r"\(a\)*", "aaa").unwrap();
+    assert_eq!((hit.start, hit.end), (0, 3));
+    assert_eq!(hit.groups, vec![Some((2, 3))]);
+    // An empty-able group matched with zero width reports an empty capture.
+    let hit = caps(r"\(a*\)*", "aaa").unwrap();
+    assert_eq!((hit.start, hit.end), (0, 3));
+    assert_eq!(hit.groups, vec![Some((3, 3))]);
+}
+
+#[test]
+fn very_magic_assertions_and_boundaries() {
+    assert_eq!(m(r"\v(a)@=a", "a"), Some((0, 1)));
+    assert_eq!(m(r"\v(a)@!c", "bc"), Some((1, 2)));
+    assert_eq!(m(r"\v<abc>", "x abc y"), Some((2, 5)));
+    assert_eq!(m(r"\v\d{2,3}", "a1234"), Some((1, 4)));
+    // \V makes '^' a line anchor unless escaped; \M keeps \^ literal.
+    assert!(m(r"\V\^b", "^b").is_none());
+    assert_eq!(m(r"\M\^b", "^b"), Some((0, 2)));
+    // Nomagic: '*' is literal, '\*' repeats.
+    assert!(m(r"\Mfoo*bar", "foooobar").is_none());
+    assert_eq!(m(r"\Mfoo*bar", "foo*bar"), Some((0, 7)));
+    assert_eq!(m(r"\Mfoo\*bar", "foooobar"), Some((0, 8)));
+}
+
+#[test]
+fn newline_collections_and_anchors() {
+    // A positive collection only matches a newline with \n or the \_ prefix.
+    assert!(m(r"[^\n]", "\n").is_none());
+    assert_eq!(m(r"\_[^x]", "\n"), Some((0, 1)));
+    assert!(m(r"[^\n]", "a").is_some());
+    // ^ is not a line anchor in line-oriented mode, even after \n.
+    assert!(m(r"\n^b", "a\nb").is_none());
+    assert_eq!(
+        find_multiline(r"\n^b", "a\nb", false).map(|m| (m.start, m.end)),
+        Some((1, 3))
+    );
+    // $ before a trailing newline in multiline mode.
+    assert_eq!(
+        find_multiline(r"a$", "a\n", false).map(|m| (m.start, m.end)),
+        Some((0, 1))
+    );
+    // \_s and friends still see a newline in line-oriented mode.
+    assert_eq!(m(r"\_s*\_.", "a\nb"), Some((0, 1)));
 }

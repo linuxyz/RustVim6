@@ -218,6 +218,18 @@ fn defs() -> Vec<OptDef> {
             default: OptValue::Str("utf-8".into()),
         },
         OptDef {
+            name: "key",
+            short: "key",
+            kind: OptKind::Str,
+            default: OptValue::Str("".into()),
+        },
+        OptDef {
+            name: "cryptmethod",
+            short: "cm",
+            kind: OptKind::Str,
+            default: OptValue::Str("blowfish2".into()),
+        },
+        OptDef {
             name: "filetype",
             short: "ft",
             kind: OptKind::Str,
@@ -545,6 +557,262 @@ fn defs() -> Vec<OptDef> {
             kind: OptKind::Num,
             default: OptValue::Num(100),
         },
+        // ---- M6: tags, C indenting and spell checking -----------------------
+        OptDef {
+            name: "tags",
+            short: "tags",
+            kind: OptKind::Str,
+            default: OptValue::Str("tags".into()),
+        },
+        OptDef {
+            name: "taglength",
+            short: "tl",
+            kind: OptKind::Num,
+            default: OptValue::Num(0),
+        },
+        OptDef {
+            name: "showfulltag",
+            short: "sft",
+            kind: OptKind::Bool,
+            default: OptValue::Bool(false),
+        },
+        OptDef {
+            name: "cindent",
+            short: "cin",
+            kind: OptKind::Bool,
+            default: OptValue::Bool(false),
+        },
+        OptDef {
+            name: "smartindent",
+            short: "si",
+            kind: OptKind::Bool,
+            default: OptValue::Bool(false),
+        },
+        OptDef {
+            name: "cinoptions",
+            short: "cino",
+            kind: OptKind::Str,
+            default: OptValue::Str("".into()),
+        },
+        OptDef {
+            name: "cinwords",
+            short: "cinw",
+            kind: OptKind::Str,
+            default: OptValue::Str("if,else,while,do,for,switch".into()),
+        },
+        OptDef {
+            name: "cinkeys",
+            short: "cink",
+            kind: OptKind::Str,
+            default: OptValue::Str("0{,0},0),0],:,0#,!^F,o,O,e".into()),
+        },
+        OptDef {
+            name: "indentexpr",
+            short: "inde",
+            kind: OptKind::Str,
+            default: OptValue::Str("".into()),
+        },
+        OptDef {
+            name: "indentkeys",
+            short: "indk",
+            kind: OptKind::Str,
+            default: OptValue::Str("0{,0},0),0],:,0#,!^F,o,O,e".into()),
+        },
+        OptDef {
+            name: "spelllang",
+            short: "spl",
+            kind: OptKind::Str,
+            default: OptValue::Str("en".into()),
+        },
+        OptDef {
+            name: "spellfile",
+            short: "spf",
+            kind: OptKind::Str,
+            default: OptValue::Str("".into()),
+        },
+        OptDef {
+            name: "spellcapcheck",
+            short: "spc",
+            kind: OptKind::Str,
+            default: OptValue::Str("[.?!]\\s*[\"')\\]]*\\s*$".into()),
+        },
+        OptDef {
+            name: "spellsuggest",
+            short: "sps",
+            kind: OptKind::Str,
+            default: OptValue::Str("best".into()),
+        },
+        OptDef {
+            name: "spelloptions",
+            short: "spo",
+            kind: OptKind::Str,
+            default: OptValue::Str("".into()),
+        },
+        // ---- M8 closure: commonly queried remaining options -----------------
+        OptDef {
+            name: "termguicolors",
+            short: "tgc",
+            kind: OptKind::Bool,
+            default: OptValue::Bool(true),
+        },
+        OptDef {
+            name: "guifont",
+            short: "gfn",
+            kind: OptKind::Str,
+            default: OptValue::Str("".into()),
+        },
+        OptDef {
+            name: "sessionoptions",
+            short: "ssop",
+            kind: OptKind::Str,
+            default: OptValue::Str(
+                "blank,buffers,curdir,folds,help,tabpages,winsize,terminal".into(),
+            ),
+        },
+        OptDef {
+            name: "viewoptions",
+            short: "vop",
+            kind: OptKind::Str,
+            default: OptValue::Str("folds,options,cursor,curdir".into()),
+        },
+        OptDef {
+            name: "foldexpr",
+            short: "fde",
+            kind: OptKind::Str,
+            default: OptValue::Str("0".into()),
+        },
+        OptDef {
+            name: "foldignore",
+            short: "fdi",
+            kind: OptKind::Str,
+            default: OptValue::Str("#".into()),
+        },
+        OptDef {
+            name: "foldnestmax",
+            short: "fdn",
+            kind: OptKind::Num,
+            default: OptValue::Num(20),
+        },
+        OptDef {
+            name: "foldmarker",
+            short: "fmr",
+            kind: OptKind::Str,
+            default: OptValue::Str("{{{,}}}".into()),
+        },
+        OptDef {
+            name: "diffopt",
+            short: "dip",
+            kind: OptKind::Str,
+            default: OptValue::Str("internal,filler,closeoff".into()),
+        },
+        OptDef {
+            name: "commentstring",
+            short: "cms",
+            kind: OptKind::Str,
+            default: OptValue::Str("/*%s*/".into()),
+        },
+        OptDef {
+            name: "formatoptions",
+            short: "fo",
+            kind: OptKind::Str,
+            default: OptValue::Str("tcq".into()),
+        },
+        OptDef {
+            name: "selection",
+            short: "sel",
+            kind: OptKind::Str,
+            default: OptValue::Str("inclusive".into()),
+        },
+        OptDef {
+            name: "clipboard",
+            short: "cb",
+            kind: OptKind::Str,
+            default: OptValue::Str("".into()),
+        },
+        OptDef {
+            name: "paste",
+            short: "paste",
+            kind: OptKind::Bool,
+            default: OptValue::Bool(false),
+        },
+        OptDef {
+            name: "modifiable",
+            short: "ma",
+            kind: OptKind::Bool,
+            default: OptValue::Bool(true),
+        },
+        OptDef {
+            name: "buftype",
+            short: "bt",
+            kind: OptKind::Str,
+            default: OptValue::Str("".into()),
+        },
+        OptDef {
+            name: "swapfile",
+            short: "swf",
+            kind: OptKind::Bool,
+            default: OptValue::Bool(true),
+        },
+        OptDef {
+            name: "undofile",
+            short: "udf",
+            kind: OptKind::Bool,
+            default: OptValue::Bool(false),
+        },
+        OptDef {
+            name: "backup",
+            short: "bk",
+            kind: OptKind::Bool,
+            default: OptValue::Bool(false),
+        },
+        OptDef {
+            name: "writebackup",
+            short: "wb",
+            kind: OptKind::Bool,
+            default: OptValue::Bool(true),
+        },
+        OptDef {
+            name: "binary",
+            short: "bin",
+            kind: OptKind::Bool,
+            default: OptValue::Bool(false),
+        },
+        OptDef {
+            name: "endofline",
+            short: "eol",
+            kind: OptKind::Bool,
+            default: OptValue::Bool(true),
+        },
+        OptDef {
+            name: "fixendofline",
+            short: "fixeol",
+            kind: OptKind::Bool,
+            default: OptValue::Bool(true),
+        },
+        OptDef {
+            name: "bomb",
+            short: "bomb",
+            kind: OptKind::Bool,
+            default: OptValue::Bool(false),
+        },
+        OptDef {
+            name: "listchars",
+            short: "lcs",
+            kind: OptKind::Str,
+            default: OptValue::Str("eol:$".into()),
+        },
+        OptDef {
+            name: "fillchars",
+            short: "fcs",
+            kind: OptKind::Str,
+            default: OptValue::Str("vert:|,fold:-".into()),
+        },
+        OptDef {
+            name: "showbreak",
+            short: "sbr",
+            kind: OptKind::Str,
+            default: OptValue::Str("".into()),
+        },
     ]
 }
 
@@ -557,9 +825,17 @@ pub const WINDOW_LOCAL: &[&str] = &[
     "cursorcolumn",
     "cursorline",
     "diff",
+    "binary",
+    "bomb",
+    "buftype",
+    "endofline",
+    "fixendofline",
     "foldcolumn",
     "foldenable",
+    "foldexpr",
+    "foldignore",
     "foldlevel",
+    "foldmarker",
     "foldmethod",
     "foldminlines",
     "foldtext",
@@ -573,7 +849,24 @@ pub const WINDOW_LOCAL: &[&str] = &[
     "scrolloff",
     "sidescrolloff",
     "signcolumn",
+    "cindent",
+    "cinkeys",
+    "cryptmethod",
+    "key",
+    "cinoptions",
+    "cinwords",
+    "indentexpr",
+    "indentkeys",
+    "smartindent",
     "spell",
+    "spellfile",
+    "spelllang",
+    "modifiable",
+    "spelloptions",
+    "spellsuggest",
+    "swapfile",
+    "tags",
+    "undofile",
     "winfixheight",
     "winfixwidth",
     "winminheight",
@@ -605,6 +898,10 @@ fn validate(canon: &str, value: OptValue) -> VimResult<OptValue> {
         ("fileformat", OptValue::Str(s)) => {
             rvim_buffer::FileFormat::parse(s)
                 .map_err(|_| VimError::invalid_option_argument(&format!("fileformat={s}")))?;
+            Ok(value)
+        }
+        ("cryptmethod", OptValue::Str(s)) => {
+            rvim_buffer::crypt::CryptMethod::from_name(s)?;
             Ok(value)
         }
         // option.c: 'foldmethod' only accepts the documented methods.
@@ -776,6 +1073,7 @@ impl Options {
                     OptValue::Bool(true) => d.name.to_string(),
                     OptValue::Bool(false) => format!("no{}", d.name),
                     OptValue::Num(n) => format!("{}={}", d.name, n),
+                    OptValue::Str(s) if d.name == "key" && !s.is_empty() => "key=*****".to_string(),
                     OptValue::Str(s) => format!("{}={:?}", d.name, s),
                 }
             })
@@ -789,6 +1087,7 @@ impl Options {
             OptValue::Bool(true) => canon,
             OptValue::Bool(false) => format!("no{canon}"),
             OptValue::Num(n) => format!("{canon}={n}"),
+            OptValue::Str(s) if canon == "key" && !s.is_empty() => "key=*****".to_string(),
             OptValue::Str(s) => format!("{canon}={s:?}"),
         })
     }

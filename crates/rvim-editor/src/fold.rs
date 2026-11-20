@@ -277,6 +277,7 @@ impl Editor {
         let folds = match self.wopt_str("foldmethod", "manual").as_str() {
             "indent" => self.compute_indent_folds(),
             "marker" => self.compute_marker_folds(),
+            "syntax" => self.compute_syntax_folds()?,
             _ => return Ok(()),
         };
         let win = self.windows.current_id();
@@ -298,7 +299,6 @@ impl Editor {
     /// stored (manual) folds are kept and callers can report the limitation.
     pub fn unsupported_foldmethod(&self) -> Option<&'static str> {
         match self.wopt_str("foldmethod", "manual").as_str() {
-            "syntax" => Some("syntax"),
             "expr" => Some("expr"),
             "diff" => Some("diff"),
             _ => None,
@@ -755,6 +755,48 @@ impl Editor {
         self.finish_computed(folds)
     }
 
+    /// Build folds from syntax regions carrying the `fold` flag.
+    fn compute_syntax_folds(&self) -> VimResult<Vec<Fold>> {
+        let Some(engine) = self.syntax.engine().cloned() else {
+            return Ok(Vec::new());
+        };
+        let total = self.line_count();
+        let mut state = rvim_syntax::State::default();
+        let mut open: HashMap<i64, (usize, usize)> = HashMap::new();
+        let mut folds = Vec::new();
+        for line in 0..total {
+            let before: Vec<i64> = state.stack.iter().map(|region| region.id).collect();
+            let text = self.current_buffer().line_str(line)?.to_string();
+            let (_, next) = engine.line(&state, &text);
+            let after: Vec<i64> = next.stack.iter().map(|region| region.id).collect();
+            for (index, region) in next.stack.iter().enumerate() {
+                if !before.contains(&region.id) && engine.options_of(region.id).fold {
+                    open.insert(region.id, (line, index + 1));
+                }
+            }
+            let closed: Vec<i64> = open
+                .keys()
+                .copied()
+                .filter(|id| !after.contains(id))
+                .collect();
+            for id in closed {
+                if let Some((start, level)) = open.remove(&id) {
+                    if line > start {
+                        folds.push(Fold::new(start, line, level, true));
+                    }
+                }
+            }
+            state = next;
+        }
+        let last = total.saturating_sub(1);
+        for (start, level) in open.into_values() {
+            if last > start {
+                folds.push(Fold::new(start, last, level, true));
+            }
+        }
+        Ok(self.finish_computed(folds))
+    }
+
     /// Apply 'foldminlines' and 'foldlevel' to freshly computed folds.
     ///
     /// Small folds stay in the list (so foldlevel() and the fold column keep
@@ -1089,7 +1131,7 @@ mod tests {
     fn unsupported_methods_keep_the_manual_folds() {
         let mut ed = editor_with(&["a", "b", "c"]);
         ed.add_fold(0, 1).unwrap();
-        for method in ["syntax", "expr", "diff"] {
+        for method in ["expr", "diff"] {
             set_str(&mut ed, "foldmethod", method);
             ed.recompute_folds().unwrap();
             assert_eq!(ed.unsupported_foldmethod(), Some(method));

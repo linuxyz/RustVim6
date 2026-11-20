@@ -235,10 +235,10 @@ pub fn resolve_name(name: &str) -> Option<Key> {
     let base = match resolve_base(base_text) {
         Some(base) => base,
         None => {
-            // A lone printable character is a valid base: <C-r>, <M-x>.
+            // A lone printable character is a valid base: <C-r>, <M-x>, <C-]>.
             let mut it = base_text.chars();
             match (it.next(), it.next()) {
-                (Some(c), None) if c.is_ascii_alphanumeric() => Base::Char(c),
+                (Some(c), None) if c.is_ascii_graphic() => Base::Char(c),
                 _ => return None,
             }
         }
@@ -259,7 +259,7 @@ pub fn resolve_name(name: &str) -> Option<Key> {
             if mods == ['S'] && c.is_ascii_alphabetic() {
                 return Some(Key::Char(c.to_ascii_uppercase()));
             }
-            if !c.is_ascii_alphanumeric() {
+            if !c.is_ascii_graphic() {
                 return None;
             }
             Some(Key::Special(format!(

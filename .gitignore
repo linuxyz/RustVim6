@@ -9,6 +9,10 @@
 .tmp_diff/
 .tmp_*.txt
 OUTPATH*
+# :mksession/:mkview default files written by the all-commands probe
+Session.vim
+View.vim
+vimrc
 _.sw?
 *.swp
 *.swo

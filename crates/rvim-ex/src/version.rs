@@ -11,6 +11,10 @@ pub fn version_banner() -> String {
         format!("RustVim {RVIM_VERSION} (Vim-compatible, std-only)"),
         format!("Reference baseline: vim/vim {VIM_BASELINE_TAG}, included patches: {VIM_BASELINE_PATCHES}"),
         "vi-compatible mode: not supported ('compatible' permanently off)".to_string(),
+        "Features: +cryptv +crypt-blowfish +crypt-blowfish2 +crypt-zip +spell +syntax \
++quickfix +folding +diff +windows +tabpages +job +channel +terminal +timers \
++multi_byte +cmdline_compl +cmdline_hist"
+            .to_string(),
     ]
     .join("\n")
 }

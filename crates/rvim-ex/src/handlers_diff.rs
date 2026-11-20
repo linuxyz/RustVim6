@@ -37,10 +37,11 @@
 //! * `:diffsplit` does not move the cursor to the line corresponding to the old
 //!   window (`diff_get_corresponding_line()`) and does not scroll to the same
 //!   fraction, because there is no cursor-correspondence helper yet.
-//! * `:diffpatch` is not implemented: it needs the external `patch` tool and a
-//!   temporary-file dance that is out of scope here.
+//! * `:diffpatch` invokes the external `patch` tool on a temporary copy; the
+//!   patched file opens in a split window and both windows enter diff mode.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use rvim_core::{VimError, VimResult};
 use rvim_editor::{Editor, WindowId};
@@ -76,8 +77,67 @@ pub fn cmd_diff(
         }
         "diffget" => return cmd_diffgetput(ed, env, state, p, false),
         "diffput" => return cmd_diffgetput(ed, env, state, p, true),
+        "diffpatch" => return cmd_diffpatch(ed, env, state, p),
         _ => {}
     }
+    Ok(ExOutcome::Continue)
+}
+
+/// :diffpatch {patchfile}: apply the patch to a temp copy, open it in a split
+/// window and diff it against the current buffer (diff.c ex_diffpatch).
+fn cmd_diffpatch(
+    ed: &mut Editor,
+    env: &mut Env,
+    state: &mut ScriptState,
+    p: &ParsedEx,
+) -> VimResult<ExOutcome> {
+    let patchfile = PathBuf::from(p.args.trim());
+    if patchfile.as_os_str().is_empty() {
+        return Err(VimError::new("E471", "Argument required"));
+    }
+    if !patchfile.is_file() {
+        return Err(VimError::new(
+            "E484",
+            format!("Can't open file {}", patchfile.display()),
+        ));
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir();
+    let original = dir.join(format!("rvim_patch_{}_{stamp}.orig", std::process::id()));
+    let patched = dir.join(format!("rvim_patch_{}_{stamp}.new", std::process::id()));
+    let body = rvim_buffer::fileio::serialize_buffer(ed.current_buffer());
+    std::fs::write(&original, body)
+        .map_err(|e| VimError::new("E482", format!("Can't write {}: {e}", original.display())))?;
+    // GNU patch also accepts `-o`, but BusyBox patch (bundled with some
+    // Windows toolchains) only patches ORIGFILE in place.  Patch the temp
+    // original and then open it; the user's file is never touched.
+    let status = Command::new("patch")
+        .arg("-p0")
+        .arg("-i")
+        .arg(&patchfile)
+        .arg(&original)
+        .output();
+    let output_ok = matches!(&status, Ok(out) if out.status.success())
+        && original.metadata().map(|m| m.len() > 0).unwrap_or(false);
+    if !output_ok {
+        let _ = std::fs::remove_file(&original);
+        let _ = std::fs::remove_file(original.with_extension("rej"));
+        let _ = std::fs::remove_file(&patched);
+        return Err(VimError::new(
+            "E816",
+            "Cannot read patch output (is patch installed?)",
+        ));
+    }
+    let command = format!("vsplit {}", original.display());
+    crate::exec::run_line_with(ed, env, state, &command)?;
+    crate::exec::run_line_with(ed, env, state, "windo diffthis")?;
+    // The split has already read the file; the temp copy can go now.
+    let _ = std::fs::remove_file(&original);
+    let _ = std::fs::remove_file(original.with_extension("rej"));
+    let _ = std::fs::remove_file(&patched);
     Ok(ExOutcome::Continue)
 }
 
@@ -499,7 +559,7 @@ mod tests {
     #[test]
     fn unknown_names_are_ignored() {
         let (mut ed, mut env, mut state) = (Editor::new(), Env::new(), ScriptState::default());
-        let out = run(&mut ed, &mut env, &mut state, "diffpatch", "patch.diff").unwrap();
+        let out = run(&mut ed, &mut env, &mut state, "diffbogus", "patch.diff").unwrap();
         assert!(matches!(out, ExOutcome::Continue));
         assert!(!ed.in_diff_mode(ed.current_win_id()));
     }

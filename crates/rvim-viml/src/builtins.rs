@@ -148,6 +148,7 @@ pub const IMPLEMENTED_FUNCS: &[&str] = &[
     "strpart",
     "strridx",
     "strwidth",
+    "submatch",
     "substitute",
     "tan",
     "tolower",
@@ -480,6 +481,10 @@ fn dispatch(name: &str, args: &[Value], env: &mut Env, host: &mut dyn Host) -> V
             };
             let parts: Vec<String> = items.iter().map(Value::to_string_value).collect();
             Ok(Value::String(parts.join(&sep)))
+        }
+        "submatch" => {
+            let nr = narg(args, 0).max(0) as usize;
+            Ok(Value::String(regex_mvp::submatch(nr)))
         }
         "substitute" => {
             let text = sarg(args, 0);

@@ -9,7 +9,7 @@ use rvim_core::{VimError, VimResult};
 use rvim_editor::Editor;
 use rvim_editor::syntax::lang;
 use rvim_syntax::highlight::{HlAttr, HlColor, parse_attrs, parse_color};
-use rvim_syntax::{Item, ItemKind};
+use rvim_syntax::{Item, ItemKind, ItemOptions, SyncSpec};
 
 use crate::exec::ExOutcome;
 use crate::parser::ParsedEx;
@@ -75,6 +75,8 @@ pub fn cmd_syntax(ed: &mut Editor, p: &ParsedEx) -> VimResult<ExOutcome> {
             } else {
                 let def = ed.syntax.def_mut();
                 def.items.retain(|item| item.group != group);
+                let live: Vec<i64> = def.items.iter().map(|item| item.id).collect();
+                def.item_options.retain(|id, _| live.contains(id));
             }
         }
         "keyword" => {
@@ -82,40 +84,81 @@ pub fn cmd_syntax(ed: &mut Editor, p: &ParsedEx) -> VimResult<ExOutcome> {
             if group.is_empty() {
                 return Err(VimError::new("E471", "Argument required"));
             }
-            let words: Vec<&str> = words.split_whitespace().collect();
+            let (words, options) = split_words_and_options(words);
             if words.is_empty() {
                 return Err(VimError::new("E471", "Argument required"));
             }
-            ed.syntax.add_item(
-                group,
-                ItemKind::Keyword {
-                    words: words.iter().map(|w| w.to_string()).collect(),
-                },
-            );
+            ed.syntax
+                .add_item_with_options(group, ItemKind::Keyword { words }, options);
         }
         "match" => {
             let (group, rest) = split_word(rest);
             let (pattern, options) = take_pattern(rest)?;
-            ed.syntax.add_item(
-                group,
-                ItemKind::Match {
-                    pattern,
-                    contains: parse_contains(options),
-                },
-            );
+            let (flags, contains) = parse_item_options(options);
+            ed.syntax
+                .add_item_with_options(group, ItemKind::Match { pattern, contains }, flags);
         }
         "region" => {
             let (group, rest) = split_word(rest);
             let (start, rest) = take_start(rest)?;
             let (end, options) = take_end(rest)?;
-            ed.syntax.add_item(
+            let (flags, contains) = parse_item_options(options);
+            ed.syntax.add_item_with_options(
                 group,
                 ItemKind::Region {
                     start,
                     end,
-                    contains: parse_contains(options),
+                    contains,
                 },
+                flags,
             );
+        }
+        "sync" => {
+            let mut sync = SyncSpec::default();
+            for word in rest.split_whitespace() {
+                let lower = word.to_ascii_lowercase();
+                if lower == "fromstart" {
+                    sync.from_start = true;
+                } else if lower == "ccomment" {
+                    sync.ccomment = true;
+                } else if let Some(n) = lower.strip_prefix("minlines=").and_then(|n| n.parse().ok())
+                {
+                    sync.minlines = Some(n);
+                } else if let Some(n) = lower.strip_prefix("maxlines=").and_then(|n| n.parse().ok())
+                {
+                    sync.maxlines = Some(n);
+                } else if let Some(n) = lower
+                    .strip_prefix("linebreaks=")
+                    .and_then(|n| n.parse().ok())
+                {
+                    sync.linebreaks = Some(n);
+                }
+            }
+            ed.syntax.set_sync(sync);
+        }
+        "include" => {
+            let mut rest = rest.trim();
+            let mut cluster = None;
+            if let Some(remain) = rest.strip_prefix('@') {
+                let (name, after) = split_word(remain);
+                cluster = Some(name.to_string());
+                rest = after.trim();
+            }
+            if rest.is_empty() {
+                return Err(VimError::new("E471", "Argument required"));
+            }
+            let path = resolve_syntax_file(ed, rest)
+                .ok_or_else(|| VimError::new("E484", format!("Can't open file: {rest}")))?;
+            let bytes = std::fs::read(&path).map_err(|_| {
+                VimError::new("E484", format!("Can't open file: {}", path.display()))
+            })?;
+            let text = String::from_utf8_lossy(&bytes);
+            let name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("include")
+                .to_string();
+            ed.syntax.include_script(&name, &text, cluster.as_deref());
         }
         "cluster" => {
             let (name, rest) = split_word(rest);
@@ -152,13 +195,23 @@ fn list_syntax(ed: &mut Editor, filter: &str) {
         if !filter.is_empty() && item.group != filter {
             continue;
         }
-        let text = match &item.kind {
+        let mut text = match &item.kind {
             ItemKind::Keyword { words } => format!("keyword {} {}", item.group, words.join(" ")),
             ItemKind::Match { pattern, .. } => format!("match {} /{pattern}/", item.group),
             ItemKind::Region { start, end, .. } => {
                 format!("region {} start=/{start}/ end=/{end}/", item.group)
             }
         };
+        let flags = engine.options_of(item.id);
+        if flags.contained {
+            text.push_str(" contained");
+        }
+        if flags.transparent {
+            text.push_str(" transparent");
+        }
+        if !flags.nextgroup.is_empty() {
+            text.push_str(&format!(" nextgroup={}", flags.nextgroup.join(",")));
+        }
         lines.push(text);
     }
     if lines.is_empty() {
@@ -214,19 +267,119 @@ fn take_end(args: &str) -> VimResult<(String, &str)> {
     take_pattern(rest)
 }
 
-/// `contains=a,@b` from the trailing options.
-fn parse_contains(options: &str) -> Vec<String> {
+/// Trailing options of one item: flags plus the `contains=` list.
+fn parse_item_options(options: &str) -> (ItemOptions, Vec<String>) {
+    let mut flags = ItemOptions::default();
+    let mut contains = Vec::new();
     for word in options.split_whitespace() {
-        if let Some(list) = word.strip_prefix("contains=") {
-            return list
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect();
+        let lower = word.to_ascii_lowercase();
+        match lower.as_str() {
+            "contained" => flags.contained = true,
+            "transparent" => flags.transparent = true,
+            "display" => flags.display = true,
+            "conceal" => flags.conceal = true,
+            "fold" => flags.fold = true,
+            "skipwhite" => flags.skip = Some("[ \t]*".to_string()),
+            "skipnl" | "skipempty" => flags.skip = Some("\n".to_string()),
+            _ => {
+                if let Some(list) = word.strip_prefix("contains=") {
+                    contains.extend(
+                        list.split(',')
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string),
+                    );
+                } else if let Some(list) = word.strip_prefix("nextgroup=") {
+                    flags.nextgroup.extend(
+                        list.split(',')
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string),
+                    );
+                } else if let Some(value) = word.strip_prefix("skip=") {
+                    if let Ok((pattern, _)) = take_pattern(value) {
+                        flags.skip = Some(pattern);
+                    }
+                }
+            }
         }
     }
-    Vec::new()
+    (flags, contains)
+}
+
+/// Keywords are followed by flags (`contained`, `nextgroup=...`); tell the
+/// two apart the way `syntax.c syn_cmd_keyword` does.
+fn split_words_and_options(text: &str) -> (Vec<String>, ItemOptions) {
+    let mut words = Vec::new();
+    let mut flags = ItemOptions::default();
+    for word in text.split_whitespace() {
+        let lower = word.to_ascii_lowercase();
+        let is_option = matches!(
+            lower.as_str(),
+            "contained"
+                | "transparent"
+                | "display"
+                | "conceal"
+                | "fold"
+                | "skipwhite"
+                | "skipnl"
+                | "skipempty"
+        ) || lower.starts_with("nextgroup=")
+            || lower.starts_with("skip=")
+            || lower.starts_with("contains=");
+        if !is_option {
+            words.push(word.to_string());
+            continue;
+        }
+        if let Some(list) = word.strip_prefix("nextgroup=") {
+            flags.nextgroup.extend(
+                list.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+            );
+        } else if lower == "contained" {
+            flags.contained = true;
+        } else if lower == "transparent" {
+            flags.transparent = true;
+        } else if lower == "display" {
+            flags.display = true;
+        } else if lower == "conceal" {
+            flags.conceal = true;
+        } else if lower == "fold" {
+            flags.fold = true;
+        } else if lower == "skipwhite" {
+            flags.skip = Some("[ \t]*".to_string());
+        } else if lower == "skipnl" || lower == "skipempty" {
+            flags.skip = Some("\\n".to_string());
+        } else if let Some(value) = word.strip_prefix("skip=") {
+            if let Ok((pattern, _)) = take_pattern(value) {
+                flags.skip = Some(pattern);
+            }
+        }
+    }
+    (words, flags)
+}
+
+/// A `:syntax include` argument: an existing path or `syntax/<name>.vim` on
+/// 'runtimepath'.
+fn resolve_syntax_file(ed: &Editor, name: &str) -> Option<std::path::PathBuf> {
+    let direct = std::path::PathBuf::from(name);
+    if direct.is_file() {
+        return Some(direct);
+    }
+    let rtp = ed.options.str_or("runtimepath", "");
+    for dir in rtp.split(',').filter(|d| !d.is_empty()) {
+        let path = std::path::Path::new(dir).join(name);
+        if path.is_file() {
+            return Some(path);
+        }
+        let path = std::path::Path::new(dir).join("syntax").join(name);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
 }
 
 /// `:highlight [clear|link|Group [key=value...]]`.
@@ -240,9 +393,13 @@ pub fn cmd_highlight(ed: &mut Editor, p: &ParsedEx) -> VimResult<ExOutcome> {
     match first {
         "clear" => {
             let group = rest.trim();
-            ed.syntax
-                .highlights
-                .clear(if group.is_empty() { None } else { Some(group) });
+            if group.is_empty() {
+                // `:hi clear` resets every group to Vim's defaults
+                // (highlight.c highlight_clear()).
+                ed.syntax.highlights = rvim_syntax::highlight::HighlightTable::with_defaults();
+            } else {
+                ed.syntax.highlights.clear(Some(group));
+            }
             return Ok(ExOutcome::Continue);
         }
         "link" | "def" => {

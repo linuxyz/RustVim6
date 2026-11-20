@@ -13,6 +13,7 @@
 
 pub mod highlight;
 pub mod lang;
+pub mod script;
 
 use std::collections::HashMap;
 
@@ -44,6 +45,45 @@ pub struct Item {
     pub kind: ItemKind,
 }
 
+/// Per-item flags from the trailing `:syntax` arguments (`contained`,
+/// `transparent`, `skip=`, `nextgroup=`).  They live outside [ItemKind] so
+/// existing definitions keep their shape.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ItemOptions {
+    /// `contained`: only matches inside a region that lists the group.
+    pub contained: bool,
+    /// `transparent`: the region itself is not coloured, its contents are.
+    pub transparent: bool,
+    /// `skip=/pat/` (also the skipwhite/skipnl/skipempty shorthands).
+    pub skip: Option<String>,
+    /// `nextgroup=Group,...`: groups to try right after this item.
+    pub nextgroup: Vec<String>,
+    /// `display`: accepted, no rendering effect.
+    pub display: bool,
+    /// `conceal`: accepted, no rendering effect.
+    pub conceal: bool,
+    /// `fold`: the region creates a fold under 'foldmethod=syntax'.
+    pub fold: bool,
+}
+
+impl ItemOptions {
+    /// True when any non-default option is set.
+    pub fn is_default(&self) -> bool {
+        *self == ItemOptions::default()
+    }
+}
+
+/// `syntax sync` configuration (`fromstart`, `minlines`, `maxlines`,
+/// `ccomment`, `linebreaks`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SyncSpec {
+    pub from_start: bool,
+    pub minlines: Option<usize>,
+    pub maxlines: Option<usize>,
+    pub ccomment: bool,
+    pub linebreaks: Option<usize>,
+}
+
 /// A complete syntax for one language.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SyntaxDef {
@@ -53,6 +93,10 @@ pub struct SyntaxDef {
     pub items: Vec<Item>,
     /// `@cluster` -> group names (`syntax cluster`).
     pub clusters: HashMap<String, Vec<String>>,
+    /// Flags of one item, keyed by [Item::id].
+    pub item_options: HashMap<i64, ItemOptions>,
+    /// `syntax sync` state used when the per-buffer cache has no state.
+    pub sync: SyncSpec,
 }
 
 /// A region that is still open at the end of a line.
@@ -94,14 +138,63 @@ fn char_len(text: &str, pos: usize) -> usize {
     text[pos..].chars().next().map(char::len_utf8).unwrap_or(1)
 }
 
-/// Match `pattern` exactly at the start of `slice`; returns its byte length.
-fn matches_at(pattern: &str, slice: &str, ignore_case: bool) -> Option<usize> {
+/// A pattern hit at the current position.  `span_*` are what gets drawn
+/// (`\zs`/`\ze` adjust them), `advance` is how far the scanner moves so a
+/// line does not re-match the same text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Hit {
+    span_start: usize,
+    span_end: usize,
+    advance: usize,
+}
+
+impl Hit {
+    fn plain(len: usize) -> Self {
+        Self {
+            span_start: 0,
+            span_end: len,
+            advance: len,
+        }
+    }
+}
+
+/// Drop `\zs`/`\ze` so the raw extent of a pattern can be measured.
+fn strip_zs_ze(pattern: &str) -> String {
+    pattern.replace("\\zs", "").replace("\\ze", "")
+}
+
+/// Match `pattern` exactly at the start of `slice`.
+fn matches_at(pattern: &str, slice: &str, ignore_case: bool) -> Option<Hit> {
     if pattern.is_empty() {
         return None;
     }
-    match regex_mvp::find(pattern, slice, ignore_case) {
-        Some((0, end)) => Some(end),
-        _ => None,
+    let adjusted = regex_mvp::find_captures(pattern, slice, ignore_case)?;
+    let stripped = strip_zs_ze(pattern);
+    let raw_end = if stripped != pattern {
+        match regex_mvp::find_captures(&stripped, slice, ignore_case) {
+            Some(raw) if raw.start == 0 => raw.end,
+            _ => adjusted.end,
+        }
+    } else {
+        adjusted.end
+    };
+    if adjusted.start == 0 {
+        Some(Hit {
+            span_start: 0,
+            span_end: adjusted.end,
+            advance: raw_end.max(adjusted.end),
+        })
+    } else {
+        // The raw match must still start here; \zs only moves the drawn start.
+        let raw = regex_mvp::find_captures(&stripped, slice, ignore_case)?;
+        if raw.start != 0 {
+            return None;
+        }
+        Some(Hit {
+            span_start: adjusted.start,
+            span_end: adjusted.end,
+            advance: raw.end.max(adjusted.end),
+        })
     }
 }
 
@@ -139,10 +232,23 @@ impl Engine {
         &self.def.items
     }
 
+    /// The flags of an item (empty when it has none).
+    pub fn options_of(&self, id: i64) -> ItemOptions {
+        self.def.item_options.get(&id).cloned().unwrap_or_default()
+    }
+
     /// Indices of the items allowed inside `container` (`None` = top level).
     fn allowed(&self, container: Option<&OpenRegion>) -> Vec<usize> {
         let Some(region) = container else {
-            return (0..self.def.items.len()).collect();
+            // `contained` items never match at the top level.
+            return self
+                .def
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| !self.options_of(item.id).contained)
+                .map(|(index, _)| index)
+                .collect();
         };
         if region.contains.is_empty() {
             return Vec::new();
@@ -153,8 +259,17 @@ impl Engine {
                 if let Some(members) = self.def.clusters.get(cluster) {
                     names.extend(members.iter().cloned());
                 }
-            } else if entry == "ALL" || entry == "TOP" {
+            } else if entry == "ALL" {
                 return (0..self.def.items.len()).collect();
+            } else if entry == "TOP" {
+                return self
+                    .def
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| !self.options_of(item.id).contained)
+                    .map(|(index, _)| index)
+                    .collect();
             } else {
                 names.push(entry.clone());
             }
@@ -168,20 +283,22 @@ impl Engine {
             .collect()
     }
 
-    /// The item starting at `pos`, with the byte length it covers.
-    fn item_at(&self, allowed: &[usize], text: &str, pos: usize) -> Option<(&Item, usize)> {
+    /// The item starting at `pos`, with its drawn span and advance length.
+    fn item_at(&self, allowed: &[usize], text: &str, pos: usize) -> Option<(&Item, Hit)> {
         let slice = &text[pos..];
         // Later definitions have priority (syntax.c: the last match wins).
         for index in allowed.iter().rev() {
             let item = &self.def.items[*index];
-            let len = match &item.kind {
-                ItemKind::Keyword { words } => keyword_at(words, text, pos, self.def.ignore_case),
+            let hit = match &item.kind {
+                ItemKind::Keyword { words } => {
+                    keyword_at(words, text, pos, self.def.ignore_case).map(Hit::plain)
+                }
                 ItemKind::Match { pattern, .. } => matches_at(pattern, slice, self.def.ignore_case),
                 ItemKind::Region { start, .. } => matches_at(start, slice, self.def.ignore_case),
             };
-            if let Some(len) = len {
-                if len > 0 {
-                    return Some((item, len));
+            if let Some(hit) = hit {
+                if hit.advance > 0 {
+                    return Some((item, hit));
                 }
             }
         }
@@ -200,46 +317,117 @@ impl Engine {
         let mut spans: Vec<Span> = Vec::new();
         let mut pos = 0usize;
         // Every step either consumes at least one byte or changes the stack.
-        let mut guard = len * 4 + 64;
+        let mut guard = len * 8 + 128;
         while pos < len && guard > 0 {
             guard -= 1;
-            // 1. Does the innermost open region end here?
+            // 1. Does the innermost open region end here (or skip this part)?
             if let Some(top) = stack.last().cloned() {
-                if let Some(end_len) = matches_at(&top.end, &text[pos..], self.def.ignore_case) {
+                let opts = self.options_of(top.id);
+                if let Some(skip) = opts.skip.as_deref() {
+                    if let Some(hit) = matches_at(skip, &text[pos..], self.def.ignore_case) {
+                        pos += hit.advance.max(char_len(text, pos));
+                        continue;
+                    }
+                }
+                if let Some(hit) = matches_at(&top.end, &text[pos..], self.def.ignore_case) {
                     let start = starts.pop().unwrap_or(0);
                     stack.pop();
-                    spans.push(Span {
-                        start,
-                        end: pos + end_len,
-                        group: top.group,
-                        id: top.id,
-                    });
-                    pos += end_len;
+                    // A transparent region is a container only: it is not drawn.
+                    if !opts.transparent {
+                        spans.push(Span {
+                            start,
+                            end: pos + hit.span_end,
+                            group: top.group.clone(),
+                            id: top.id,
+                        });
+                    }
+                    pos += hit.advance;
                     allowed = self.allowed(stack.last());
                     continue;
                 }
             }
             // 2. Does an allowed item start here?
-            if let Some((item, item_len)) = self.item_at(&allowed, text, pos) {
+            if let Some((item, hit)) = self.item_at(&allowed, text, pos) {
+                let opts = self.options_of(item.id);
                 match &item.kind {
                     ItemKind::Region { end, contains, .. } => {
+                        // `skip=` on a region start: ignore this start and move on.
+                        if let Some(skip) = opts.skip.as_deref() {
+                            if matches_at(skip, &text[pos..], self.def.ignore_case)
+                                .is_some_and(|hit| hit.advance > 0)
+                            {
+                                pos += char_len(text, pos);
+                                continue;
+                            }
+                        }
                         stack.push(OpenRegion {
                             group: item.group.clone(),
                             id: item.id,
                             end: end.clone(),
                             contains: contains.clone(),
                         });
-                        starts.push(pos);
+                        starts.push(pos + hit.span_start);
                         allowed = self.allowed(stack.last());
                     }
                     _ => spans.push(Span {
-                        start: pos,
-                        end: pos + item_len,
+                        start: pos + hit.span_start,
+                        end: pos + hit.span_end,
                         group: item.group.clone(),
                         id: item.id,
                     }),
                 }
-                pos += item_len;
+                pos += hit.advance;
+                // `nextgroup=`: try the listed groups immediately after this item.
+                // `skipwhite`/`skipnl` move over the skipped text before trying;
+                // when nothing matches the cursor stays where the item ended.
+                if !opts.nextgroup.is_empty() && pos < len {
+                    let mut groups = opts.nextgroup.clone();
+                    let mut depth = 0;
+                    let mut opened = false;
+                    let mut try_pos = pos;
+                    if let Some(skip) = opts.skip.as_deref() {
+                        if let Some(hit) = matches_at(skip, &text[try_pos..], self.def.ignore_case)
+                            .filter(|hit| hit.advance > 0)
+                        {
+                            try_pos += hit.advance;
+                        }
+                    }
+                    let mut cursor = try_pos;
+                    while depth < 8 && cursor < len && !groups.is_empty() {
+                        let Some((next, hit)) = self.item_by_groups(&groups, text, cursor) else {
+                            break;
+                        };
+                        let next_opts = self.options_of(next.id);
+                        match &next.kind {
+                            ItemKind::Region { end, contains, .. } => {
+                                stack.push(OpenRegion {
+                                    group: next.group.clone(),
+                                    id: next.id,
+                                    end: end.clone(),
+                                    contains: contains.clone(),
+                                });
+                                starts.push(cursor + hit.span_start);
+                                allowed = self.allowed(stack.last());
+                                opened = true;
+                            }
+                            _ => spans.push(Span {
+                                start: cursor + hit.span_start,
+                                end: cursor + hit.span_end,
+                                group: next.group.clone(),
+                                id: next.id,
+                            }),
+                        }
+                        cursor += hit.advance;
+                        groups = next_opts.nextgroup;
+                        depth += 1;
+                        if opened {
+                            break;
+                        }
+                    }
+                    if cursor > pos {
+                        pos = cursor;
+                    }
+                }
                 continue;
             }
             pos += char_len(text, pos);
@@ -247,6 +435,9 @@ impl Engine {
         // Regions still open cover the rest of the line.
         for (index, region) in stack.iter().enumerate() {
             let start = starts.get(index).copied().unwrap_or(0);
+            if self.options_of(region.id).transparent {
+                continue;
+            }
             spans.push(Span {
                 start,
                 end: len,
@@ -257,6 +448,39 @@ impl Engine {
         // Outer ranges first; equal starts put the longer range first.
         spans.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end)));
         (spans, State { stack })
+    }
+
+    /// Find the highest-priority item whose group is listed in `groups`.
+    fn item_by_groups(&self, groups: &[String], text: &str, pos: usize) -> Option<(&Item, Hit)> {
+        let mut names: Vec<String> = Vec::new();
+        for entry in groups {
+            if let Some(cluster) = entry.strip_prefix('@') {
+                if let Some(members) = self.def.clusters.get(cluster) {
+                    names.extend(members.iter().cloned());
+                }
+            } else if entry == "ALL" || entry == "TOP" {
+                names.extend(self.def.items.iter().map(|item| item.group.clone()));
+            } else {
+                names.push(entry.clone());
+            }
+        }
+        let slice = &text[pos..];
+        for item in self.def.items.iter().rev() {
+            if !names.contains(&item.group) {
+                continue;
+            }
+            let hit = match &item.kind {
+                ItemKind::Keyword { words } => {
+                    keyword_at(words, text, pos, self.def.ignore_case).map(Hit::plain)
+                }
+                ItemKind::Match { pattern, .. } => matches_at(pattern, slice, self.def.ignore_case),
+                ItemKind::Region { start, .. } => matches_at(start, slice, self.def.ignore_case),
+            };
+            if let Some(hit) = hit.filter(|hit| hit.advance > 0) {
+                return Some((item, hit));
+            }
+        }
+        None
     }
 }
 

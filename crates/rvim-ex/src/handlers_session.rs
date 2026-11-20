@@ -154,6 +154,108 @@ pub fn write_viminfo(ed: &Editor, state: &ScriptState, path: &Path) -> VimResult
     info.write(path)
 }
 
+/// `:redir` / `:redir END` (message.c ex_redir).
+pub fn cmd_redir(
+    ed: &mut Editor,
+    env: &mut Env,
+    _state: &mut ScriptState,
+    p: &ParsedEx,
+) -> VimResult<ExOutcome> {
+    let args = p.args.trim();
+    if args.eq_ignore_ascii_case("END") {
+        let Some((target, text)) = rvim_editor::message::stop_redir() else {
+            return Err(rvim_core::VimError::new("E930", "No redirection active"));
+        };
+        match target {
+            rvim_editor::message::RedirTarget::Variable(name) => {
+                env.set_var(&name, rvim_viml::Value::string(text))?;
+            }
+            rvim_editor::message::RedirTarget::Register(name) => {
+                ed.registers.yank(
+                    Some(name),
+                    Register {
+                        text,
+                        reg_type: RegType::CharWise,
+                    },
+                );
+            }
+            rvim_editor::message::RedirTarget::File(path, append) => {
+                use std::io::Write as _;
+                if append {
+                    let mut file = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)
+                        .map_err(|e| {
+                            rvim_core::VimError::new(
+                                "E482",
+                                format!("Can't open file {}: {e}", path.display()),
+                            )
+                        })?;
+                    file.write_all(text.as_bytes()).map_err(|e| {
+                        rvim_core::VimError::new(
+                            "E482",
+                            format!("Can't write file {}: {e}", path.display()),
+                        )
+                    })?;
+                } else {
+                    std::fs::write(&path, text).map_err(|e| {
+                        rvim_core::VimError::new(
+                            "E482",
+                            format!("Can't write file {}: {e}", path.display()),
+                        )
+                    })?;
+                }
+            }
+        }
+        return Ok(ExOutcome::Continue);
+    }
+    if rvim_editor::message::is_redirecting() {
+        return Err(rvim_core::VimError::new("E930", "Already redirecting"));
+    }
+    if let Some(name) = args.strip_prefix("=>") {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(rvim_core::VimError::new("E471", "Argument required"));
+        }
+        if rvim_editor::message::start_redir(rvim_editor::message::RedirTarget::Variable(
+            name.to_string(),
+        )) {
+            return Ok(ExOutcome::Continue);
+        }
+    } else if let Some(rest) = args.strip_prefix('@') {
+        let Some(register) = rest.trim().chars().next() else {
+            return Err(rvim_core::VimError::new("E471", "Argument required"));
+        };
+        if rvim_editor::message::start_redir(rvim_editor::message::RedirTarget::Register(register))
+        {
+            return Ok(ExOutcome::Continue);
+        }
+    } else if let Some(rest) = args.strip_prefix('>') {
+        let (append, name) = if let Some(name) = rest.strip_prefix('>') {
+            (true, name.trim())
+        } else {
+            (false, rest.trim())
+        };
+        if name.is_empty() {
+            return Err(rvim_core::VimError::new("E471", "Argument required"));
+        }
+        let path = PathBuf::from(name);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            ed.cwd.join(path)
+        };
+        if rvim_editor::message::start_redir(rvim_editor::message::RedirTarget::File(path, append))
+        {
+            return Ok(ExOutcome::Continue);
+        }
+    } else {
+        return Err(rvim_core::VimError::new("E471", "Argument required"));
+    }
+    Err(rvim_core::VimError::new("E930", "Already redirecting"))
+}
+
 /// :jumps, :changes, :rviminfo, :wviminfo.
 pub fn cmd_session(
     ed: &mut Editor,

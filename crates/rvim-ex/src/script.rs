@@ -58,6 +58,8 @@ pub struct ScriptState {
     pub meta: crate::host_meta::MetaState,
     /// Folds, highlight groups, command-line state.
     pub more: crate::host_more::MoreState,
+    /// Jobs, channels, timers and terminal buffers (M7).
+    pub m7: crate::m7::M7State,
 }
 
 /// Evaluation context: variables plus script state.
@@ -685,17 +687,27 @@ pub fn resolve_function_name(name: &str, state: &ScriptState, sid: usize) -> Str
 fn host_has(ed: &Editor, feature: &str) -> bool {
     let feature = feature.to_ascii_lowercase();
     let _ = ed;
-    matches!(
-        feature.as_str(),
-        "eval"
-            | "vim_starting"
-            | "multi_byte"
-            | "syntax"
-            | "autocmd"
-            | "listcmds"
-            | "user_commands"
-    ) || feature.starts_with("patch-")
-        || feature.starts_with("win32")
+    if let Some(patch) = feature.strip_prefix("patch-") {
+        // The baseline is pinned to v8.2.5172; only that release line and its
+        // earlier patches are reported.
+        let Some(version) = patch.strip_prefix("8.2.") else {
+            return false;
+        };
+        return version.parse::<u32>().is_ok_and(|number| number <= 5172);
+    }
+    match feature.as_str() {
+        "eval" | "multi_byte" | "syntax" | "autocmd" | "listcmds" | "user_commands"
+        | "cmdline_compl" | "cmdline_hist" | "quickfix" | "folding" | "diff" | "windows"
+        | "tabpages" | "spell" | "tag_binary" | "crypt" | "cryptv" | "crypt-blowfish"
+        | "crypt-blowfish2" | "crypt-zip" | "job" | "channel" | "terminal" | "timers"
+        | "vim_starting" => true,
+        // Platforms and explicitly unsupported subsystems.
+        "win32" | "win64" => cfg!(windows),
+        "unix" => cfg!(unix),
+        "gui" | "xterm_clipboard" | "netbeans_intg" | "cscope" | "persistent_undo"
+        | "libsodium" | "xchacha20" => false,
+        _ => false,
+    }
 }
 
 fn host_exists(ed: &Editor, state: &ScriptState, what: &str) -> Option<bool> {
@@ -1253,6 +1265,27 @@ fn funcdepth_limit(ed: &Editor) -> usize {
     }
 }
 
+/// JSON encode/decode used by the channel layer (M7).
+pub fn json_encode(value: &Value) -> VimResult<String> {
+    rvim_viml::builtins_fl::json_encode_public(value)
+}
+
+pub fn json_decode(text: &str) -> VimResult<Value> {
+    rvim_viml::builtins_fl::json_decode_public(text)
+}
+
+/// Invoke a Funcref/lambda/function-name callback on the main thread.
+pub fn invoke_callback(
+    ed: &mut Editor,
+    env: &mut Env,
+    state: &mut ScriptState,
+    target: &Value,
+    args: Vec<Value>,
+) -> VimResult<Value> {
+    let mut host = make_host(ed, state);
+    rvim_viml::eval::call_value(target, args, env, &mut host)
+}
+
 /// Call a user function: bind arguments, execute the body, catch `:return`.
 pub fn call_user_func(
     ed: &mut Editor,
@@ -1407,6 +1440,54 @@ pub const HOST_BUILTINS: &[&str] = &[
     "strftime",
     "localtime",
     "execute",
+    "synID",
+    "synIDattr",
+    "synIDtrans",
+    "synconcealed",
+    "synstack",
+    "soundfold",
+    "spellbadword",
+    "spellsuggest",
+    // M7 jobs/channels/timers/terminals.
+    "job_start",
+    "job_status",
+    "job_stop",
+    "job_getchannel",
+    "job_info",
+    "job_setoptions",
+    "ch_open",
+    "ch_close",
+    "ch_close_in",
+    "ch_sendraw",
+    "ch_sendexpr",
+    "ch_evalexpr",
+    "ch_evalraw",
+    "ch_read",
+    "ch_readraw",
+    "ch_readblob",
+    "ch_canread",
+    "ch_status",
+    "ch_getjob",
+    "ch_getbufnr",
+    "ch_info",
+    "ch_log",
+    "ch_logfile",
+    "ch_setoptions",
+    "timer_start",
+    "timer_stop",
+    "timer_stopall",
+    "timer_pause",
+    "timer_info",
+    "term_start",
+    "term_wait",
+    "term_getline",
+    "term_getsize",
+    "term_getstatus",
+    "term_getjob",
+    "term_list",
+    "term_sendkeys",
+    "term_scrape",
+    "terminalprops",
 ];
 fn host_builtin(
     ed: &mut Editor,
@@ -1422,6 +1503,16 @@ fn host_builtin(
         return None;
     }
     Some((|| -> VimResult<Value> {
+        // Subsystem host functions live in their own modules.
+        if let Some(result) = crate::host_syn::call(name, &args, ed, env, state) {
+            return result;
+        }
+        if let Some(result) = crate::host_spell::call(name, &args, ed, env, state) {
+            return result;
+        }
+        if let Some(result) = crate::m7::call(name, &args, ed, env, state) {
+            return result;
+        }
         let s = |i: usize| args.get(i).map(Value::to_string_value).unwrap_or_default();
         let n = |i: usize| args.get(i).map(Value::to_number).unwrap_or(0);
         match name {
@@ -1634,7 +1725,7 @@ fn host_builtin(
                     "bufadd" => {
                         let path = PathBuf::from(target.to_string_value());
                         let id = ed.new_buffer();
-                        if let Ok(buf) = rvim_buffer::Buffer::open(id, &path) {
+                        if let Ok(buf) = ed.load_buffer_file(id, &path) {
                             ed.replace_buffer(id, buf)?;
                         }
                         Ok(Value::Number(id as i64))
@@ -1687,7 +1778,7 @@ fn host_builtin(
                     .unwrap_or(0);
                 Ok(Value::Number(count as i64))
             }
-            "cindent" => Ok(Value::Number(0)),
+            "cindent" => Ok(Value::Number(rvim_editor::indent::cindent(ed, n(0), n(1)))),
             "getcurpos" => {
                 let pos = ed.cursor();
                 Ok(Value::list(vec![

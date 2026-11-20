@@ -51,7 +51,7 @@
 | `:>`/`:<` | 每个额外 `<`/`>` 增加 amount；数字是**行数**（非列数） | ✅ 同语义（`EX_COUNT` 处理） | `shift_multiple_lines_with_count` |
 | map/abbrev | 模式族、`noremap`、`<silent>/<buffer>/<expr>/<unique>`、最长 lhs 优先 | ✅ 存储 + 展开引擎（递归/非递归、E223、E31、E227）；`:map!` 为 insert+cmdline 变体 | `maps::tests::*`、`nmap_*`、`map_modes_*` |
 | `:autocmd`/`:augroup` | 114 事件、`augroup` 作用域、`!` 删除、`++once/++nested` | ✅ 声明/列表/删除与事件名校验（E216）；`:doautocmd` 实际执行匹配命令 | `autocmd` 事件表测试、`m2_features.rs` autocmd 组 |
-| `:command` 用户命令 | `-nargs/-bang/-bar/-range/-count/-complete/-expr`、`<args>`/`<q-args>`/`<f-args>` 等占位符 | ✅ 定义/重定义/删除/查找与占位符展开（q-args 加引号、f-args 切分加引号）；`-expr` 用户命令求值后执行（`<expr>` **映射**仍待 M4 键盘层） | `usercmd::tests::*`、`m2_features.rs` 用户命令组、`m3_dispatch.rs::expr_user_command_executes_the_evaluated_text` |
+| `:command` 用户命令 | `-nargs/-bang/-bar/-range/-count/-complete/-expr`、`<args>`/`<q-args>`/`<f-args>` 等占位符 | ✅ 定义/重定义/删除/查找与占位符展开（q-args 加引号、f-args 切分加引号）；`-expr` 用户命令求值后执行（`<expr>` 映射已由 TUI 求值器展开，见 §6） | `usercmd::tests::*`、`m2_features.rs` 用户命令组、`m3_dispatch.rs::expr_user_command_executes_the_evaluated_text` |
 | `:source`/`:runtime`/vimrc | `\` 续行、`finish` 只结束当前脚本、`runtimepath` 搜索、`-u` 启动加载 | ✅ 全部实现；UTF-8 BOM 容错；嵌套深度上限 E169 | `source_*`、`runtime_sources_from_runtimepath`、smoke #7/#9 |
 | 文件名通配 | `* ? [..] \` 与 `**` 递归 | ✅ 自研 matcher（`wildcard.rs`）+ `expand_glob`（`**` 递归） | `wildcard::tests::*`、`filename_completion_lists_directory` |
 | 命令行模型 | 历史按 type 独立限额、前缀召回、补全分类、wildmenu | ✅ `rvim-cmdline`（history/complete/wildmenu，headless） | `rvim-cmdline` 单测 |
@@ -64,7 +64,7 @@
 | 撤销结构 | 撤销树（分支、`g-`/`g+`、undofile） | ⚠️ 线性 undo/redo 链；新编辑截断 redo 分支已对齐 | M5（rvim-undo 树化） |
 | 窗口/标签 | 多窗口、tabpage | ❌ 单窗口；`split/vsplit/tab/wincmd` 调用走未实现报错 | M5 |
 | VimL | 完整解释器、350+ 函数 | ✅ M3 已落地解释器并接通 autocmd 派发（见 §5）；剩余差距：`v:` 变量仅常用子集、Vim9/嵌入式 heredoc 不支持 | 随需求补 |
-| 选项全集 | 429 项，含 window/buffer 作用域 | ⚠️ 56 项全局选项；`setlocal/setglobal` 暂与 `set` 同路径 | M5 |
+| 选项全集 | 429 项，含 window/buffer 作用域 | ⚠️ 124 项选项（含 window/buffer 近似）；`setlocal/setglobal` 已作用于窗口局部表 | M8 持续 |
 | 交互前端 | 终端 TUI、键码映射、鼠标 | ⚠️ M4 已落地 TUI（正常/插入/命令行模式、映射展开、状态行、`~` 补白、横纵滚动、wildmenu、更多的分页）；**视觉模式、鼠标、软换行、`relativenumber`** 未实现 | M5 |
 | quickfix/会话 | `make/cgrep/copen`、`mksession/mkview` | ❌ 声明表内，调用走未实现报错 | M5 |
 | `:normal`/`:redir`/表达式命令 | 走键盘/重定向/VimL | ❌ 仍显式报错：`:normal` 需输入队列（M4）、`:redir` 需与命令行层对接（M4） | M4 |
@@ -145,7 +145,7 @@
 | 视觉模式 | `v/V/<C-v>`、操作符、块插入 | ✅ M5 实现（`rvim-normal::visual`，TUI 与 `:normal` 共用同一个状态机） | — |
 | 软换行 / `relativenumber` / `scrolloff` | `'wrap'` 默认开 | ⚠️ `'relativenumber'`/`'scrolloff'`/`'sidescrolloff'` 已实现（补齐复核）；软换行（`'wrap'`）仍只做横向滚动 | 收口时补 |
 | 命令行历史键 | `<Up>/<Down>`/`<C-p>`/`<C-n>` 召回历史，前缀匹配，`<Down>` 越过最新一条时恢复正在编辑的行 | ✅ 补齐复核接入 TUI（`Tui::recall_history`，`:` 与 `/`/`?` 各自独立）；`<C-u>`/`<C-w>` 行编辑同时补上 | `command_line_history_*`（`m4_tui.rs`） |
-| `<expr>` 映射 | 求值 RHS 作为按键 | ⚠️ 显式 `E15`（需把 M3 求值器传入展开循环） | M5 |
+| `<expr>` 映射 | 求值 RHS 作为按键 | ✅ TUI 展开循环调用 VimL 求值器，结果再按映射规则展开；`:map` 列表保留原始表达式 | `m4_expr_map.rs` |
 | `<t_xx>` 与鼠标键 | terminfo 字节序列、鼠标事件分发 | ⚠️ `<t_xx>` 可解析/列出但无 terminfo 无法编码成字节；鼠标键名可解析可映射，解码与 `set mouse` 待 M5 | M5 |
 | `:!` 外部命令显示 | 命令输出 + `Press ENTER` 提示 | ⚠️ 输出直接写终端后重绘，无 hit-enter | M5 |
 | 插入模式的 `<C-w>`/`<C-u>`/`<C-r>`/`<C-a>`/`<C-t>`/`<C-d>` | 删前一词、删到行首、插入寄存器、重新插入上次文本、左右缩进 | ✅ 补齐复核实现，且插入会话改为记录**键序**（vim 的 redo buffer），所以 `3i`/`.` 会连同 `<BS>`/`<C-w>` 一起重放 | `insert_ctrl_*`、`counted_insert_replays_the_keys`（`m4_tui.rs`） |
@@ -308,25 +308,48 @@
 | quickfix | 缺失（`setqflist()` 返回空、`:copen` 未实现） | `rvim-ex::errorformat` + `rvim-editor::quickfix`（10 层栈、qflist/loclist、qf 窗口）+ `c*`/`l*` 全族命令与 4 个内置函数 |
 | 折叠 | M2 占位（`MoreState.folds` 从未填充，`foldclosed()` 永远 -1） | 新增 `rvim-editor::fold`（每窗口一份折叠表、manual/indent/marker/diff）、`rvim-normal::foldcmd`（z 系列）、`:fold*` 命令；TUI 渲染折叠摘要与 `'foldcolumn'` |
 | 跳转/change list | `jumplist` 只有空结构，`:jumps` 未实现 | `Editor` 新增真实 jump/change list，`<C-o>`/`<C-i>`、`:jumps`、`:changes` 可用；viminfo 读写（`:wviminfo`/`:rviminfo`/`-i`/`'viminfo'`） |
-## 11. M6 语法高亮（本轮交付）
-
-> 复核方式：对照 `reference/vim/src/syntax.c`（`syn_cmd_keyword`/`syn_cmd_match`/`syn_cmd_region`、
-> `syn_finish_line` 的状态机）与 `highlight.c`（默认组与 `hi link`）实现，并用 TUI 单元格颜色断言验证
-> 渲染。回归用例：`crates/rvim-syntax/src/lib.rs`（6）、`lang.rs`（3）、`highlight.rs`（4）、
-> `rvim-editor::syntax`（2）、`crates/rvim-app/tests/m6_syntax.rs`（7）。
+## 11. M6 语法高亮、正则、拼写、标签与缩进
 
 | 主题 | Vim | RustVim |
 |---|---|---|
-| 条目类型 | keyword/match/region + nextgroup/contained/skip/transparent/display | ✅ keyword/match/region + `contains=`/`@cluster`/`case`；❌ nextgroup/contained/skip/transparent |
-| 优先级与嵌套 | 后定义优先，contained 项只在容器内 | ✅ 后定义优先、容器内限制、嵌套项覆盖外层 |
-| 跨行状态 | `syn sync` 系列（fromstart/minlines/ccomment/maxlines） | 固定 100 行重启窗口，等价于无 sync 方法的近似 |
-| 正则 | 完整 vim 正则（\zs\ze、\@!、反向引用…） | MVP 正则（无 \zs\ze/断言），模式里可用的元字符见 §7.5 |
-| runtime `syntax/*.vim` | 全量 source | ❌ 不消费；20 种文件类型用内置定义，用户可用 `:syntax` 子集扩展 |
-| `:syntax` 子命令 | 全量 | on/off/enable/clear/reset、keyword/match/region/cluster/case/list；sync/include 接受但忽略 |
-| `:highlight` | 全量（term/cterm/gui、start/stop、blend…） | guifg/guibg/ctermfg/ctermbg/gui/cterm、link、clear、查询；其余参数忽略 |
-| 颜色 | cterm + gui 双模型、`:hi clear` 恢复默认 | 单一 HlAttr（RGB 或调色板索引），默认深色配色 |
-| 渲染 | 逐单元格属性、cursorline/视觉选区叠加、`synID()` 查询 | ✅ 逐单元格覆盖 + 选区优先；`synID`/`synIDattr`/`synstack` 尚未接线（引擎已带条目 id） |
-| 文件类型检测 | `filetype.vim` 全量 | 20 种扩展名 + `'filetype'`；其余靠 `:setf`/`au FileType` |
+| 条目类型 | keyword/match/region + nextgroup/contained/skip/transparent/display | ✅ keyword/match/region + contains= / @cluster / case / contained / transparent / skip= / nextgroup= / fold；display/conceal 接受但无渲染效果 |
+| 优先级与嵌套 | 后定义优先，contained 项只在容器内 | ✅ 后定义优先、容器内限制、嵌套项覆盖外层，nextgroup 链按 Vim 顺序匹配 |
+| 跨行状态 | syn sync 系列 | ✅ fromstart/minlines/maxlines/linebreaks 用于状态重建；ccomment 只记录 |
+| 正则 | 完整 vim 正则 | ✅ 捕获组/反向引用、\zs\ze、\@=/\@!、\_. 多行、\v/\V/\m/\M；⚠️ lookbehind \@<=/\@<! 与 \@> 仍按零宽空操作，\z1..\z9 无操作 |
+| runtime syntax/*.vim | 全量 source | ✅ 声明式子集（keyword/match/region/cluster/case/sync、hi def link）解析；条件/函数/autoload 忽略 |
+| :syntax 子命令 | 全量 | on/off/enable/clear/reset、keyword/match/region/cluster/case/list/sync/include |
+| :highlight | 全量 | guifg/guibg/ctermfg/ctermbg/gui/cterm、link/def link、clear（无参数恢复默认）、查询 |
+| 渲染 | 逐单元格属性、synID() 查询 | ✅ 逐单元格覆盖 + 选区优先；synID/synIDattr/synIDtrans/synstack/synconcealed 已接线 |
+| 文件类型检测 | filetype.vim 全量 | 20 种扩展名 + 'filetype'；未知类型回落到 runtimepath 的 syntax/<ft>.vim |
+| spell | .spl/词表、大小写/句首、建议、Spell* 高亮 | ✅ 纯文本词表 + .spl v50 LWORDTREE；常见英文词尾（s/es/ed/ing/ly/er/est）词干回退；KWORDTREE/完整 affix/复合词未展开；SpellLocal 不返回 |
+| tags | ctags、tagstack、:tag 全族、CTRL-] | ✅ ctags 解析、:tag/:tselect/:tjump/:tnext/:tprevious/:tfirst/:tlast/:trewind/:pop/:tags、TUI <C-]>/<C-t>/g]；:tselect 不交互 |
+| C 缩进 | cindent/smartindent/cinoptions/cinkeys/indentexpr | ✅ cindent()、cindent/smartindent/autoindent、常用 cinoptions、CR/o/O；indentexpr/复杂 cinoptions 未求值 |
+| :s 替换 | \1-\9、\u\l\U\L、\=、\n、~ | ✅ 全部实现（\= 可调用 submatch()；\n 拆行）；\z 系列未做 |
 
-**M6 其余条目状态**：正则 NFA 收口、spell（`.spl`）、标签栈（`tags`/`tagstack`）、
-`cindent`/`smartindent` 尚未开始（下一轮）；加密与压缩已按计划移到 M8，并允许外部依赖。
+## 12. M8 加密/压缩、兼容收口与发布（1.0）
+
+| 主题 | Vim | RustVim |
+|---|---|---|
+| 文件加密 | :set key= / :X，zip/blowfish/blowfish2/xchacha20 | ✅ zip/blowfish/blowfish2 与 Vim 文件头/密钥派生/CFB 对拍，真实 Vim 双向互读；❌ xchacha20（libsodium）报 E474；无 swapfile 子系统 |
+| 写盘时机 | 写 header + 加密正文 | ✅ Buffer::save_crypt/write_file_crypt；BOM/EOL 先序列化再加密；空文件只写 header |
+| 读盘 | 识别 magic、按 key 解密 | ✅ Buffer::open_crypt、:edit/:badd/bufadd()/:read 全部解密；缺 key 报 E576 |
+| has() | 完整 feature 表 | ✅ cryptv/crypt-blowfish2/crypt-zip/spell/syntax/quickfix/folding/diff/windows/tabpages/job/channel/terminal/timers/cmdline_*/patch-* |
+| :version | feature 行 | ✅ 输出 Features 行 |
+| :redir | 变量/寄存器/文件，:redir END | ✅ 线程局部捕获；变量/寄存器/文件写入与追加 |
+| 会话/视图 | :mksession/:mkview 全量 | ✅ 最小可 source 的会话/视图（buffer 列表、当前文件、光标、搜索寄存器） |
+| 其它命令 | :noautocmd/:packadd/:behave/:legacy/:mode/:open/菜单类 | ✅ 修饰符/空实现与消息；:packadd 不真正加载 package 插件 |
+| 打包 | Windows 单 exe、Unix tarball、安装器 | ✅ scripts/package.ps1（zip/tar.gz，可带 runtime）；packaging/rvim.nsi 模板 |
+| testdir | 官方 src/testdir 通过率 | ❌ 未接入（依赖 term/GUI 与完整驱动）；以自研回归与 smoke 替代 |
+| 资源 | libsodium | ✅ 未引入第三方 crate，保持 std-only |
+
+
+## 13. M7 Job / Channel / Timer / Terminal
+
+| 主题 | Vim | RustVim |
+|---|---|---|
+| Job 进程 | std::process + PTY，job_* 全族 | ✅ `job_start`（shell 或 argv）、`job_status`/`job_stop`/`job_getchannel`/`job_info`；stdout/stderr 由子线程读取，`out_cb`/`err_cb`/`exit_cb`/`close_cb`；`out_mode`、`cwd`、`env` 支持 |
+| Channel | TCP/pipe/socket，ch_* 全族 | ✅ TCP `ch_open` 与 `ch_sendraw/ch_sendexpr/ch_evalraw/ch_evalexpr/ch_read/ch_readraw/ch_canread/ch_status/ch_close/ch_getjob`；JSON-RPC 帧 `[id,expr]`；❌ named pipe、UDP、Unix socket、TLS |
+| Timer | timer_* 全族，事件循环 | ✅ `timer_start/timer_stop/timer_stopall/timer_pause/timer_info`，`repeat` 与一次性；回调在主线程 `pump()` 执行；`:sleep` 驱动事件 |
+| Terminal | libvterm + PTY/ConPTY，term_* 全族 | ⚠️ 最小实现：`term_start`/`:terminal` 打开 terminal 缓冲区，捕获 stdout 为行，`term_wait/term_getline/term_getsize/term_getstatus/term_getjob/term_list/term_sendkeys/term_scrape`；无 PTY/ConPTY，不是完整屏幕模拟器 |
+| 线程模型 | 子线程只投递事件，主线程写 Editor | ✅ 子线程只读 pipe/socket 并经 mpsc 投递 `Vec<u8>`；`m7::pump()` 在主线程序列化回调；无 unsafe、无跨线程 Editor |
+| 已知偏差 | — | 无 clientserver、named pipe、PTY；`ch_evalexpr` 仅按行 JSON-RPC；terminal 无光标/颜色/滚动；`job_start` 的 `in_io`/`out_io` 文件重定向未实现 |
