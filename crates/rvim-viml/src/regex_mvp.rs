@@ -14,8 +14,19 @@ enum Node {
     Class(Vec<ClassItem>, bool),
     Start,
     End,
+    /// \< : start of a word (vimregex §4.1).
+    WordStart,
+    /// \> : end of a word.
+    WordEnd,
     Group(Vec<Vec<Node>>),
-    Repeat(Box<Node>, u32, u32),
+    Repeat {
+        node: Box<Node>,
+        lo: u32,
+        hi: u32,
+        /// Greedy quantifiers (\{n,m}) prefer the longest match, the
+        /// non-greedy \{-n,m} form the shortest (vimregex §4.3).
+        greedy: bool,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -28,10 +39,28 @@ enum ClassItem {
     NotWord,
     Space,
     NotSpace,
+    // The rest of vim's predefined classes (vimregex §4.2).
+    Hex,
+    Octal,
+    /// Head of a word: a letter or `_`.
+    Head,
+    /// Printable character.
+    Printable,
+    /// Printable but not a digit (vim's \P).
+    NotPrintable,
+    Alpha,
+    Lower,
+    Upper,
+    /// File-name character: alphanumeric plus `._-~`.
+    FileName,
 }
 
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
+}
+
+fn is_file_name_char(c: char) -> bool {
+    c.is_alphanumeric() || "._-~".contains(c)
 }
 
 fn class_match(items: &[ClassItem], negated: bool, c: char) -> bool {
@@ -46,6 +75,15 @@ fn class_match(items: &[ClassItem], negated: bool, c: char) -> bool {
             ClassItem::NotWord => !is_word_char(c),
             ClassItem::Space => c.is_whitespace(),
             ClassItem::NotSpace => !c.is_whitespace(),
+            ClassItem::Hex => c.is_ascii_hexdigit(),
+            ClassItem::Octal => ('0'..='7').contains(&c),
+            ClassItem::Head => c.is_alphabetic() || c == '_',
+            ClassItem::Printable => !c.is_control(),
+            ClassItem::NotPrintable => !c.is_control() && !c.is_ascii_digit(),
+            ClassItem::Alpha => c.is_alphabetic(),
+            ClassItem::Lower => c.is_lowercase(),
+            ClassItem::Upper => c.is_uppercase(),
+            ClassItem::FileName => is_file_name_char(c),
         };
         if m {
             hit = true;
@@ -117,24 +155,49 @@ impl<'a> Parser<'a> {
             match (self.peek(), self.peek_at(1)) {
                 (Some('*'), _) => {
                     self.bump();
-                    node = Node::Repeat(Box::new(node), 0, u32::MAX);
+                    node = Node::Repeat {
+                        node: Box::new(node),
+                        lo: 0,
+                        hi: u32::MAX,
+                        greedy: true,
+                    };
                 }
                 (Some('\\'), Some('+')) => {
                     self.pos += 2;
-                    node = Node::Repeat(Box::new(node), 1, u32::MAX);
+                    node = Node::Repeat {
+                        node: Box::new(node),
+                        lo: 1,
+                        hi: u32::MAX,
+                        greedy: true,
+                    };
                 }
                 (Some('\\'), Some('?')) => {
                     self.pos += 2;
-                    node = Node::Repeat(Box::new(node), 0, 1);
+                    node = Node::Repeat {
+                        node: Box::new(node),
+                        lo: 0,
+                        hi: 1,
+                        greedy: true,
+                    };
                 }
                 (Some('\\'), Some('=')) => {
                     self.pos += 2;
-                    node = Node::Repeat(Box::new(node), 0, 1);
+                    node = Node::Repeat {
+                        node: Box::new(node),
+                        lo: 0,
+                        hi: 1,
+                        greedy: true,
+                    };
                 }
                 (Some('\\'), Some('{')) => {
-                    // \{n,m} / \{n} / \{,m} / \{n,}
+                    // \{n,m} / \{n} / \{,m} / \{n,} (greedy) and the
+                    // non-greedy \{-n,m} family (vimregex §4.3).
                     let save = self.pos;
                     self.pos += 2;
+                    let greedy = self.peek() != Some('-');
+                    if !greedy {
+                        self.bump();
+                    }
                     let mut min = String::new();
                     let mut max = String::new();
                     while let Some(c) = self.peek().filter(|c| c.is_ascii_digit()) {
@@ -154,13 +217,20 @@ impl<'a> Parser<'a> {
                         self.pos += 2;
                         let lo: u32 = min.parse().unwrap_or(0);
                         let hi: u32 = if !has_comma {
-                            lo
+                            // A bare \{-} repeats zero or more times; \{-n} is
+                            // exactly n (vimregex §4.3).
+                            if min.is_empty() { u32::MAX } else { lo }
                         } else if max.is_empty() {
                             u32::MAX
                         } else {
                             max.parse().unwrap_or(lo)
                         };
-                        node = Node::Repeat(Box::new(node), lo, hi);
+                        node = Node::Repeat {
+                            node: Box::new(node),
+                            lo,
+                            hi,
+                            greedy,
+                        };
                     } else {
                         self.pos = save;
                         break;
@@ -174,9 +244,8 @@ impl<'a> Parser<'a> {
 
     fn parse_atom(&mut self) -> Option<Node> {
         let c = self.bump()?;
-        // `\c` / `\C` are case flags handled by the caller; skip them here.
+        // \c / \C are case flags handled by the caller; skip them here.
         if c == '\\' && matches!(self.peek(), Some('c') | Some('C')) {
-            // Skip the case flag and continue with the next atom.
             self.bump();
             return self.parse_atom();
         }
@@ -195,21 +264,56 @@ impl<'a> Parser<'a> {
                         }
                         Node::Group(branches)
                     }
+                    // \%(...\) : non-capturing group (vimregex §4.6).
+                    '%' => {
+                        let kind = self.bump()?;
+                        match kind {
+                            '(' => {
+                                let branches = self.parse_alt();
+                                if self.peek() == Some('\\') && self.peek_at(1) == Some(')') {
+                                    self.pos += 2;
+                                }
+                                Node::Group(branches)
+                            }
+                            // \%d123 / \%o17 / \%x1f / \%u00e9 / \%U0001F600
+                            'd' => Node::Char(self.take_radix(10)),
+                            'o' => Node::Char(self.take_radix(8)),
+                            'x' => Node::Char(self.take_radix(16)),
+                            'u' => Node::Char(self.take_radix(16)),
+                            'U' => Node::Char(self.take_radix(16)),
+                            _ => Node::Char(kind),
+                        }
+                    }
+                    // Word boundaries (vimregex §4.1).
+                    '<' => Node::WordStart,
+                    '>' => Node::WordEnd,
                     'd' => Node::Class(vec![ClassItem::Digit], false),
                     'D' => Node::Class(vec![ClassItem::Digit], true),
                     'w' => Node::Class(vec![ClassItem::Word], false),
                     'W' => Node::Class(vec![ClassItem::Word], true),
                     's' => Node::Class(vec![ClassItem::Space], false),
                     'S' => Node::Class(vec![ClassItem::Space], true),
+                    // The rest of vim's classes (vimregex §4.2).
+                    'x' => Node::Class(vec![ClassItem::Hex], false),
+                    'X' => Node::Class(vec![ClassItem::Hex], true),
+                    'o' => Node::Class(vec![ClassItem::Octal], false),
+                    'O' => Node::Class(vec![ClassItem::Octal], true),
+                    'h' => Node::Class(vec![ClassItem::Head], false),
+                    'H' => Node::Class(vec![ClassItem::Head], true),
+                    'p' => Node::Class(vec![ClassItem::Printable], false),
+                    'P' => Node::Class(vec![ClassItem::NotPrintable], false),
+                    'a' => Node::Class(vec![ClassItem::Alpha], false),
+                    'A' => Node::Class(vec![ClassItem::Alpha], true),
+                    'l' => Node::Class(vec![ClassItem::Lower], false),
+                    'L' => Node::Class(vec![ClassItem::Lower], true),
+                    'u' => Node::Class(vec![ClassItem::Upper], false),
+                    'U' => Node::Class(vec![ClassItem::Upper], true),
+                    'f' => Node::Class(vec![ClassItem::FileName], false),
+                    'F' => Node::Class(vec![ClassItem::FileName], true),
                     'n' => Node::Char('\n'),
                     't' => Node::Char('\t'),
                     'r' => Node::Char('\r'),
                     'e' => Node::Char('\u{1b}'),
-                    'a' => Node::Char('\u{7}'),
-                    'f' => Node::Char('\u{c}'),
-                    'x' => Node::Char(self.take_hex(2)),
-                    'u' => Node::Char(self.take_hex(4)),
-                    'U' => Node::Char(self.take_hex(8)),
                     other => Node::Char(other),
                 })
             }
@@ -217,18 +321,17 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn take_hex(&mut self, max: usize) -> char {
+    /// Read an integer in `radix` for the `\%d`/`\%o`/`\%x`/`\%u` forms.
+    fn take_radix(&mut self, radix: u32) -> char {
         let mut digits = String::new();
-        for _ in 0..max {
-            if let Some(c) = self.peek().filter(|c| c.is_ascii_hexdigit()) {
-                digits.push(c);
-                self.bump();
-            }
+        while let Some(c) = self.peek().filter(|c| c.is_digit(radix)) {
+            digits.push(c);
+            self.bump();
         }
-        u32::from_str_radix(&digits, 16)
+        u32::from_str_radix(&digits, radix)
             .ok()
             .and_then(char::from_u32)
-            .unwrap_or('?')
+            .unwrap_or('\u{fffd}')
     }
 
     fn parse_class(&mut self) -> Node {
@@ -306,6 +409,26 @@ fn match_nodes(nodes: &[Node], text: &[char], pos: usize, ci: bool) -> Option<us
                 None
             }
         }
+        // \< : the previous char is not a word char and the next one is.
+        Node::WordStart => {
+            let before_ok = pos == 0 || !text.get(pos - 1).is_some_and(|c| is_word_char(*c));
+            let after_ok = text.get(pos).is_some_and(|c| is_word_char(*c));
+            if before_ok && after_ok {
+                match_nodes(rest, text, pos, ci)
+            } else {
+                None
+            }
+        }
+        // \> : the previous char is a word char and the next one is not.
+        Node::WordEnd => {
+            let before_ok = pos > 0 && text.get(pos - 1).is_some_and(|c| is_word_char(*c));
+            let after_ok = !text.get(pos).is_some_and(|c| is_word_char(*c));
+            if before_ok && after_ok {
+                match_nodes(rest, text, pos, ci)
+            } else {
+                None
+            }
+        }
         Node::Char(c) => {
             let t = text.get(pos)?;
             let hit = if ci {
@@ -329,7 +452,22 @@ fn match_nodes(nodes: &[Node], text: &[char], pos: usize, ci: bool) -> Option<us
         }
         Node::Class(items, negated) => {
             let t = text.get(pos)?;
-            if class_match(items, *negated, *t) {
+            // With \c a class matches either case (vim's ignorecase makes
+            // \u find a lowercase letter too); test the positive set first so
+            // a negated class keeps its meaning.
+            let mut positive = class_match(items, false, *t);
+            if ci && !positive {
+                let other = if t.is_lowercase() {
+                    t.to_uppercase().next()
+                } else {
+                    t.to_lowercase().next()
+                };
+                if let Some(other) = other {
+                    positive = class_match(items, false, other);
+                }
+            }
+            let hit = positive != *negated;
+            if hit {
                 match_nodes(rest, text, pos + 1, ci)
             } else {
                 None
@@ -345,10 +483,17 @@ fn match_nodes(nodes: &[Node], text: &[char], pos: usize, ci: bool) -> Option<us
             }
             None
         }
-        Node::Repeat(inner, lo, hi) => {
-            // Greedy with backtracking.
+        Node::Repeat {
+            node: inner,
+            lo,
+            hi,
+            greedy,
+        } => {
+            // Collect the position after each allowed repetition, then try the
+            // ends from the longest (greedy) or shortest (\{-}) match.
             let mut ends = vec![pos];
             let mut cur = pos;
+
             while (ends.len() as u32 - 1) < *hi {
                 match match_nodes(std::slice::from_ref(inner.as_ref()), text, cur, ci) {
                     Some(next) if next > cur => {
@@ -358,12 +503,26 @@ fn match_nodes(nodes: &[Node], text: &[char], pos: usize, ci: bool) -> Option<us
                     _ => break,
                 }
             }
-            while !ends.is_empty() && (ends.len() as u32 - 1) >= *lo {
-                let candidate = *ends.last().unwrap();
-                if let Some(found) = match_nodes(rest, text, candidate, ci) {
-                    return Some(found);
+            // ends[i] is the position after i repetitions.
+            let count = ends.len();
+            if *greedy {
+                for reps in (0..count).rev() {
+                    if (reps as u32) < *lo {
+                        break;
+                    }
+                    if let Some(found) = match_nodes(rest, text, ends[reps], ci) {
+                        return Some(found);
+                    }
                 }
-                ends.pop();
+            } else {
+                for (reps, candidate) in ends.iter().enumerate() {
+                    if (reps as u32) < *lo {
+                        continue;
+                    }
+                    if let Some(found) = match_nodes(rest, text, *candidate, ci) {
+                        return Some(found);
+                    }
+                }
             }
             None
         }

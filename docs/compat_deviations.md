@@ -242,7 +242,7 @@
 | `<SID>`/`<SNR>` | 脚本局部函数绑定脚本 id，`function('s:F')` 可在别处调用，`expand('<SID>')` 返回 `<SNR>N_` | `s:` funcref 在别的脚本中不可调用；`<SID>` 字面返回 | M3 后续 |
 | 单行复合块 | `if 1 \| cmd \| endif` 合法（do_cmdline 跨 `\|` 维护 cstack） | 块解析按物理行，报 E171/E170 等 | M3 后续（需语句流化） |
 | dict 迭代顺序 | 哈希表顺序（`keys()/values()/items()/string()/for`） | 插入顺序（保序字典；语义正确但可观察顺序不同） | 收口时评估是否复刻哈希顺序 |
-| 正则范围 | 完整 vim 正则 | MVP（`=~`/`!~`/`match*()`/`:s`/`:g`/搜索地址共用）：支持基础元字符、字符类、捕获组与 `\|`；无 `\zs\ze\@!`、反向引用、多行、`\a\l\u` 简写 | M6（rvim-regex） |
+| 正则范围 | 完整 vim 正则 | MVP+（`rvim-viml::regex_mvp`，由 `crates/rvim-viml/tests/vimregex.rs` 按 vimregex.com 的章节驱动）：基础元字符、字符类（含 `\d \D \s \S \w \W \x \X \o \O \h \H \p \P \a \A \l \L \u \U \f`）、`\<`/`\>`、`\{n,m}` 与 `\{-n,m}` 非贪婪、`\%(...)`、`\%d/\%o/\%x/\%u` 码点、`\c`；仍无反向引用、`\zs\ze`、`\@=`/`\@!` 断言、多行与 magic 级别（NFA 收口时补） | M6（rvim-regex） |
 | `:s` 替换特殊项 | `\1`-`\9`、`\u\l\e\E`、`\=` 表达式 | 仅 `&`/`\&`、`\n`、`\t`、`\\`；反向引用与大小写修饰未实现 | M6 |
 | `b:`/`w:`/`t:` 作用域字典 | 写穿透到真实变量 | 读可用、写不传播（快照） | M3 后续 |
 | `:move` 内标记 | 移动范围中的标记随文本移动 | delete+insert 组合导致标记不跟随 | M3 后续（ex 侧 move-aware adjust） |

@@ -164,7 +164,7 @@ M0 脚手架 ─► M1 Headless 编辑内核 ─► M2 Ex 命令体系 ─► M3
 - ✅ **`:syntax` 与 `:highlight`**：`on/off/enable/clear/reset`、`keyword/match/region/cluster/case/list`；`hi Group guifg=#RRGGBB`、`hi link`、`hi clear`、查询；默认深色配色 + vim 默认 link 表。
 - ✅ **TUI 渲染**：`rvim-term::pane` 的 span 覆盖层（`Grid::set_style`），横向滚动/行号栏/折叠列不受影响；`Style` 增加 italic。
 - ⏳ 未做：runtime `syntax/*.vim` 全量消费、`syn sync`、`nextgroup`/`contained`/`skip`/`transparent`、`\zs\ze`、`synID()` 系列内置函数。
-- 正则 NFA 收口（`regexp_nfa.c` 语义）、spell（`.spl`）、标签栈（`tags`）与 `cindent/smartindent` 仍在 M6 范围，见下：
+- 🔶 **正则 MVP 已按 vimregex.com 补齐**（`<`/`>` 词边界、完整字符类表、`\{-}` 非贪婪、`\%(...)`、`\%d/\%o/\%x/\%u`），并以 `crates/rvim-viml/tests/vimregex.rs`（22 例）+ `m6_regex.rs`（4 例）作为规格回归；NFA 收口（反向引用、`\zs\ze`、`\@=` 断言、多行、magic 级别）仍待做。spell（`.spl`）、标签栈（`tags`）与 `cindent/smartindent` 同样仍在 M6 范围：
 - spell：`.spl` 读取/拼写检查/建议（`spell.c/spellfile.c/spellsuggest.c`）。
 - 标签栈（`tagstack`、`tags` 文件格式）、`cindent/smartindent`。
 
