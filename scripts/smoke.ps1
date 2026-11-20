@@ -206,3 +206,25 @@ $vifile = Join-Path $work 'viminfo.txt'
 & $exe -es -c 'call setline(1, "x")' -c ('wviminfo ' + $vifile) -c 'q!' $f10
 & $exe -es -c 'jumps' -c 'changes' -c 'q' $f10
 Write-Host ('m5 session exit=' + $LASTEXITCODE)
+# --- 32. Cross-milestone gaps closed by the M0-M5 review ------------------
+
+Write-Host '--- 32. :normal runs normal/insert/visual keys ---'
+$f12 = Join-Path $work 'normal.txt'
+Write-NoBom $f12 ("one" + [Environment]::NewLine + "two" + [Environment]::NewLine + "three")
+& $exe -es -c '%normal! A;' -c 'wq' $f12
+Write-Host ('normal exit=' + $LASTEXITCODE)
+Write-Host ('disk: ' + ((Get-Content $f12 -Raw) -replace "\r", '|'))
+& $exe -es -c 'normal! VU' -c 'wq' $f12
+Write-Host ('disk: ' + ((Get-Content $f12 -Raw) -replace "\r", '|'))
+
+Write-Host '--- 33. TUI: command-line history and insert-mode <C-w> ---'
+& $exe --keys ':echo 42<CR>:<Up><CR>' --cols 40 --rows 6 $f12
+Write-Host ('history exit=' + $LASTEXITCODE)
+& $exe --keys 'A foo bar<C-w>baz<Esc>' --cols 40 --rows 6 $f12
+Write-Host ('insert ctrl-w exit=' + $LASTEXITCODE)
+
+Write-Host '--- 34. TUI: relativenumber and scrolloff ---'
+& $exe --keys ':set rnu<CR>2G' --cols 20 --rows 8 $f12
+Write-Host ('rnu exit=' + $LASTEXITCODE)
+& $exe --keys ':set so=2<CR>3G' --cols 20 --rows 8 $f12
+Write-Host ('scrolloff exit=' + $LASTEXITCODE)

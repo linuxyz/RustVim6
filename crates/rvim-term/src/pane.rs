@@ -72,6 +72,10 @@ pub struct PaneView {
     pub status: String,
     /// Width of the line-number field including its trailing space (0 = off).
     pub number_width: usize,
+    /// `'relativenumber'`: rows other than the cursor's show their distance.
+    pub relative: bool,
+    /// Buffer line the cursor is on (the absolute number stays absolute).
+    pub cursor_line: Option<usize>,
     /// `'foldcolumn'` width in cells (0 when off).
     pub foldcolumn: usize,
     /// Sign column width in cells (0 when off).
@@ -306,7 +310,13 @@ fn draw_pane(
         if pane.number_width > 0 {
             let label = match pane.content.get(index) {
                 Some(RowView::Text { line, .. }) | Some(RowView::Fold { start: line, .. }) => {
-                    format!("{:>width$} ", line + 1, width = pane.number_width - 1)
+                    // 'relativenumber' numbers the other rows by distance; the
+                    // cursor's own row keeps the absolute number (screen.c).
+                    let number = match (pane.relative, pane.cursor_line) {
+                        (true, Some(cur)) if *line != cur => line.abs_diff(cur),
+                        _ => line + 1,
+                    };
+                    format!("{:>width$} ", number, width = pane.number_width - 1)
                 }
                 _ => " ".repeat(pane.number_width),
             };
@@ -438,6 +448,8 @@ mod tests {
             left: 0,
             status: "file.txt".to_string(),
             number_width: 0,
+            relative: false,
+            cursor_line: None,
             foldcolumn: 0,
             signcolumn: 0,
             signs: Vec::new(),

@@ -66,8 +66,12 @@ pub struct ChangePos {
 /// same operator with the same count at the new cursor position.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RepeatChange {
-    /// An insert session: the entry key (i/a/A/o/O/I/c/s/C) and typed text.
-    Insert { entry: char, text: String },
+    /// An insert session: the entry key (i/a/A/o/O/I/c/s/C) and the keys typed
+    /// in it (vim's redo buffer, so `<BS>`/`<C-w>` replay too).
+    Insert {
+        entry: char,
+        keys: Vec<crate::maps::Key>,
+    },
     /// An operator with its motion key and total count (dd, dw, d2w, ...).
     Operator { op: char, motion: char, count: u64 },
     /// x / X / D / C with their count.

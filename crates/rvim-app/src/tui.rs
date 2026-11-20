@@ -31,8 +31,6 @@ enum Pending {
     WindowCmd,
     /// An operator waiting for a text object character (`diw`, `ca("`).
     TextObject(char, bool),
-    /// `g` in visual mode (only `gg` is supported).
-    VisualG,
     /// `z`: waiting for the fold command key.
     Fold,
     /// `]` (true) or `[` (false): waiting for the following key.
@@ -94,6 +92,55 @@ impl Cmdline {
         let end = self.byte_at(self.cursor + 1);
         self.text.replace_range(start..end, "");
     }
+
+    /// `<C-u>`: remove everything before the cursor (ex_getln.c c_CTRL_U).
+    fn delete_to_start(&mut self) {
+        let end = self.byte_at(self.cursor);
+        self.text.replace_range(..end, "");
+        self.cursor = 0;
+    }
+
+    /// `<C-w>`: remove the word before the cursor (ex_getln.c c_CTRL_W).
+    fn delete_word(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let chars: Vec<char> = self.text.chars().collect();
+        let mut start = self.cursor;
+        while start > 0 && chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        if start > 0 {
+            let word_char = |c: char| c.is_alphanumeric() || c == '_';
+            let kind = word_char(chars[start - 1]);
+            while start > 0
+                && word_char(chars[start - 1]) == kind
+                && !chars[start - 1].is_whitespace()
+            {
+                start -= 1;
+            }
+        }
+        let end = self.byte_at(self.cursor);
+        let begin = self.byte_at(start);
+        self.text.replace_range(begin..end, "");
+        self.cursor = start;
+    }
+
+    /// Replace the whole line with `text` and park the cursor at its end.
+    fn set_text(&mut self, text: &str) {
+        self.text = text.to_string();
+        self.cursor = self.char_len();
+    }
+}
+
+/// History list a prompt writes to and recalls from (ex_getln.c histtype).
+fn cmdline_kind(prompt: char) -> rvim_cmdline::CmdlineKind {
+    match prompt {
+        '/' => rvim_cmdline::CmdlineKind::SearchForward,
+        '?' => rvim_cmdline::CmdlineKind::SearchBackward,
+        '=' => rvim_cmdline::CmdlineKind::Expression,
+        _ => rvim_cmdline::CmdlineKind::Ex,
+    }
 }
 
 /// The interactive editor front-end.
@@ -113,12 +160,16 @@ pub struct Tui {
     pending_op: Option<Pending>,
     /// Direction of the last `/` or `?` search (`n` repeats it).
     search_forward: bool,
-    /// Count typed in visual mode (`v3j`, `3i` in a block).
-    visual_count: Option<u64>,
+    /// Second key of a visual-mode command (`i`/`a` text objects, `g`, `z`).
+    visual_pending: Option<rvim_normal::visual::VisualPending>,
     /// When the pending key buffer started waiting, for 'timeoutlen'.
     pending_since: Option<std::time::Instant>,
     /// Wildmenu candidates while completing.
     pub wildmenu: Option<(Vec<String>, usize, String)>,
+    /// `:` / `/` history shared by every command line (cmdhist.c).
+    pub history: rvim_cmdline::CmdHistory,
+    /// The line being edited before the first `<Up>` (`<Down>` restores it).
+    history_saved: Option<String>,
     /// Number of messages already consumed from the editor log.
     seen_messages: usize,
     /// Geometry of the last rendered frame (updated when the terminal resizes).
@@ -139,9 +190,11 @@ impl Tui {
             pending_keys: Vec::new(),
             pending_op: None,
             search_forward: true,
-            visual_count: None,
+            visual_pending: None,
             pending_since: None,
             wildmenu: None,
+            history: rvim_cmdline::CmdHistory::new(50),
+            history_saved: None,
             seen_messages: 0,
             screen_size: (80, 24),
             last_frame: None,
@@ -183,7 +236,8 @@ impl Tui {
             // A count typed before <Esc> is dropped, not carried to the next
             // command (normal.c nv_esc).
             self.session.normal.cancel_pending();
-            self.visual_count = None;
+            self.session.normal.clear_visual_count();
+            self.visual_pending = None;
             if self.session.editor.mode.is_insert_like() {
                 self.finish_insert_mode();
             } else if self.session.editor.mode.is_visual() {
@@ -502,30 +556,6 @@ impl Tui {
                 }
                 Ok(())
             }
-            Pending::VisualG => {
-                // g<C-a>/g<C-x>: increment/decrement the selection line by line.
-                if let Key::Special(name) = &key {
-                    if matches!(name.as_str(), "C-A" | "C-X") {
-                        let add = name == "C-A";
-                        let mut engine =
-                            std::mem::replace(&mut self.session.normal, NormalEngine::new());
-                        let count = engine.take_pending_count();
-                        self.session.normal = engine;
-                        let count = count.max(self.visual_count.take().unwrap_or(1));
-                        rvim_normal::visual::visual_addsub(self.editor(), add, count)?;
-                        return Ok(());
-                    }
-                }
-                if matches!(&key, Key::Char('g')) {
-                    let mut engine =
-                        std::mem::replace(&mut self.session.normal, NormalEngine::new());
-                    let count = engine.take_pending_count();
-                    self.session.normal = engine;
-                    let pos = rvim_normal::motions::goto_line(self.editor(), count, false)?;
-                    self.session.editor.set_cursor(pos);
-                }
-                Ok(())
-            }
             Pending::OperatorGg(op) => {
                 let mut engine = std::mem::replace(&mut self.session.normal, NormalEngine::new());
                 let result = if matches!(&key, Key::Char('g')) {
@@ -610,53 +640,13 @@ impl Tui {
     }
 
     fn handle_insert_key(&mut self, key: Key) -> VimResult<()> {
-        match key {
-            Key::Char(ch) => {
-                let mut engine = std::mem::replace(&mut self.session.normal, NormalEngine::new());
-                let result = insert::type_char(self.editor(), &mut engine, ch);
-                self.session.normal = engine;
-                result
-            }
-            Key::Special(name) => {
-                let mut engine = std::mem::replace(&mut self.session.normal, NormalEngine::new());
-                let result = match name.as_str() {
-                    // <CR> inserts a newline exactly like typing one: the insert
-                    // session must record it, otherwise a counted insert (3i%<CR>)
-                    // or "." repeats the text without the line break (normal.c
-                    // ins_eol / edit.c ins_char).
-                    "CR" => insert::type_char(self.editor(), &mut engine, '\n'),
-                    "TAB" => insert::type_char(self.editor(), &mut engine, '\t'),
-                    "BS" => insert::backspace(self.editor(), &mut engine),
-                    "DELETE" => {
-                        let pos = self.editor().cursor();
-                        self.editor().delete_chars(pos, 1).map(|_| ())
-                    }
-                    "LEFT" | "RIGHT" | "UP" | "DOWN" | "HOME" | "END" => {
-                        let pos = self.editor().cursor();
-                        let line = self.editor().current_line();
-                        let col = match name.as_str() {
-                            "LEFT" => rvim_core::text::move_chars(&line, pos.col, -1),
-                            "RIGHT" => rvim_core::text::move_chars(&line, pos.col, 1),
-                            "HOME" => 0,
-                            "END" => line.len(),
-                            _ => pos.col,
-                        };
-                        let line = match name.as_str() {
-                            "UP" => pos.line.saturating_sub(1),
-                            "DOWN" => (pos.line + 1).min(self.editor().line_count() - 1),
-                            _ => pos.line,
-                        };
-                        let col = col.min(self.editor().current_buffer().line(line)?.len_bytes());
-                        self.editor().set_cursor(Pos::new(line, col));
-                        Ok(())
-                    }
-                    _ => Ok(()),
-                };
-                self.session.normal = engine;
-                result
-            }
-            _ => Ok(()),
-        }
+        // The key handling lives in rvim-normal::insert so the TUI, a counted
+        // insert replay and ":normal" execute the same insert-mode command
+        // (normal.c edit()).
+        let mut engine = std::mem::replace(&mut self.session.normal, NormalEngine::new());
+        let result = insert::key(self.editor(), &mut engine, key);
+        self.session.normal = engine;
+        result.map(|_| ())
     }
 
     fn finish_insert_mode(&mut self) {
@@ -690,6 +680,43 @@ impl Tui {
         self.cmdline = Some(Cmdline::new(prompt));
         self.session.editor.mode = Mode::CommandLine;
         self.wildmenu = None;
+        self.history_saved = None;
+    }
+
+    /// `<Up>`/`<Down>` (and `<C-p>`/`<C-n>` outside completion): recall a line
+    /// from the history of the current prompt (ex_getln.c get_history_line).
+    fn recall_history(&mut self, older: bool) {
+        let Some(cmdline) = self.cmdline.as_ref() else {
+            return;
+        };
+        let kind = cmdline_kind(cmdline.prompt);
+        self.wildmenu = None;
+        // Vim matches the text before the cursor as a prefix.
+        let prefix: String = cmdline.text.chars().take(cmdline.cursor).collect();
+        let current = cmdline.text.clone();
+        let entry = if older {
+            self.history.older(kind, &prefix)
+        } else {
+            self.history.newer(kind, &prefix)
+        };
+        match entry {
+            Some(text) => {
+                if self.history_saved.is_none() {
+                    self.history_saved = Some(current);
+                }
+                if let Some(cmdline) = self.cmdline.as_mut() {
+                    cmdline.set_text(&text);
+                }
+            }
+            None if !older => {
+                // Past the newest entry the line being edited comes back.
+                let restored = self.history_saved.take().unwrap_or_default();
+                if let Some(cmdline) = self.cmdline.as_mut() {
+                    cmdline.set_text(&restored);
+                }
+            }
+            None => {}
+        }
     }
 
     fn cancel_cmdline(&mut self) {
@@ -739,8 +766,27 @@ impl Tui {
                         cmdline.cursor = cmdline.char_len();
                     }
                 }
-                "TAB" | "C-N" => self.complete_cmdline(true)?,
-                "C-P" => self.complete_cmdline(false)?,
+                // <C-n>/<C-p> complete while the wildmenu is open and recall
+                // history otherwise (ex_getln.c c_CTRL_N/c_CTRL_P).
+                "TAB" => self.complete_cmdline(true)?,
+                "C-N" if self.wildmenu.is_some() => self.complete_cmdline(true)?,
+                "C-P" if self.wildmenu.is_some() => self.complete_cmdline(false)?,
+                "C-N" => self.recall_history(false),
+                "C-P" => self.recall_history(true),
+                "UP" => self.recall_history(true),
+                "DOWN" => self.recall_history(false),
+                "C-U" => {
+                    if let Some(cmdline) = self.cmdline.as_mut() {
+                        cmdline.delete_to_start();
+                    }
+                    self.wildmenu = None;
+                }
+                "C-W" => {
+                    if let Some(cmdline) = self.cmdline.as_mut() {
+                        cmdline.delete_word();
+                    }
+                    self.wildmenu = None;
+                }
                 "CR" => return self.execute_cmdline(),
                 // <Esc> / <C-C> abandon the command line (vim keeps the buffer).
                 "ESC" | "C-C" => self.cancel_cmdline(),
@@ -796,6 +842,11 @@ impl Tui {
         };
         self.wildmenu = None;
         self.session.editor.mode = Mode::Normal;
+        self.history_saved = None;
+        // Every executed line enters the history of its prompt; empty lines and
+        // duplicates of the previous entry are dropped by CmdHistory::add.
+        self.history
+            .add(cmdline_kind(cmdline.prompt), &cmdline.text);
         match cmdline.prompt {
             '/' | '?' => {
                 let forward = cmdline.prompt == '/';
@@ -963,13 +1014,17 @@ impl Tui {
             let rect = win.rect;
             let text_rows = rect.text_rows().max(1);
             let number = self.session.editor.wopt_for_bool(id, "number", false);
+            let relative = self
+                .session
+                .editor
+                .wopt_for_bool(id, "relativenumber", false);
             let line_count = self
                 .session
                 .editor
                 .buffer(win.bufnr)
                 .map(|b| b.line_count())
                 .unwrap_or(1);
-            let gutter = if number {
+            let gutter = if number || relative {
                 gutter_width(true, line_count)
             } else {
                 0
@@ -977,13 +1032,23 @@ impl Tui {
             let text_cols = rect.cols.saturating_sub(gutter).max(1);
             let cursor = win.cursor;
             let bufnr = win.bufnr;
+            // 'scrolloff' keeps the cursor that many rows away from the window
+            // edges (move.c update_topline / scroll_cursor_top).
+            let so = self
+                .session
+                .editor
+                .wopt_for_num(id, "scrolloff", 0)
+                .clamp(0, (text_rows.saturating_sub(1) / 2) as i64) as usize;
             let mut top = win.top_line;
             let mut left = win.left;
-            if cursor.line < top {
-                top = cursor.line;
-            } else if cursor.line >= top + text_rows {
-                top = cursor.line + 1 - text_rows;
+            if cursor.line < top + so {
+                top = cursor.line.saturating_sub(so);
+            } else if cursor.line + so >= top + text_rows {
+                top = (cursor.line + so + 1).saturating_sub(text_rows);
             }
+            // Never scroll past the point where the last line sits at the
+            // bottom row (vim keeps '~' rows only below the buffer end).
+            top = top.min(line_count.saturating_sub(text_rows));
             let line = self
                 .session
                 .editor
@@ -993,10 +1058,16 @@ impl Tui {
                 .unwrap_or("")
                 .to_string();
             let cursor_cell = display_col(&line, cursor.col, tabstop);
-            if cursor_cell < left {
-                left = cursor_cell;
-            } else if cursor_cell >= left + text_cols {
-                left = cursor_cell + 1 - text_cols;
+            // 'sidescrolloff' is the horizontal counterpart of 'scrolloff'.
+            let siso = self
+                .session
+                .editor
+                .wopt_for_num(id, "sidescrolloff", 0)
+                .clamp(0, (text_cols.saturating_sub(1) / 2) as i64) as usize;
+            if cursor_cell < left + siso {
+                left = cursor_cell.saturating_sub(siso);
+            } else if cursor_cell + siso >= left + text_cols {
+                left = (cursor_cell + siso + 1).saturating_sub(text_cols);
             }
             if let Some(window) = self.session.editor.windows.get_mut(id) {
                 window.top_line = top;
@@ -1096,7 +1167,7 @@ impl Tui {
                 out.push(*op);
                 out.push(if *around { 'a' } else { 'i' });
             }
-            Some(Pending::G) | Some(Pending::VisualG) => out.push('g'),
+            Some(Pending::G) => out.push('g'),
             Some(Pending::WindowCmd) => out.push_str("^W"),
             Some(Pending::Fold) => out.push('z'),
             Some(Pending::Bracket(forward)) => out.push(if *forward { ']' } else { '[' }),
@@ -1156,8 +1227,9 @@ impl Tui {
         };
         let bufnr = win.bufnr;
         let line_count = ed.buffer(bufnr).map(|b| b.line_count()).unwrap_or(1);
+        let relative = ed.wopt_for_bool(id, "relativenumber", false);
         let number = ed.wopt_for_bool(id, "number", false);
-        let number_width = if number {
+        let number_width = if number || relative {
             gutter_width(true, line_count)
         } else {
             0
@@ -1246,6 +1318,8 @@ impl Tui {
             left: win.left,
             status: self.statusline_for(id, rect.cols, text_rows),
             number_width,
+            relative,
+            cursor_line: Some(win.cursor.line),
             foldcolumn,
             signcolumn,
             signs,
@@ -1380,94 +1454,26 @@ impl Tui {
 
     /// Feed one key while a visual selection is active.
     fn handle_visual_key(&mut self, key: Key) -> VimResult<()> {
-        if let Some(pending) = self.pending_op.take() {
-            return self.finish_pending_command(pending, key);
+        // The state machine lives in rvim_normal::visual so that ":normal" and
+        // the TUI run exactly the same visual-mode commands.
+        let mut engine = std::mem::replace(&mut self.session.normal, NormalEngine::new());
+        let mut pending = self.visual_pending.take();
+        let result = rvim_normal::visual::key(self.editor(), &mut engine, &mut pending, key);
+        self.session.normal = engine;
+        self.visual_pending = pending;
+        if result? == rvim_normal::visual::VisualAction::CommandLine {
+            // vim writes the visual range into the command line.
+            let prefix = rvim_normal::visual::ex_range_prefix(self.editor());
+            self.cmdline = Some(Cmdline {
+                prompt: ':',
+                text: prefix.clone(),
+                cursor: prefix.chars().count(),
+            });
+            self.session.editor.mode = Mode::CommandLine;
+            self.wildmenu = None;
+            self.history_saved = None;
         }
-        match &key {
-            Key::Char(':') => {
-                // vim writes the visual range into the command line.
-                let prefix = rvim_normal::visual::ex_range_prefix(self.editor());
-                self.cmdline = Some(Cmdline {
-                    prompt: ':',
-                    text: prefix.clone(),
-                    cursor: prefix.chars().count(),
-                });
-                self.session.editor.mode = Mode::CommandLine;
-                self.wildmenu = None;
-                Ok(())
-            }
-            Key::Char(ch) => {
-                let ch = *ch;
-                // Digits accumulate a count for the next motion or block insert.
-                if ch.is_ascii_digit() && !(ch == '0' && self.visual_count.is_none()) {
-                    let digit = ch.to_digit(10).unwrap_or(0) as u64;
-                    self.visual_count = Some(
-                        self.visual_count
-                            .unwrap_or(0)
-                            .saturating_mul(10)
-                            .saturating_add(digit),
-                    );
-                    return Ok(());
-                }
-                let count = self.visual_count.take().unwrap_or(1);
-                match ch {
-                    'd' | 'x' => {
-                        let _ = rvim_normal::visual::apply_operator(self.editor(), 'd', None)?;
-                    }
-                    'y' => {
-                        let _ = rvim_normal::visual::apply_operator(self.editor(), 'y', None)?;
-                    }
-                    'c' | 's' => {
-                        let _ = rvim_normal::visual::apply_operator(self.editor(), 'c', None)?;
-                    }
-                    'p' | 'P' => self.paste_over_selection(ch)?,
-                    // Block insert: I at the block's left edge, A after its right edge
-                    // (vim only accepts these in blockwise visual mode).
-                    'I' | 'A' => {
-                        let blockwise = self.session.editor.mode == Mode::VisualBlock;
-                        if blockwise {
-                            let inserted =
-                                rvim_normal::visual::apply_operator(self.editor(), ch, None)?;
-                            if inserted {
-                                // 3Itext<Esc> repeats the text three times per line.
-                                self.session.normal.set_insert_repeat(count);
-                            }
-                        }
-                    }
-                    '>' | '<' | '~' | 'u' | 'U' | 'J' => {
-                        let _ = rvim_normal::visual::apply_operator(self.editor(), ch, None)?;
-                    }
-                    'o' | 'O' => rvim_normal::visual::swap_ends(self.editor())?,
-                    'i' | 'a' => {
-                        self.pending_op = Some(Pending::TextObject(' ', ch == 'a'));
-                    }
-                    'g' => self.pending_op = Some(Pending::VisualG),
-                    'z' => self.pending_op = Some(Pending::Fold),
-                    _ => {
-                        if let Some(motion) = visual_motion(ch) {
-                            let pos = visual_move(self.editor(), motion, count)?;
-                            self.session.editor.set_cursor(pos);
-                        }
-                    }
-                }
-                Ok(())
-            }
-            Key::Special(name) => {
-                let motion = match name.as_str() {
-                    "LEFT" => 'h',
-                    "RIGHT" => 'l',
-                    "UP" => 'k',
-                    "DOWN" => 'j',
-                    "HOME" => '0',
-                    "END" => '$',
-                    _ => return Ok(()),
-                };
-                let pos = visual_move(self.editor(), motion, 1)?;
-                self.session.editor.set_cursor(pos);
-                Ok(())
-            }
-            Key::Nop => Ok(()),
-        }
+        Ok(())
     }
 
     /// ]c / [c: jump to the next/previous changed line of the current window.
@@ -1492,105 +1498,7 @@ impl Tui {
         } else {
             rvim_normal::textobjects::Which::Inner
         };
-        let lines: Vec<String> = (0..self.session.editor.line_count())
-            .filter_map(|i| {
-                self.session
-                    .editor
-                    .current_buffer()
-                    .line_str(i)
-                    .ok()
-                    .map(str::to_string)
-            })
-            .collect();
-        let cursor = self.session.editor.cursor();
-        let Some(found) =
-            rvim_normal::textobjects::text_object(&lines, (cursor.line, cursor.col), object, which)
-        else {
-            self.session.editor.mode = Mode::Normal;
-            return Ok(());
-        };
-        // Text objects report the byte offset of their last character; the
-        // operators take an exclusive end (a linewise object covers whole lines).
-        let range = if found.linewise {
-            rvim_normal::operators::line_range(
-                found.start_line,
-                found.end_line,
-                self.session.editor.line_count(),
-            )
-        } else {
-            let text = self
-                .session
-                .editor
-                .current_buffer()
-                .line_str(found.end_line)
-                .unwrap_or("")
-                .to_string();
-            let end_col = if found.end_col >= text.len() {
-                text.len()
-            } else {
-                rvim_core::text::snap_byte(&text, found.end_col)
-                    + text[rvim_core::text::snap_byte(&text, found.end_col)..]
-                        .chars()
-                        .next()
-                        .map(char::len_utf8)
-                        .unwrap_or(0)
-            };
-            rvim_normal::operators::OpRange {
-                start: Pos::new(found.start_line, found.start_col),
-                end: Pos::new(found.end_line, end_col),
-                linewise: false,
-            }
-        };
-        match op {
-            // In visual mode the object extends the selection instead of being
-            // consumed by an operator.
-            ' ' => {
-                rvim_normal::visual::select_object(self.editor(), object, which)?;
-            }
-            'd' => {
-                rvim_normal::operators::delete_range(self.editor(), range, None)?;
-                self.session.editor.mode = Mode::Normal;
-            }
-            'y' => {
-                rvim_normal::operators::yank_range(self.editor(), range, None)?;
-                self.session.editor.mode = Mode::Normal;
-            }
-            'c' => {
-                self.session.editor.begin_undo_block();
-                rvim_normal::operators::change_range(self.editor(), range, None)?;
-                self.session.editor.mode = Mode::Insert;
-            }
-            _ => self.session.editor.mode = Mode::Normal,
-        }
-        // A visual-mode object keeps the selection; operators end it.
-        if op != 'c' && op != ' ' {
-            self.session.editor.visual = None;
-        }
-        Ok(())
-    }
-
-    /// p/P over a visual selection: replace the selection with the register.
-    fn paste_over_selection(&mut self, key: char) -> VimResult<()> {
-        let Some(range) = rvim_normal::visual::range(&self.session.editor) else {
-            return Ok(());
-        };
-        let data = self
-            .session
-            .editor
-            .registers
-            .unnamed()
-            .cloned()
-            .or_else(|| self.session.editor.registers.get('"').cloned());
-        let Some(data) = data else {
-            return Ok(());
-        };
-        self.session.editor.begin_undo_block();
-        rvim_normal::operators::delete_range(&mut self.session.editor, range, None).ok();
-        self.session.editor.end_undo_block();
-        self.session.editor.visual = None;
-        self.session.editor.mode = Mode::Normal;
-        self.session.editor.registers.yank(None, data);
-        rvim_normal::operators::paste(self.editor(), key, None)?;
+        let _ = rvim_normal::textobjects::apply(self.editor(), op, object, which)?;
         Ok(())
     }
 
@@ -1885,32 +1793,6 @@ fn motion_key(key: &Key) -> Option<char> {
             _ => None,
         },
         Key::Nop => None,
-    }
-}
-
-/// Motions that extend a visual selection.
-fn visual_motion(ch: char) -> Option<char> {
-    match ch {
-        'h' | 'j' | 'k' | 'l' | 'w' | 'W' | 'b' | 'B' | 'e' | 'E' | '0' | '$' | '^' | 'G' => {
-            Some(ch)
-        }
-        _ => None,
-    }
-}
-
-/// Move the cursor for a visual-mode motion.
-fn visual_move(ed: &mut rvim_editor::Editor, motion: char, count: u64) -> VimResult<Pos> {
-    match motion {
-        'w' | 'W' | 'b' | 'B' | 'e' | 'E' => rvim_normal::motions::word_motion(ed, motion, count),
-        '$' => rvim_normal::motions::line_end(ed, count),
-        'G' => rvim_normal::motions::goto_line(ed, count, true),
-        '0' => Ok(Pos::new(ed.cursor().line, 0)),
-        '^' => {
-            let line = ed.cursor().line;
-            let col = ed.current_buffer().first_nonblank_byte(line)?;
-            Ok(Pos::new(line, col))
-        }
-        other => rvim_normal::motions::move_cursor(ed, other, count),
     }
 }
 

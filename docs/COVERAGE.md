@@ -8,11 +8,11 @@
 
 | 指标 | 数值 |
 |---|---|
-| 已实现（声明表口径） | 245 / 589（41.6%） |
+| 已实现（声明表口径） | 246 / 589（41.8%） |
 | 已实现（**用户默认语料对数桶加权**，M2 出口口径） | 104 / 122（**85.2%**） |
 | 广度（语料实际用到的编辑命令中有多少已实现） | 38 / 50（76.0%） |
 | 已实现（用户默认语料原始调用次数加权） | 3171 / 3231（98.1%） |
-| 已实现（全 runtime 语料原始加权，参考） | 111334 / 138894（80.2%） |
+| 已实现（全 runtime 语料原始加权，参考） | 111399 / 138894（80.2%） |
 | 加权语料 | 25 个脚本、3231 条调用（全 runtime 语料：1512 个脚本、138894 条） |
 | 目标（M2 出口） | 对数桶加权 ≥ 60% |
 
@@ -20,7 +20,7 @@
 > 排除 M3 VimL 解释器类命令（`:call` `:if` `:let` 等，见 `rvim-tools/src/freq.rs` 的 `SCRIPTING_M3`）。
 > 原始调用次数加权与全 runtime 语料数字一并给出，避免口径过于讨巧。
 
-## 2. 已实现命令（245 条）
+## 2. 已实现命令（246 条）
 
 按命令表顺序：
 
@@ -42,10 +42,10 @@
 :lclose :left :let :lexpr :lfile :lfirst :lgetfile :lgetexpr :ll :llast 
 :llist :lmap :lmapclear :lnoremap :lnext :lnewer :lolder :lopen :lprevious 
 :lrewind :lunmap :lwindow :ls :move :mark :map :mapclear :marks :messages 
-:new :nmap :nmapclear :nnoremap :noremap :nohlsearch :noreabbrev :number 
-:nunmap :omap :omapclear :only :onoremap :ounmap :print :put :pwd :quit 
-:quitall :qall :read :redo :redraw :registers :resize :retab :return :right 
-:runtime :rviminfo :substitute :saveas :set :setfiletype :setglobal 
+:new :nmap :nmapclear :nnoremap :noremap :nohlsearch :noreabbrev :normal 
+:number :nunmap :omap :omapclear :only :onoremap :ounmap :print :put :pwd 
+:quit :quitall :qall :read :redo :redraw :registers :resize :retab :return 
+:right :runtime :rviminfo :substitute :saveas :set :setfiletype :setglobal 
 :setlocal :silent :smap :smapclear :snoremap :source :sort :split :stop 
 :sunmap :suspend :sview :syntax :t :tabclose :tabdo :tabedit :tabfirst 
 :tabmove :tablast :tabnext :tabnew :tabonly :tabprevious :tabs :throw :try 
@@ -76,7 +76,7 @@
 
 | 类别 | 已实现 | 分母 | 说明 |
 |---|---|---|---|
-| Options | 78 | 429 | 全局选项子集（window/buffer 作用域在 M5） |
+| Options | 80 | 429 | 全局选项子集（window/buffer 作用域在 M5） |
 | 内置函数 | 393 | 543 | 纯函数在 `rvim-viml`，宿主相关在 `rvim-ex`；M3 目标 ≥70% |
 
 

@@ -604,3 +604,188 @@ pub fn format_range(ed: &mut Editor, range: OpRange) -> VimResult<()> {
     ed.set_cursor(Pos::new(first, 0));
     Ok(())
 }
+/// Pending second key of a visual-mode command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VisualPending {
+    /// `g`: `gg`, `g<C-a>`, `g<C-x>`.
+    G,
+    /// `z`: fold commands (`zf` folds the selection).
+    Fold,
+    /// `i`/`a`: the next key names a text object (`true` = around).
+    TextObject(bool),
+}
+
+/// What the caller has to do after a visual-mode key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VisualAction {
+    /// The key was consumed.
+    None,
+    /// `:` was typed: open the command line with the `'<,'>` range prefix.
+    CommandLine,
+}
+
+/// Map a key onto a motion in visual mode (cursormoved by normal.c nv_visual).
+fn visual_motion(ch: char) -> Option<char> {
+    match ch {
+        'h' | 'j' | 'k' | 'l' | 'w' | 'W' | 'b' | 'B' | 'e' | 'E' | '0' | '$' | '^' | 'G' => {
+            Some(ch)
+        }
+        _ => None,
+    }
+}
+
+/// Move the visual cursor by a motion key (normal.c nv_visual -> nv_*).
+fn visual_move(ed: &mut Editor, motion: char, count: u64) -> VimResult<Pos> {
+    match motion {
+        'w' | 'W' | 'b' | 'B' | 'e' | 'E' => crate::motions::word_motion(ed, motion, count),
+        '$' => crate::motions::line_end(ed, count),
+        'G' => crate::motions::goto_line(ed, count, true),
+        '0' => Ok(Pos::new(ed.cursor().line, 0)),
+        '^' => {
+            let line = ed.cursor().line;
+            let col = ed.current_buffer().first_nonblank_byte(line)?;
+            Ok(Pos::new(line, col))
+        }
+        other => crate::motions::move_cursor(ed, other, count),
+    }
+}
+
+/// `p`/`P` over a visual selection: replace it with the register's contents
+/// (ops.c op_yank + put).
+fn paste_over_selection(ed: &mut Editor, key: char) -> VimResult<()> {
+    let Some(range) = range(ed) else {
+        return Ok(());
+    };
+    let Some(data) = ed
+        .registers
+        .unnamed()
+        .cloned()
+        .or_else(|| ed.registers.get('"').cloned())
+    else {
+        return Ok(());
+    };
+    ed.begin_undo_block();
+    let _ = operators::delete_range(ed, range, None);
+    ed.end_undo_block();
+    ed.visual = None;
+    ed.mode = Mode::Normal;
+    ed.registers.yank(None, data);
+    operators::paste(ed, key, None)
+}
+
+/// Dispatch one visual-mode key (normal.c nv_visual).
+///
+/// Shared by the TUI and by `:normal`, so both drive the same state machine.
+/// `pending` carries the second-key state (`i`/`a` text objects, `g`, `z`).
+pub fn key(
+    ed: &mut Editor,
+    engine: &mut crate::NormalEngine,
+    pending: &mut Option<VisualPending>,
+    key: rvim_editor::maps::Key,
+) -> VimResult<VisualAction> {
+    use rvim_editor::maps::Key;
+    if let Some(state) = pending.take() {
+        match state {
+            VisualPending::G => match key {
+                Key::Special(ref name) if name == "C-A" || name == "C-X" => {
+                    let add = name == "C-A";
+                    let count = engine.take_visual_count();
+                    visual_addsub(ed, add, count)?;
+                }
+                Key::Char('g') => {
+                    let count = engine.take_visual_count();
+                    let pos = crate::motions::goto_line(ed, count, false)?;
+                    ed.set_cursor(pos);
+                }
+                _ => {}
+            },
+            VisualPending::Fold => {
+                if let Key::Char(ch) = key {
+                    // zf over a selection creates a fold for exactly that range.
+                    if ch == 'f' && ed.visual.is_some() {
+                        if let Some(range) = range(ed) {
+                            let last = if range.linewise {
+                                range.end.line.saturating_sub(1)
+                            } else {
+                                range.end.line
+                            };
+                            stop(ed);
+                            crate::foldcmd::create_fold(ed, range.start.line, last)?;
+                        }
+                    } else if !crate::foldcmd::feed_z(ed, ch, 1)? {
+                        crate::foldcmd::fold_motion(ed, ch, 1)?;
+                    }
+                }
+            }
+            VisualPending::TextObject(around) => {
+                if let Key::Char(object) = key {
+                    let which = if around { Which::Around } else { Which::Inner };
+                    // A text object only extends the selection in visual mode.
+                    let _ = select_object(ed, object, which)?;
+                }
+            }
+        }
+        return Ok(VisualAction::None);
+    }
+    match key {
+        // vim writes the visual range into the command line.
+        Key::Char(':') => Ok(VisualAction::CommandLine),
+        Key::Char(ch) => {
+            // Digits accumulate a count for the next motion or block insert.
+            if ch.is_ascii_digit() && !(ch == '0' && engine.visual_count().is_none()) {
+                engine.push_visual_digit(ch);
+                return Ok(VisualAction::None);
+            }
+            let count = engine.take_visual_count();
+            match ch {
+                'd' | 'x' => {
+                    let _ = apply_operator(ed, 'd', None)?;
+                }
+                'y' => {
+                    let _ = apply_operator(ed, 'y', None)?;
+                }
+                'c' | 's' => {
+                    let _ = apply_operator(ed, 'c', None)?;
+                }
+                'p' | 'P' => paste_over_selection(ed, ch)?,
+                // Block insert: I at the block's left edge, A after its right
+                // edge (vim only accepts these in blockwise visual mode).
+                'I' | 'A' => {
+                    if ed.mode == Mode::VisualBlock && apply_operator(ed, ch, None)? {
+                        // 3Itext<Esc> repeats the text three times per line.
+                        engine.set_insert_repeat(count);
+                    }
+                }
+                '>' | '<' | '~' | 'u' | 'U' | 'J' => {
+                    let _ = apply_operator(ed, ch, None)?;
+                }
+                'o' | 'O' => swap_ends(ed)?,
+                'i' | 'a' => *pending = Some(VisualPending::TextObject(ch == 'a')),
+                'g' => *pending = Some(VisualPending::G),
+                'z' => *pending = Some(VisualPending::Fold),
+                _ => {
+                    if let Some(motion) = visual_motion(ch) {
+                        let pos = visual_move(ed, motion, count)?;
+                        ed.set_cursor(pos);
+                    }
+                }
+            }
+            Ok(VisualAction::None)
+        }
+        Key::Special(name) => {
+            let motion = match name.as_str() {
+                "LEFT" => 'h',
+                "RIGHT" => 'l',
+                "UP" => 'k',
+                "DOWN" => 'j',
+                "HOME" => '0',
+                "END" => '$',
+                _ => return Ok(VisualAction::None),
+            };
+            let pos = visual_move(ed, motion, 1)?;
+            ed.set_cursor(pos);
+            Ok(VisualAction::None)
+        }
+        Key::Nop => Ok(VisualAction::None),
+    }
+}

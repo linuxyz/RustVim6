@@ -13,6 +13,7 @@ pub mod textobjects;
 pub mod visual;
 
 use rvim_core::{Pos, VimError, VimResult};
+use rvim_editor::maps::Key;
 use rvim_editor::{Editor, Mode, RegType, RepeatChange};
 
 /// Sentinel stored while waiting for the mark name after the "m" key.
@@ -38,11 +39,21 @@ pub struct NormalEngine {
     pending_register: Option<char>,
     /// Text typed during the current insert session, for the "." register.
     insert_text: String,
+    /// Keys typed during the current insert session (vim's redo buffer). The
+    /// session is replayed key by key, so <BS>/<C-w>/<C-u> repeat and counts
+    /// behave like the original keystrokes (edit.c start_redo_ins()).
+    pub(crate) insert_keys: Vec<Key>,
+    /// `<C-r>` was typed: the next key names the register to insert.
+    pub(crate) insert_pending_register: bool,
+    /// Position where the current insert session started (edit.c Insstart).
+    pub(crate) insert_start: Pos,
     /// Count given to the insert command (`3i`, `3o`, ...); vim repeats the
     /// typed text that many times when <Esc> is pressed (edit.c ins_esc()).
     insert_repeat: u64,
     /// Which insert entry was used (i/a/A/I/o/O), needed to repeat correctly.
     insert_entry: char,
+    /// Count typed in visual mode (\`v3j\`, \`2I\`).
+    visual_count: Option<u64>,
 }
 
 impl NormalEngine {
@@ -78,6 +89,28 @@ impl NormalEngine {
     /// `I`/`A`, where the front-end owns the count, and by `.` replay).
     pub fn set_insert_repeat(&mut self, count: u64) {
         self.insert_repeat = count.max(1);
+    }
+
+    /// Visual-mode count typed so far (digits accumulate like normal mode).
+    pub fn visual_count(&self) -> Option<u64> {
+        self.visual_count
+    }
+
+    /// Accumulate one visual-mode count digit.
+    pub fn push_visual_digit(&mut self, ch: char) {
+        let digit = ch.to_digit(10).unwrap_or(0) as u64;
+        let cur = self.visual_count.unwrap_or(0);
+        self.visual_count = Some(cur.saturating_mul(10).saturating_add(digit));
+    }
+
+    /// Consume the visual-mode count (defaults to 1, like `take_count`).
+    pub fn take_visual_count(&mut self) -> u64 {
+        self.visual_count.take().unwrap_or(1)
+    }
+
+    /// Drop a visual-mode count (`<Esc>`).
+    pub fn clear_visual_count(&mut self) {
+        self.visual_count = None;
     }
 
     /// Drop a count or register prefix typed before <Esc> (normal.c nv_esc).
@@ -204,9 +237,8 @@ impl NormalEngine {
                 // so the whole session becomes one undo step.
                 ed.begin_undo_block();
                 insert::enter_insert(ed, key)?;
-                self.insert_text.clear();
-                self.insert_repeat = count.max(1);
-                self.insert_entry = key;
+                let start = ed.cursor();
+                self.start_insert_session(start, count, key);
                 // enter_insert switches to Mode::Insert; do not fall through to
                 // the unconditional Normal reset below.
                 return Ok(true);
@@ -342,10 +374,25 @@ impl NormalEngine {
                 // The deletion and the text typed afterwards are one undo step,
                 // so the block opens before the range is removed.
                 ed.begin_undo_block();
+                // 'autoindent' keeps the indent of the first changed line
+                // (ops.c op_change() -> ins_char eol handling).
+                let indent = if range.linewise {
+                    let text = ed.current_buffer().line_str(range.start.line)?;
+                    if ed.bool_option("autoindent", false) {
+                        insert::indent_of_line(text)
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                };
                 operators::change_range(ed, range, reg)?;
-                self.insert_text.clear();
-                self.insert_repeat = 1;
-                self.insert_entry = 'i';
+                if !indent.is_empty() {
+                    ed.insert_text(Pos::new(range.start.line, 0), &indent)?;
+                    ed.set_cursor(Pos::new(range.start.line, indent.len()));
+                }
+                let start = ed.cursor();
+                self.start_insert_session(start, 1, 'i');
                 ed.mode = Mode::Insert;
             }
             _ => ed.mode = Mode::Normal,
@@ -358,23 +405,36 @@ impl NormalEngine {
     /// vim does not copy the text: it re-executes the whole insertion from the
     /// redo buffer, so the entry key runs again at the current cursor. That is
     /// what puts `3o` below the previous copy, `3O` above it (the cursor ends on
-    /// the last inserted line either way) and keeps a multi-line text intact.
+    /// the last inserted line either way), and replaying the *keys* means
+    /// `3ifoo<C-w>bar<Esc>` repeats the correction as well.
     fn repeat_insert_text(
         &mut self,
         ed: &mut Editor,
-        text: &str,
+        keys: &[Key],
         times: u64,
         entry: char,
     ) -> VimResult<()> {
         for _ in 0..times {
             insert::enter_insert(ed, entry)?;
-            for ch in text.chars() {
-                insert::type_char(ed, self, ch)?;
+            for key in keys {
+                insert::key(ed, self, key.clone())?;
             }
         }
-        // The replay recorded the text again; this session already stored it.
+        // The replay recorded the keys again; this session already stored them.
         self.insert_text.clear();
+        self.insert_keys.clear();
         Ok(())
+    }
+
+    /// Start an insert session: clear the redo buffer and remember the entry
+    /// point (edit.c start_redo_ins() / Insstart).
+    fn start_insert_session(&mut self, pos: Pos, count: u64, entry: char) {
+        self.insert_text.clear();
+        self.insert_keys.clear();
+        self.insert_pending_register = false;
+        self.insert_start = pos;
+        self.insert_repeat = count.max(1);
+        self.insert_entry = entry;
     }
     /// While in RegisterPending after "m", bind the mark name.
     pub fn complete_mark(&mut self, ed: &mut Editor, name: char) -> VimResult<()> {
@@ -401,17 +461,25 @@ impl NormalEngine {
         self.insert_text.push_str(text);
     }
 
+    /// Record one key of the current insert session (vim's redo buffer).
+    pub fn note_key(&mut self, key: Key) {
+        self.insert_keys.push(key);
+    }
+
     pub fn finish_insert(&mut self, ed: &mut Editor) {
         let text = std::mem::take(&mut self.insert_text);
+        let keys = std::mem::take(&mut self.insert_keys);
         let repeat = std::mem::take(&mut self.insert_repeat).max(1);
         let entry = std::mem::replace(&mut self.insert_entry, 'i');
+        self.insert_pending_register = false;
         if !text.is_empty() {
             ed.registers.set_last_insert(text.clone());
         }
-        // A count on the insert command repeats the typed text (vim: "3iabc<Esc>"
-        // inserts "abcabcabc"). The first copy is already in the buffer.
-        if repeat > 1 && !text.is_empty() {
-            let result = self.repeat_insert_text(ed, &text, repeat - 1, entry);
+        // A count on the insert command repeats the typed keys (vim:
+        // "3iabc<Esc>" inserts "abcabcabc"). The first copy is already in the
+        // buffer.
+        if repeat > 1 && !keys.is_empty() {
+            let result = self.repeat_insert_text(ed, &keys, repeat - 1, entry);
             if let Err(e) = result {
                 ed.emsg(e.to_string());
             }
@@ -425,10 +493,7 @@ impl NormalEngine {
             }
         }
         if !text.is_empty() {
-            ed.last_change = Some(RepeatChange::Insert {
-                entry,
-                text: text.clone(),
-            });
+            ed.last_change = Some(RepeatChange::Insert { entry, keys });
         }
         ed.end_undo_block();
         ed.mode = Mode::Normal;
@@ -445,14 +510,16 @@ impl NormalEngine {
         };
         for _ in 0..count.max(1) {
             match change.clone() {
-                RepeatChange::Insert { entry, text } => {
+                RepeatChange::Insert { entry, keys } => {
                     ed.begin_undo_block();
                     insert::enter_insert(ed, entry)?;
-                    for ch in text.chars() {
-                        insert::type_char(ed, self, ch)?;
+                    let start = ed.cursor();
+                    self.start_insert_session(start, 1, entry);
+                    for key in &keys {
+                        insert::key(ed, self, key.clone())?;
                     }
                     self.finish_insert(ed);
-                    ed.last_change = Some(RepeatChange::Insert { entry, text });
+                    ed.last_change = Some(RepeatChange::Insert { entry, keys });
                 }
                 RepeatChange::Operator { op, motion, count } => {
                     if motion == 'g' {

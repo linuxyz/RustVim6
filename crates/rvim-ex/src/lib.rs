@@ -14,6 +14,7 @@ pub mod handlers_diff;
 pub mod handlers_edit;
 pub mod handlers_fold;
 pub mod handlers_map;
+pub mod handlers_normal;
 pub mod handlers_qf;
 pub mod handlers_script;
 pub mod handlers_session;

@@ -530,6 +530,21 @@ fn defs() -> Vec<OptDef> {
             kind: OptKind::Bool,
             default: OptValue::Bool(false),
         },
+        // ---- options the runtime scripts read before M5 (packpath/maxfuncdepth)
+        OptDef {
+            name: "packpath",
+            short: "pp",
+            kind: OptKind::Str,
+            // Vim defaults it to `'runtimepath'`; the empty string makes
+            // `:runtime` fall back to 'runtimepath' (handlers_script.rs).
+            default: OptValue::Str("".into()),
+        },
+        OptDef {
+            name: "maxfuncdepth",
+            short: "mfd",
+            kind: OptKind::Num,
+            default: OptValue::Num(100),
+        },
     ]
 }
 

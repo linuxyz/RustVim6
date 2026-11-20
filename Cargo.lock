@@ -69,6 +69,7 @@ dependencies = [
  "rvim-buffer",
  "rvim-core",
  "rvim-editor",
+ "rvim-normal",
  "rvim-viml",
 ]
 

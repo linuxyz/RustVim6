@@ -142,14 +142,14 @@
 
 | 主题 | Vim | RustVim | 收口 |
 |---|---|---|---|
-| 视觉模式 / 鼠标 | `v/V/<C-v>`、`set mouse` | ❌ 未实现（`feed` 仅 normal/insert） | M5 |
-| 软换行 / `relativenumber` / `scrolloff` | `'wrap'` 默认开 | ❌ 仅横向滚动；无 `relativenumber`/`scrolloff` | M5 |
-| 命令行历史键 | `<Up>/<Down>` 召回历史 | ⚠️ `rvim-cmdline` 的历史模型已就绪，但未接入 TUI 键盘 | M5 |
+| 视觉模式 | `v/V/<C-v>`、操作符、块插入 | ✅ M5 实现（`rvim-normal::visual`，TUI 与 `:normal` 共用同一个状态机） | — |
+| 软换行 / `relativenumber` / `scrolloff` | `'wrap'` 默认开 | ⚠️ `'relativenumber'`/`'scrolloff'`/`'sidescrolloff'` 已实现（补齐复核）；软换行（`'wrap'`）仍只做横向滚动 | 收口时补 |
+| 命令行历史键 | `<Up>/<Down>`/`<C-p>`/`<C-n>` 召回历史，前缀匹配，`<Down>` 越过最新一条时恢复正在编辑的行 | ✅ 补齐复核接入 TUI（`Tui::recall_history`，`:` 与 `/`/`?` 各自独立）；`<C-u>`/`<C-w>` 行编辑同时补上 | `command_line_history_*`（`m4_tui.rs`） |
 | `<expr>` 映射 | 求值 RHS 作为按键 | ⚠️ 显式 `E15`（需把 M3 求值器传入展开循环） | M5 |
 | `<t_xx>` 与鼠标键 | terminfo 字节序列、鼠标事件分发 | ⚠️ `<t_xx>` 可解析/列出但无 terminfo 无法编码成字节；鼠标键名可解析可映射，解码与 `set mouse` 待 M5 | M5 |
 | `:!` 外部命令显示 | 命令输出 + `Press ENTER` 提示 | ⚠️ 输出直接写终端后重绘，无 hit-enter | M5 |
-| 插入模式的 `<C-w>`/`<C-u>`/`<C-r>`/`<C-a>` | 删前一词、删到行首、插入寄存器、重新插入上次文本 | ❌ 未绑定（`<Esc>`/`<CR>`/`<BS>`/`<Del>`/方向键已接） | M5 |
-| `'autoindent'`/`'smartindent'` 换行缩进 | 插入模式 `<CR>` 继承当前缩进 | ❌ 换行后从第 1 列开始 | M5 |
+| 插入模式的 `<C-w>`/`<C-u>`/`<C-r>`/`<C-a>`/`<C-t>`/`<C-d>` | 删前一词、删到行首、插入寄存器、重新插入上次文本、左右缩进 | ✅ 补齐复核实现，且插入会话改为记录**键序**（vim 的 redo buffer），所以 `3i`/`.` 会连同 `<BS>`/`<C-w>` 一起重放 | `insert_ctrl_*`、`counted_insert_replays_the_keys`（`m4_tui.rs`） |
+| `'autoindent'` 换行缩进 | 插入模式 `<CR>`、`o`/`O`、`cc`/`S` 继承当前缩进 | ✅ 补齐复核实现 `'autoindent'`；`'smartindent'`/`'cindent'` 仍未实现 | `autoindent_*`（`m4_tui.rs`） |
 | `<C-a>`/`<C-x>` 数字增减 | 光标下（或下一个）数字 +1/-1，支持计数与 `nrformats` | ✅ M5 已实现（`rvim-normal::addsub`，见 §9）；仅未做视觉模式 `g<C-a>` 与 64 位回绕 | — |
 | 长消息软折行 | 超过窗口宽度的消息折行显示并分页 | ⚠️ 单行内截断，`-- More --` 只按消息条数分页 | M5 |
 | `'termguicolors'` / 语法高亮颜色 | 真彩 + 高亮组 | ⚠️ 颜色模型支持 256/真彩，但无高亮组（等 syntax） | M6 |
@@ -246,12 +246,12 @@
 | `:s` 替换特殊项 | `\1`-`\9`、`\u\l\e\E`、`\=` 表达式 | 仅 `&`/`\&`、`\n`、`\t`、`\\`；反向引用与大小写修饰未实现 | M6 |
 | `b:`/`w:`/`t:` 作用域字典 | 写穿透到真实变量 | 读可用、写不传播（快照） | M3 后续 |
 | `:move` 内标记 | 移动范围中的标记随文本移动 | delete+insert 组合导致标记不跟随 | M3 后续（ex 侧 move-aware adjust） |
-| `:s///c` 确认 | 交互确认 | 忽略 `c`（批处理无输入层） | M5（接输入层） |
+| `:s///c` 确认 | 交互确认 | 忽略 `c`（批处理无输入层） | 收口时接输入层 |
 | 撤销粒度/光标 | 脚本执行期间不 sync undo（整脚本一步）；undo 后光标在首个被撤销行 | `:s`/`:g`/`:>`/`:retab` 等多行命令已是一个 undo 步；整个脚本仍按命令分步；undo 光标取记录位置（文本正确） | M5（undo 树/分组） |
-| `'packpath'` | 429 项之一，`:runtime START/OPT` 按 packpath 搜索 | 选项表暂无 `packpath`：`:runtime START/OPT` 退化为 `'runtimepath'`（与 vim 默认 packpath 相同），`:set packpath=` 报 E518 | M5（随选项表扩充） |
+| `'packpath'` | 429 项之一，`:runtime START/OPT` 按 packpath 搜索 | ✅ 补齐复核补入选项表（默认空 → `:runtime START/OPT` 退化为 `'runtimepath'`，与 vim 默认 packpath 相同） | — |
 | 用户命令 `-range=%`/`-range=N` | `UserCommand` 保存缺省范围/count 属性 | 功能正确，但内部用 count 槽编码缺省范围，`:command` 列表会显示哨兵值 | M3 收口 |
 | `:g` 内的其他行数变更命令 | pass2 用标记跟踪行移动，任意子命令都正确 | 行移动跟踪覆盖 delete/move/copy 族子命令；`:g/x/j` 等其它改变行数的子命令可能让后续匹配行号偏移 | M3 后续 |
-| `'maxfuncdepth'` | 可设置选项（默认 100） | 深度上限固定 100（`funcdepth_limit()` 读选项但选项表暂无该项） | M5（随选项表扩充） |
+| `'maxfuncdepth'` | 可设置选项（默认 100） | ✅ 补齐复核补入选项表，深度上限按该选项读取（`script.rs`/`eval.rs`） | — |
 | `dict` 函数 `self` | 完整 dict-function 绑定 | 仅绑定首个字典参数 | M4/M5 |
 | `v:` 变量 | 完整集合 | 常用子集（含 v:true/false/null、v:exception、v:errmsg 等） | 随需求补 |
 | 选项作用域 | 429 项、global/window/buffer | 56 项、全局模型；`setglobal` 不保留 buffer 局部值 | M5 |
@@ -308,23 +308,30 @@
 | quickfix | 缺失（`setqflist()` 返回空、`:copen` 未实现） | `rvim-ex::errorformat` + `rvim-editor::quickfix`（10 层栈、qflist/loclist、qf 窗口）+ `c*`/`l*` 全族命令与 4 个内置函数 |
 | 折叠 | M2 占位（`MoreState.folds` 从未填充，`foldclosed()` 永远 -1） | 新增 `rvim-editor::fold`（每窗口一份折叠表、manual/indent/marker/diff）、`rvim-normal::foldcmd`（z 系列）、`:fold*` 命令；TUI 渲染折叠摘要与 `'foldcolumn'` |
 | 跳转/change list | `jumplist` 只有空结构，`:jumps` 未实现 | `Editor` 新增真实 jump/change list，`<C-o>`/`<C-i>`、`:jumps`、`:changes` 可用；viminfo 读写（`:wviminfo`/`:rviminfo`/`-i`/`'viminfo'`） |
-| sign/textprop/popup | 数据面完整但不可见 | TUI 新增 sign 列（`'signcolumn'=auto` 时按需占位）与 popup 覆盖层；`prop_*` 仍只做数据面 |
+## 10. M0–M5 补齐复核（执行层缺口）
 
-### 9.1 本轮登记但未实现的偏差（显式记录，不静默）
+> 复核方式：把 PLAN 里「已登记、留给后续里程碑」的条目逐条对照代码与 `reference/vim/src`，
+> 补齐真正缺失的执行层能力。回归用例集中在 `crates/rvim-app/tests/m4_tui.rs`（75 例）与
+> `m2_features.rs`（46 例），以及 `rvim-normal` 单测。
+
+| 主题 | 问题 | 修正 |
+|---|---|---|
+| `:normal` / `:normal!` | M2 起登记为「→ M3/M4」，一直未实现（脚本与冒烟里的 `:normal` 会报未实现） | 新增 `rvim-ex::handlers_normal`，按 `ex_docmd.c ex_normal()` 用同一套状态机执行 normal/insert/visual 键：无范围只跑一次、有范围逐行从列 1 开始；`!` 关闭映射（REMAP_NONE，无 `!` 走 `Maps::expand`）；参数停在半截时按 `<Esc>` 收尾；整次调用是**一个** undo 步；计数、寄存器、`gg`/`dgg`、文本对象、`z*`、`]c`/`[c`、`<C-w>` 全部可用 |
+| 插入模式控制键 | `<C-w>` `<C-u>` `<C-r>` `<C-a>` `<C-t>` `<C-d>` 被无声丢弃 | `rvim-normal::insert::key()` 成为唯一入口（TUI、计数重放、`:normal` 共用），按 `edit.c ins_bs()/ins_reg()/ins_ctrl_a()/ins_shift()` 实现，含 `'backspace'` 的 `indent`/`eol` 语义 |
+| 插入会话的重放模型 | 按**文本**重放：`3ifoo<BS>x` 会把删掉的字符再插回去，`.` 同样 | 改为记录**键序**（`NormalEngine::insert_keys`，vim 的 redo buffer）：计数插入与 `.` 重放键序，删除类按键一并重放 |
+| `'autoindent'` | 选项存在但没有任何效果 | `<CR>`/`o`/`O`/`cc` 复制当前行缩进（`edit.c ins_eol()/open_line()`、`ops.c op_change()`） |
+| 命令行历史键 | `rvim-cmdline` 有历史模型，但 TUI 键盘没接线 | `<Up>`/`<Down>`/`<C-p>`/`<C-n>`（wildmenu 打开时仍是补全）、前缀匹配、`<Down>` 越过最新一条时恢复正在编辑的行、执行时入历史；顺带补 `<C-u>`/`<C-w>` 行编辑 |
+| `'relativenumber'` | 选项存在但 TUI 不画 | 行号栏按 `screen.c` 语义：光标行显示绝对号，其余行显示距离 |
+| `'scrolloff'`/`'sidescrolloff'` | 选项存在但滚动不理会 | `scroll_windows()` 保持光标与窗口边缘的距离（上限为半屏），并限制 `top` 使末行最多停在窗口底行 |
+| `'packpath'`/`'maxfuncdepth'` | 选项表缺失，`:set` 报 E518 | 补入选项表；`'maxfuncdepth'` 成为函数深度上限的选项来源 |
+| 视觉模式状态机 | 只在 TUI 里实现，`:normal` 无法执行 `Vjd` 一类命令 | `rvim-normal::visual::key()` 抽取为共享状态机（`VisualPending`/`VisualAction`），TUI 与 `:normal` 共用；文本对象同样经 `rvim-normal::textobjects::apply()` 共享 |
+
+**本轮登记但未实现**：
 
 | 主题 | Vim | RustVim | 收口 |
 |---|---|---|---|
-| `'foldtext'` 自定义表达式 | 支持表达式/函数 | 只实现默认 `foldtext()` 文本 | M6 随表达式求值接线 |
-| `foldmethod=expr`/`syntax` | 求值/语法驱动 | 保留手动折叠并显式报告不支持 | M6 |
-| `:diffpatch` | 从 patch 生成对照缓冲 | 未实现 | 收口时评估 |
-| `'diffopt'` | icase/iwhite/context 等 | 固定行为（filler + 6 行上下文），不接受选项 | 收口时补 |
-| quickfix 多窗口 | 每标签页可各开一个 qf 窗口 | 只建模一个 qf 窗口，`:lopen` 复用 | 收口时补 |
-| `'buftype'` | qf 窗口 `buftype=quickfix` | 选项表无该项，用 `Window.quickfix` 标记 | 随选项表扩充 |
-| textprop 高亮 | `prop_add` 影响显示 | 只存数据，渲染忽略 | M6 随 syntax 一起接 |
-| popup filter/回调 | `filter`/`callback` 可选 | 仅数据面 + 静态覆盖层 | M7 |
-| viminfo 字段 | 全字段（含 jumplist/搜索模式） | marks/registers/history/cwd/global 子集，UTF-8 文本 | 收口时补 |
-| `w:`/`t:` 变量 | 写穿透真实窗口/标签 | 按窗口/标签字典存放，外部切换在下一次内置函数调用时同步 | M6 |
-| `<C-w>r`/`x`/`H J K L` | 调整 frame 树位置 | 交换/轮转窗口“内容”（几何不变），两窗口情形等价 | 收口时按 frame 重写 |
-| 每缓冲窗口位置 | 每个窗口记住每个缓冲的光标/视口 | 换缓冲时视口跟随该缓冲最后光标 | 收口时补 `b_wininfo` |
-| 列选模式的列 | 用虚拟列（`curswant`），短行被夹住后块仍是原宽度，`A` 会补齐到该宽度 | 用字节列：`<C-v>` 的块右边界取 anchor 与光标的**当前**字节列，光标在短行被夹住时块会变窄（`<C-v>lllj` 在 `abcd`/`x` 上得到 0..1 而不是 0..3） | 收口时引入 `getvcol()/curswant` 虚拟列模型 |
-
+| `:normal` 里的命令/搜索输入 | `:normal! :s/a/b/` 会进入命令行 | `:` 让序列提前结束；`/`/`?`/`n`/`N` 未执行（键被忽略） | 收口时把搜索与命令行接入共享状态机 |
+| `:normal` 的未实现普通命令 | `f/t/r`、`=`、`gq` 族等 | 引擎没有的命令键被忽略（vim 是 beep 后继续） | 随 normal 引擎扩充 |
+| `'smartindent'`/`'cindent'` | 智能缩进 | 未实现（`:set si`/E518 仍报未知选项） | M6 |
+| 软换行 `'wrap'` | 长行折行显示 | 只做横向滚动 | 收口时补 |
+| 鼠标与 `<expr>` 映射 | `set mouse`、RHS 求值 | 未实现（`<expr>` 显式 E15） | M5 收口后续 |

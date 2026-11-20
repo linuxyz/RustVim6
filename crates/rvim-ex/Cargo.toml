@@ -13,4 +13,5 @@ workspace = true
 rvim-core = { path = "../rvim-core" }
 rvim-buffer = { path = "../rvim-buffer" }
 rvim-editor = { path = "../rvim-editor" }
+rvim-normal = { path = "../rvim-normal" }
 rvim-viml = { path = "../rvim-viml" }

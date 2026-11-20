@@ -87,6 +87,85 @@ pub fn text_object(
     buf.to_range(raw)
 }
 
+/// Apply an operator to the text object under the cursor (`diw`, `ya(`, `ci"`).
+///
+/// `op == ' '` marks the visual-mode form: the object only *extends* the
+/// selection (normal.c nv_object); every other operator consumes it. Returns
+/// false when no object is found there.
+pub fn apply(
+    ed: &mut rvim_editor::Editor,
+    op: char,
+    object: char,
+    which: Which,
+) -> rvim_core::VimResult<bool> {
+    use rvim_core::Pos;
+    use rvim_editor::Mode;
+
+    let lines: Vec<String> = (0..ed.line_count())
+        .filter_map(|i| ed.current_buffer().line_str(i).ok().map(str::to_string))
+        .collect();
+    let cursor = ed.cursor();
+    let Some(found) = text_object(&lines, (cursor.line, cursor.col), object, which) else {
+        if ed.mode.is_visual() {
+            // A missing object just leaves the selection alone.
+            return Ok(false);
+        }
+        ed.mode = Mode::Normal;
+        return Ok(false);
+    };
+    let op = if ed.mode.is_visual() { ' ' } else { op };
+    if op == ' ' {
+        crate::visual::select_object(ed, object, which)?;
+        return Ok(true);
+    }
+    // Text objects report the byte offset of their last character; the
+    // operators take an exclusive end (a linewise object covers whole lines).
+    let range = if found.linewise {
+        crate::operators::line_range(found.start_line, found.end_line, ed.line_count())
+    } else {
+        let text = ed
+            .current_buffer()
+            .line_str(found.end_line)
+            .unwrap_or("")
+            .to_string();
+        let end_col = if found.end_col >= text.len() {
+            text.len()
+        } else {
+            let snapped = rvim_core::text::snap_byte(&text, found.end_col);
+            snapped
+                + text[snapped..]
+                    .chars()
+                    .next()
+                    .map(char::len_utf8)
+                    .unwrap_or(0)
+        };
+        crate::operators::OpRange {
+            start: Pos::new(found.start_line, found.start_col),
+            end: Pos::new(found.end_line, end_col),
+            linewise: false,
+        }
+    };
+    match op {
+        'd' => {
+            crate::operators::delete_range(ed, range, None)?;
+            ed.mode = Mode::Normal;
+        }
+        'y' => {
+            crate::operators::yank_range(ed, range, None)?;
+            ed.mode = Mode::Normal;
+        }
+        'c' => {
+            ed.begin_undo_block();
+            crate::operators::change_range(ed, range, None)?;
+            ed.mode = Mode::Insert;
+        }
+        _ => ed.mode = Mode::Normal,
+    }
+    // An operator ends the visual selection.
+    ed.visual = None;
+    Ok(true)
+}
+
 /// A character position: line index plus index into that line's characters.
 /// col may equal the line length, Vim's NUL position past the last char.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

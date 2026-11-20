@@ -1033,3 +1033,132 @@ fn ctrl_a_repeats_with_dot_and_undoes_in_one_step() {
     screen(&mut tui, "u", 30, 5);
     assert_eq!(line_text(&tui), "44", "one undo step per increment");
 }
+// ------------------------------------------------ command line and history
+
+#[test]
+fn command_line_history_recalls_previous_lines() {
+    let session = open(&["one"]);
+    let mut tui = Tui::new(session);
+    let rows = screen(&mut tui, ":echo 42<CR>:<Up><CR>", 30, 5);
+    assert_eq!(rows[4], "42", "the recalled line ran again");
+}
+
+#[test]
+fn command_line_history_restores_the_typed_line() {
+    let session = open(&["one"]);
+    let mut tui = Tui::new(session);
+    let _ = screen(&mut tui, ":echo 42<CR>:<Up>", 30, 5);
+    assert_eq!(tui.cmdline.as_ref().unwrap().text, "echo 42");
+    // <Down> past the newest entry brings back the line being edited.
+    let _ = screen(&mut tui, "<Down>", 30, 5);
+    assert_eq!(tui.cmdline.as_ref().unwrap().text, "");
+}
+
+#[test]
+fn command_line_history_matches_the_typed_prefix() {
+    let session = open(&["one"]);
+    let mut tui = Tui::new(session);
+    let _ = screen(&mut tui, ":echo 11<CR>:set nu<CR>:ec<C-P>", 30, 5);
+    assert_eq!(tui.cmdline.as_ref().unwrap().text, "echo 11");
+}
+
+// ------------------------------------------------------- insert-mode keys
+
+#[test]
+fn insert_ctrl_w_deletes_the_word_before_the_cursor() {
+    let session = open(&["one"]);
+    let mut tui = Tui::new(session);
+    let rows = screen(&mut tui, "A foo bar<C-w>baz<Esc>", 30, 5);
+    assert_eq!(rows[0], "one foo baz");
+}
+
+#[test]
+fn insert_ctrl_u_deletes_back_to_where_the_insert_started() {
+    let session = open(&["one"]);
+    let mut tui = Tui::new(session);
+    let rows = screen(&mut tui, "Afoo bar<C-u>X<Esc>", 30, 5);
+    assert_eq!(rows[0], "oneX");
+}
+
+#[test]
+fn insert_ctrl_r_inserts_a_register() {
+    let session = open(&["one"]);
+    let mut tui = Tui::new(session);
+    let rows = screen(&mut tui, "yyA <C-r>0<Esc>", 30, 5);
+    assert_eq!(rows[0], "one one");
+}
+
+#[test]
+fn insert_ctrl_t_and_ctrl_d_shift_the_line() {
+    let session = open(&["one"]);
+    let mut tui = Tui::new(session);
+    let rows = screen(&mut tui, ":set sw=4 et<CR>cchello<C-t><Esc>", 30, 5);
+    assert_eq!(rows[0], "    hello");
+    let rows = screen(&mut tui, "0i<C-d><Esc>", 30, 5);
+    assert_eq!(rows[0], "hello");
+}
+
+#[test]
+fn autoindent_is_copied_to_new_lines() {
+    let session = open(&["    indented"]);
+    let mut tui = Tui::new(session);
+    let rows = screen(&mut tui, ":set ai<CR>ohello<CR>world<Esc>", 30, 6);
+    assert_eq!(rows[0], "    indented");
+    assert_eq!(rows[1], "    hello", "o copies the indent");
+    assert_eq!(rows[2], "    world", "<CR> copies it again");
+}
+
+#[test]
+fn autoindent_keeps_the_indent_for_cc() {
+    let session = open(&["    keep", "second"]);
+    let mut tui = Tui::new(session);
+    let rows = screen(&mut tui, ":set ai<CR>cchello<Esc>", 30, 6);
+    assert_eq!(rows[0], "    hello");
+}
+
+#[test]
+fn dot_repeats_an_insert_including_its_corrections() {
+    let session = open(&["a b c"]);
+    let mut tui = Tui::new(session);
+    let rows = screen(&mut tui, "ifoo<C-w>bar <Esc>2w.", 30, 5);
+    assert_eq!(rows[0], "bar a bar b c");
+}
+
+#[test]
+fn counted_insert_replays_the_keys() {
+    let session = open(&[""]);
+    let mut tui = Tui::new(session);
+    // "abc<BS>" typed twice: the replay must delete as well as insert.
+    let rows = screen(&mut tui, "2iabc<BS><Esc>", 30, 5);
+    assert_eq!(rows[0], "abab");
+}
+
+// ------------------------------------------------ relativenumber / scrolloff
+
+#[test]
+fn relativenumber_numbers_the_other_rows_by_distance() {
+    let lines: Vec<String> = (1..=9).map(|n| format!("row{n}")).collect();
+    let mut session = Session::new();
+    session.editor.replace_lines(0, 1, lines).unwrap();
+    let mut tui = Tui::new(session);
+    let rows = screen(&mut tui, ":set rnu<CR>5G", 16, 8);
+    assert_eq!(rows[0], "4 row1");
+    assert_eq!(rows[3], "1 row4");
+    assert_eq!(
+        rows[4], "5 row5",
+        "the cursor row keeps the absolute number"
+    );
+    assert_eq!(rows[5], "1 row6");
+}
+
+#[test]
+fn scrolloff_keeps_the_cursor_away_from_the_edges() {
+    let lines: Vec<String> = (1..=9).map(|n| format!("row{n}")).collect();
+    let mut session = Session::new();
+    session.editor.replace_lines(0, 1, lines).unwrap();
+    let mut tui = Tui::new(session);
+    let rows = screen(&mut tui, ":set so=2<CR>7G", 16, 8);
+    assert_eq!(rows[0], "row4");
+    assert_eq!(rows[3], "row7");
+    assert_eq!(rows[5], "row9");
+}

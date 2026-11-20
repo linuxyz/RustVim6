@@ -200,6 +200,7 @@ impl_implemented![
     "quitall",
     "read",
     "redo",
+    "normal",
     "rviminfo",
     "redraw",
     "registers",
@@ -835,6 +836,7 @@ pub fn run_command_ctx(
             Ok(ExOutcome::Continue)
         }
         "redraw" => Ok(ExOutcome::Continue),
+        "normal" => crate::handlers_normal::cmd_normal(ed, p),
         "!" => cmd_shell(ed, p),
         other if crate::handlers_map::is_map_command(other) => {
             crate::handlers_map::map_command(ed, p)

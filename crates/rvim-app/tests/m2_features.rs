@@ -542,3 +542,64 @@ fn delete_with_list_flag_prints_deleted_lines() {
     assert_eq!(text(&s), "kept");
     assert!(s.message_history().iter().any(|m| m == "gone$"));
 }
+// ------------------------------------------------------------- :normal
+
+#[test]
+fn normal_runs_normal_mode_keys() {
+    let mut s = Session::new();
+    seed(&mut s, &["one", "two", "three"]);
+    s.ex("normal! A;").unwrap();
+    assert_eq!(text(&s), "one;\ntwo\nthree");
+    s.ex("normal! jdd").unwrap();
+    assert_eq!(text(&s), "one;\nthree");
+}
+
+#[test]
+fn normal_with_a_range_runs_once_per_line() {
+    let mut s = Session::new();
+    seed(&mut s, &["one", "two", "three"]);
+    s.ex("1,2normal! A;").unwrap();
+    assert_eq!(text(&s), "one;\ntwo;\nthree");
+}
+
+#[test]
+fn normal_uses_mappings_unless_banged() {
+    let mut s = Session::new();
+    seed(&mut s, &["one", "two"]);
+    s.ex("nmap Q dd").unwrap();
+    s.ex("normal! Q").unwrap();
+    assert_eq!(text(&s), "one\ntwo", "!: mappings are not applied");
+    s.ex("normal Q").unwrap();
+    assert_eq!(text(&s), "two", "without ! the mapping runs (dd on line 1)");
+}
+
+#[test]
+fn normal_can_enter_insert_and_visual_modes() {
+    let mut s = Session::new();
+    seed(&mut s, &["one two"]);
+    s.ex("normal! VU").unwrap();
+    assert_eq!(text(&s), "ONE TWO", "visual-mode U uppercases the line");
+    s.ex("normal! wdiw").unwrap();
+    assert_eq!(text(&s), "ONE ", "text objects work");
+    s.ex("normal! 0ifoo<Esc>").unwrap();
+    assert_eq!(text(&s), "fooONE ", "insert mode keys run");
+}
+
+#[test]
+fn normal_is_a_single_undo_step() {
+    let mut s = Session::new();
+    seed(&mut s, &["one", "two"]);
+    s.ex("normal! dd").unwrap();
+    assert_eq!(text(&s), "two");
+    s.ex("u").unwrap();
+    assert_eq!(text(&s), "one\ntwo");
+}
+
+#[test]
+fn normal_closes_an_unfinished_insert_like_escape() {
+    let mut s = Session::new();
+    seed(&mut s, &[""]);
+    s.ex("normal! iabc").unwrap();
+    assert_eq!(text(&s), "abc");
+    assert!(matches!(s.editor.mode, rvim_editor::Mode::Normal));
+}

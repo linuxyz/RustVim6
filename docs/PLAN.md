@@ -73,7 +73,7 @@ M0 脚手架 ─► M1 Headless 编辑内核 ─► M2 Ex 命令体系 ─► M3
 
 > 复核轮 2 修正的 M2 语义：`:d`/`:y` 计数、`:retab` 语义、反向范围 E493、`:g`/`:v` 升序与行移动跟踪、空模式复用上次搜索、`:s` 的 `e`/计数/`&`、`:autocmd!` 分组作用域与尾部模式匹配、`:runtime` 顺序、用户命令 `-bar/-range=%/-count`、`:put!`/`:0put`、`:2j`、`:sort!` 与标志、`:g` 无匹配仅 smsg、`:left N`、行首相对地址、空第二地址、`:m+1`/`:t+1`、`:source` 不回退 rtp、新增 `:k`/`:mark`。逐条见 `docs/compat_deviations.md` §7.4。
 >
-**M2 明确留给后续里程碑**：窗口族（`sp/vs/wincmd` → M5）、quickfix（`make/cgrep/copen` → M5）、会话/视图（`mksession/mkview` → M5）、`:normal`/`:redir`/表达式相关命令（→ M3/M4）、正则（`s`/`g` 仍为字面量匹配 → M6 `rvim-regex`）、autocmd 事件实际触发（声明已可用，事件派发随 M3/M4/M5 接入）。
+**M2 明确留给后续里程碑**：窗口族（`sp/vs/wincmd` → M5）、quickfix（`make/cgrep/copen` → M5）、会话/视图（`mksession/mkview` → M5）、`:redir`/表达式相关命令（→ M3/M4）、`:normal`（✅ 补齐复核已实现）、正则（`s`/`g` 仍为字面量匹配 → M6 `rvim-regex`）、autocmd 事件实际触发（声明已可用，事件派发随 M3/M4/M5 接入）。
 
 ---
 
@@ -124,11 +124,12 @@ M0 脚手架 ─► M1 Headless 编辑内核 ─► M2 Ex 命令体系 ─► M3
 - ✅ **窗口 resize 跟随**：输入循环以 120ms 超时轮询控制台尺寸（std 无 select，用读线程 + channel），变化时清屏并按新几何重绘；`3dd`/`2yy`/`3gg` 等计数与前缀命令、`gg` 回首行均已修复并有回归用例。
 - ✅ **alternate screen**（`?1049h/l`）、256 色/真彩的 SGR 编码已就绪（高亮组在 M6 与 syntax 一起接）。
 - ✅ **`'showcmd'`**：命令行行右端 10 列显示未完成命令（计数 / 操作符 / `"a` 寄存器 / `<C-w>` 显示为 `^W` / 视觉选区大小），默认 on（nocompatible 语义，见 `m4_tui.rs` 的 5 条用例）。
-- ⚠️ 未做：视觉模式/鼠标/软换行/`relativenumber`/命令行历史键/`<expr>` 映射/`:!` 的 `Press ENTER`（全部登记在 compat_deviations §6）。
+- ⚠️ 未做：鼠标/软换行/`<expr>` 映射/`:!` 的 `Press ENTER`（登记在 compat_deviations §6）；视觉模式、`relativenumber`、命令行历史键、插入模式控制键与 `'autoindent'` 已在 M5 补齐复核中实现。
 
 > **复核轮 3（M4）**：以 `--keys` / `Tui` 逐帧对照 `reference/vim/src` 修复一批 TUI 行为——未知 `CSI … ~` 码不再卡死输入；Tab 与控制字符按 `'tabstop'` 展开为显示单元（消息行同规则）；`:echo` 瞬时消息与 `-- More --` 分页接回消息行；`/` 从光标后开始并支持 `?`/`n`/`N`（空模式复用上次模式，无则 `E35`）；操作符 + 动作（`dw`/`dj`/`d$`/`yw`/`cw`/`cc`/`dgg`/`dG`、`D`/`C`/`Y`、`d2w`/`d3l`）与 `<Esc>` 取消语义；状态行 `All`/`Top`/`Bot` 百分比；扣除行号栏的横向滚动与 `<C-f>`/`<C-b>`/`<PageDown>`/`<PageUp>` 翻页。逐条见 `docs/compat_deviations.md` §8，回归用例在 `m4_tui.rs`（46 例）与 `rvim-term` 单测。
 >
-> **M4 遗留（登记在 compat_deviations §6 已知偏差）**：视觉模式/鼠标/软换行/`relativenumber`/`scrolloff`、命令行历史键、`<expr>` 映射、`<t_xx>` 编码、`:!` 的 Press ENTER、插入模式 `<C-w>`/`<C-u>`/`<C-r>`、`'autoindent'`、`<C-a>`/`<C-x>`、长消息折行、语法高亮（M6）。
+> **M4 遗留（登记在 compat_deviations §6 已知偏差）**：鼠标/软换行、`<expr>` 映射、`<t_xx>` 编码、`:!` 的 Press ENTER、长消息折行、语法高亮（M6）。
+> **M5 补齐复核已收口**：视觉模式（M5）、`'relativenumber'`/`'scrolloff'`/`'sidescrolloff'`、命令行历史键（`<Up>`/`<Down>`/`<C-p>`/`<C-n>`、`<C-u>`/`<C-w>`）、插入模式 `<C-w>`/`<C-u>`/`<C-r>`/`<C-a>`/`<C-t>`/`<C-d>`（按 redo 键序重放）、`'autoindent'`、`<C-a>`/`<C-x>`、`:normal`。
 
 **出口标准进度**：交互打开文件、编辑、`/` 搜索、`:!` 外部命令均可用（单窗口，分屏留 M5）；**三端（kitty / Windows Terminal / conhost）肉眼验证需要真实终端，本环境无法执行**，以 `--script` 逐帧断言替代并登记待人工收口。
 
@@ -151,7 +152,7 @@ M0 脚手架 ─► M1 Headless 编辑内核 ─► M2 Ex 命令体系 ─► M3
 **出口标准进度**：
 1. **`vimdiff` 等价工作流**：✅ `rvim -d a b` 打开两个窗口并全部 `:diffthis`，filler 对齐、`]c`/`[c`、`:diffget`/`:diffput`、`zo`/`zR` 展开 diff 折叠可用（`m5_diff.rs`）。
 2. **窗口/折叠类用例通过率**：⚠️ 官方 `src/testdir` 依赖 `term_start`/GUI 与完整 `:normal` 键循环，本环境无法运行；改用等价自研用例统计并公开口径（各 `m5_*.rs` 的 `#[test]` 数量与 `scripts/smoke.ps1` 场景）。
-3. **量化口径（`cargo run -p rvim-tools -- coverage`）**：Ex 命令 **245/589（41.6%）**、options **78/429（18.2%）**、内置函数 **393/543（72.4%）**；M2 出口的用户语料对数桶加权仍为 **104/122（85.2%）**。TUI 特性用例 49 例（windows 21 / folds 9 / diff 6 / quickfix 7 / signs 6），crate 单测新增约 200 例（rvim-diff 18、fold 18、foldcmd 10、handlers_fold 9、errorformat 31、quickfix 17、handlers_qf 28、diff 16、handlers_diff 12、textobjects 21、viminfo 17、window 12、handlers_win 6、handlers_session 4），全仓 **962** 个测试。
+3. **量化口径（`cargo run -p rvim-tools -- coverage`）**：Ex 命令 **246/589（41.8%）**、options **80/429（18.6%）**、内置函数 **393/543（72.4%）**；M2 出口的用户语料对数桶加权仍为 **104/122（85.2%）**。TUI 特性用例 49 例（windows 21 / folds 9 / diff 6 / quickfix 7 / signs 6），crate 单测新增约 200 例（rvim-diff 18、fold 18、foldcmd 10、handlers_fold 9、errorformat 31、quickfix 17、handlers_qf 28、diff 16、handlers_diff 12、textobjects 21、viminfo 17、window 12、handlers_win 6、handlers_session 4），全仓 **1021** 个测试（补齐复核后）。
 4. **已知未做**（登记 `docs/compat_deviations.md` \9）：自定义 `'foldtext'` 表达式、`foldmethod=expr/syntax`、`:diffpatch`、popup 的 filter/回调、textprop 的高亮渲染、viminfo 只读写 RustVim 建模的字段子集。
 
 ---
