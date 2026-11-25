@@ -22,7 +22,7 @@ M8 encryption/compression is self-contained (see [docs/PLAN.md](docs/PLAN.md)).
 | M7 | jobs (`job_start`/callbacks), TCP channels + JSON-RPC (`ch_*`), timers (`timer_*`), minimal terminal buffers (`term_start`, `term_getline`), `:sleep` event pumping |
 | M8 | compatibility closure: encryption/compression (`zip`, `blowfish`, `blowfish2`), `has()` feature list, `:redir`, session/view files, packaging script (Windows zip / Unix tar.gz, runtime merge), **multi-size HiDPI Windows icon (16-256 px, embedded in exe + installer)**, installed `$VIMRUNTIME` lookup, `rvim 1.0` |
 | M9 | Vim9 script (`rvim 1.1`, reference **v9.2.1398**): `vim9script`, typed `def`/`var`/`const`/`final`, `import`/`export`, lambdas, method calls, interpolation, exceptions, **classes/objects/static members**, **enums**, interfaces, type aliases; 7/8 Vim 9.2 Vim9 autoloads source; 9.2 conformance subset 26/322 pass (8.1%), 123 run to completion |
-| GUI | Windows **Direct2D/DirectWrite** front-end (`rvim --gui` or no console): native window, `Tui` grid rendering, keyboard/mouse-wheel input, resize and PerMonitorV2 DPI awareness; see [docs/GUI.md](docs/GUI.md) |
+| GUI | Windows **Direct2D/DirectWrite** front-end (`rvim --gui` or no console): native window, `Tui` grid rendering, keyboard/mouse-wheel input, IME, `*` clipboard, Vim cursors, `guifont`/`guifontwide`, guioptions tabline, resize and PerMonitorV2 DPI; see [docs/GUI.md](docs/GUI.md) |
 
 All nine milestones are delivered. See [docs/VIM9.md](docs/VIM9.md) for the Vim9 9.2
 feature matrix and the published conformance numbers, and
@@ -90,10 +90,11 @@ target\release\rvim.exe --gui file.txt
 Starting `rvim.exe` without a console also opens the GUI. It supports the
 existing TUI layouts, syntax colours, statusline, popups, keyboard input,
 mouse-wheel scrolling, window resizing, PerMonitorV2 DPI, Vim-style
-block/insert/replace cursors, and `guifont`/`guifontwide` with the native Font
-dialog. See [docs/GUI.md](docs/GUI.md) for the rendering/input details and current
-limitations (IME, native clipboard and mouse selection are not implemented
-yet).
+block/insert/replace cursors, `guifont`/`guifontwide` with the native Font
+dialog, IME composition, `*` clipboard sync, Shift+Insert/Ctrl+Insert, and a
+guioptions-controlled tabline. See [docs/GUI.md](docs/GUI.md) for the
+rendering/input details and current limitations (mouse click/drag selection and
+native menus are not implemented yet).
 
 ## Packaging (M8)
 

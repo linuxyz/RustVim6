@@ -329,7 +329,7 @@ fn defs() -> Vec<OptDef> {
             name: "guioptions",
             short: "go",
             kind: OptKind::Str,
-            default: OptValue::Str("".into()),
+            default: OptValue::Str("egmrLtT".into()),
         },
         OptDef {
             name: "term",

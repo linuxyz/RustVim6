@@ -13,16 +13,19 @@ use winapi::ctypes::c_void;
 
 use rvim_app::Session;
 use rvim_app::tui::Tui;
-use rvim_editor::Mode;
+use rvim_core::Pos;
 use rvim_editor::maps::Key;
+use rvim_editor::{Mode, RegType, Register};
+use rvim_normal::operators::{OpRange, yank_range};
 use rvim_syntax::highlight::HlColor;
 use rvim_term::{Color, Style};
 
 use winapi::shared::basetsd::LONG_PTR;
 use winapi::shared::dxgiformat::DXGI_FORMAT_B8G8R8A8_UNORM;
 use winapi::shared::guiddef::GUID;
-use winapi::shared::minwindef::{LPARAM, LRESULT, UINT, WPARAM};
-use winapi::shared::windef::{HBRUSH, HWND};
+use winapi::shared::minwindef::{BOOL, DWORD, HGLOBAL, LPARAM, LRESULT, UINT, WPARAM};
+use winapi::shared::ntdef::HANDLE;
+use winapi::shared::windef::{HBRUSH, HWND, POINT};
 use winapi::shared::winerror::D2DERR_RECREATE_TARGET;
 use winapi::um::combaseapi::{CoInitializeEx, CoUninitialize};
 use winapi::um::commdlg::{
@@ -44,13 +47,27 @@ use winapi::um::dwrite::{
     DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat,
     IDWriteTextLayout,
 };
+use winapi::um::imm::{
+    CFS_POINT, COMPOSITIONFORM, HIMC, ImmGetContext, ImmReleaseContext, ImmSetCompositionWindow,
+};
 use winapi::um::libloaderapi::GetModuleHandleW;
 use winapi::um::objbase::COINIT_APARTMENTTHREADED;
 use winapi::um::unknwnbase::IUnknown;
+use winapi::um::winbase::{GMEM_MOVEABLE, GlobalAlloc, GlobalFree, GlobalLock, GlobalUnlock};
 use winapi::um::wingdi::{FW_NORMAL, LOGFONTW};
 use winapi::um::winuser::*;
 
 static DIALOG_OWNER: AtomicIsize = AtomicIsize::new(0);
+
+const GCS_COMPSTR: DWORD = 0x0008;
+const GCS_RESULTSTR: DWORD = 0x0800;
+const ISC_SHOWUICOMPOSITIONWINDOW: isize = 0x8000_0000u32 as isize;
+
+#[link(name = "imm32")]
+unsafe extern "system" {
+    fn ImmGetCompositionStringW(himc: HIMC, index: DWORD, buf: *mut c_void, len: DWORD) -> i32;
+    fn ImmSetCompositionFontW(himc: HIMC, lf: *const LOGFONTW) -> BOOL;
+}
 
 const IID_ID2D1_FACTORY: GUID = GUID {
     Data1: 0x0615_2247,
@@ -103,6 +120,11 @@ struct Gui {
     client_w: i32,
     client_h: i32,
     focused: bool,
+    ime_text: String,
+    ime_active: bool,
+    cursor_px: (f32, f32),
+    last_clipboard_seq: u32,
+    last_clipboard_text: String,
     blink_on: bool,
     blink_initial: bool,
     last_blink: Instant,
@@ -180,6 +202,11 @@ impl Gui {
             client_w: 0,
             client_h: 0,
             focused: true,
+            ime_text: String::new(),
+            ime_active: false,
+            cursor_px: (0.0, 0.0),
+            last_clipboard_seq: 0,
+            last_clipboard_text: String::new(),
             blink_on: true,
             blink_initial: true,
             last_blink: Instant::now(),
@@ -339,6 +366,8 @@ impl Gui {
             }
         }
         self.update_metrics();
+        let guioptions = self.tui.session.editor.options.str_or("guioptions", "");
+        self.tui.set_show_tabline(guioptions.contains('e'));
         let grid = self.tui.grid(self.cols, self.rows);
         let bg = d2d_color(DEFAULT_BG);
         unsafe {
@@ -400,13 +429,26 @@ impl Gui {
             }
         }
 
-        if self.focused && self.blink_on {
-            if let Some((row, col)) = grid.cursor() {
-                if row < self.rows && col < self.cols {
-                    let cell = grid.cell(row, col).map(|cell| (cell.ch, cell.style));
-                    self.draw_cursor(row, col, cell);
-                }
+        if let Some((row, col)) = grid.cursor() {
+            self.cursor_px = (col as f32 * self.cell_w, row as f32 * self.cell_h);
+            if self.focused && self.blink_on && row < self.rows && col < self.cols {
+                let cell = grid.cell(row, col).map(|cell| (cell.ch, cell.style));
+                self.draw_cursor(row, col, cell);
             }
+        }
+        if self.ime_active && !self.ime_text.is_empty() {
+            let style = Style {
+                underline: true,
+                ..Style::NORMAL
+            };
+            let text = self.ime_text.clone();
+            self.draw_text(
+                &text,
+                self.cursor_px.0,
+                self.cursor_px.1,
+                (255, 210, 80),
+                style,
+            );
         }
 
         unsafe {
@@ -563,11 +605,195 @@ impl Gui {
         brush
     }
 
+    fn composition_string(himc: HIMC, flag: DWORD) -> String {
+        let bytes = unsafe { ImmGetCompositionStringW(himc, flag, null_mut(), 0) };
+        if bytes <= 0 {
+            return String::new();
+        }
+        let mut buffer = vec![0u16; bytes as usize / 2 + 1];
+        let got = unsafe {
+            ImmGetCompositionStringW(
+                himc,
+                flag,
+                buffer.as_mut_ptr() as *mut c_void,
+                (buffer.len() * 2) as DWORD,
+            )
+        };
+        if got <= 0 {
+            return String::new();
+        }
+        String::from_utf16_lossy(&buffer[..got as usize / 2])
+    }
+
+    fn update_ime_window(&self) {
+        if self.hwnd.is_null() {
+            return;
+        }
+        unsafe {
+            let himc = ImmGetContext(self.hwnd);
+            if himc.is_null() {
+                return;
+            }
+            let mut form: COMPOSITIONFORM = zeroed();
+            form.dwStyle = CFS_POINT;
+            form.ptCurrentPos = POINT {
+                x: self.cursor_px.0 as i32,
+                y: self.cursor_px.1 as i32,
+            };
+            ImmSetCompositionWindow(himc, &mut form);
+            let font = self.ime_logfont();
+            ImmSetCompositionFontW(himc, &font);
+            ImmReleaseContext(self.hwnd, himc);
+        }
+    }
+
+    fn ime_logfont(&self) -> LOGFONTW {
+        let (family, points) = parse_font(&self.font_spec);
+        let mut lf: LOGFONTW = unsafe { zeroed() };
+        lf.lfHeight = -((points * (96.0 / 72.0) * self.scale).round() as i32);
+        lf.lfWeight = FW_NORMAL;
+        for (slot, ch) in lf.lfFaceName.iter_mut().zip(family.encode_utf16().take(31)) {
+            *slot = ch;
+        }
+        lf
+    }
+
+    fn on_ime_start(&mut self) {
+        self.ime_active = true;
+        self.ime_text.clear();
+        self.update_ime_window();
+        unsafe { InvalidateRect(self.hwnd, null(), 0) };
+    }
+
+    fn on_ime_composition(&mut self, flags: DWORD) {
+        if self.hwnd.is_null() {
+            return;
+        }
+        unsafe {
+            let himc = ImmGetContext(self.hwnd);
+            if himc.is_null() {
+                return;
+            }
+            if flags & GCS_RESULTSTR != 0 {
+                let text = Self::composition_string(himc, GCS_RESULTSTR);
+                for ch in text.chars() {
+                    self.feed(Key::Char(ch));
+                }
+                self.ime_text.clear();
+                self.ime_active = false;
+            }
+            if flags & GCS_COMPSTR != 0 {
+                self.ime_text = Self::composition_string(himc, GCS_COMPSTR);
+            }
+            ImmReleaseContext(self.hwnd, himc);
+        }
+        unsafe { InvalidateRect(self.hwnd, null(), 0) };
+    }
+
+    fn on_ime_end(&mut self) {
+        self.ime_active = false;
+        self.ime_text.clear();
+        unsafe { InvalidateRect(self.hwnd, null(), 0) };
+    }
+
+    fn sync_register_from_clipboard(&mut self) {
+        let seq = unsafe { GetClipboardSequenceNumber() };
+        if seq == self.last_clipboard_seq {
+            return;
+        }
+        let Some(text) = read_clipboard_text(self.hwnd) else {
+            return;
+        };
+        let text = normalize_newlines(&text);
+        self.last_clipboard_seq = seq;
+        if text == self.last_clipboard_text {
+            return;
+        }
+        let register = if text.ends_with('\n') {
+            Register::linewise(text.clone())
+        } else {
+            Register {
+                text: text.clone(),
+                reg_type: RegType::CharWise,
+            }
+        };
+        self.tui.session.editor.registers.put('*', register);
+        self.last_clipboard_text = text;
+    }
+
+    fn sync_clipboard_from_register(&mut self) {
+        let text = self
+            .tui
+            .session
+            .editor
+            .registers
+            .get('*')
+            .map(|register| register.text.clone())
+            .unwrap_or_default();
+        if text == self.last_clipboard_text {
+            return;
+        }
+        if write_clipboard_text(self.hwnd, &text) {
+            self.last_clipboard_text = text;
+            self.last_clipboard_seq = unsafe { GetClipboardSequenceNumber() };
+        }
+    }
+
+    fn paste_clipboard(&mut self) {
+        self.sync_register_from_clipboard();
+        let text = self
+            .tui
+            .session
+            .editor
+            .registers
+            .get('*')
+            .map(|register| register.text.clone())
+            .unwrap_or_default();
+        if text.is_empty() {
+            return;
+        }
+        if self.tui.session.editor.mode.is_insert_like() {
+            for ch in text.chars() {
+                match ch {
+                    '\n' => self.feed(Key::Special("CR".to_string())),
+                    '\r' => {}
+                    ch => self.feed(Key::Char(ch)),
+                }
+            }
+        } else {
+            self.feed(Key::Char('"'));
+            self.feed(Key::Char('*'));
+            self.feed(Key::Char('p'));
+        }
+    }
+
+    fn copy_to_clipboard(&mut self) {
+        let ed = &mut self.tui.session.editor;
+        let range = if let Some(range) = rvim_normal::visual::range(ed) {
+            range
+        } else {
+            let line = ed.cursor().line;
+            OpRange {
+                start: Pos::new(line, 0),
+                end: Pos::new(line, 0),
+                linewise: true,
+            }
+        };
+        let _ = yank_range(ed, range, Some('*'));
+        if ed.visual.is_some() {
+            rvim_normal::visual::stop(ed);
+        }
+        self.sync_clipboard_from_register();
+        unsafe { InvalidateRect(self.hwnd, null(), 0) };
+    }
+
     fn feed(&mut self, key: Key) {
+        self.sync_register_from_clipboard();
         self.blink_on = true;
         self.blink_initial = true;
         self.last_blink = Instant::now();
         let _ = self.tui.feed_key(key);
+        self.sync_clipboard_from_register();
         if self.tui.quit {
             unsafe { PostMessageW(self.hwnd, WM_CLOSE, 0, 0) };
         } else {
@@ -576,6 +802,18 @@ impl Gui {
     }
 
     fn on_key(&mut self, vk: u32) {
+        if vk == VK_INSERT as u32 {
+            let ctrl = unsafe { GetKeyState(VK_CONTROL) as u16 & 0x8000 != 0 };
+            let shift = unsafe { GetKeyState(VK_SHIFT) as u16 & 0x8000 != 0 };
+            if shift {
+                self.paste_clipboard();
+                return;
+            }
+            if ctrl {
+                self.copy_to_clipboard();
+                return;
+            }
+        }
         if let Some(key) = translate_vkey(vk) {
             self.feed(key);
         }
@@ -649,6 +887,7 @@ pub fn run(session: Session) -> (Session, i32) {
         return (session, 1);
     }
     gui.hwnd = hwnd;
+    gui.sync_register_from_clipboard();
     DIALOG_OWNER.store(hwnd as isize, Ordering::Relaxed);
     unsafe {
         let mut rect = zeroed();
@@ -745,6 +984,25 @@ unsafe extern "system" fn wndproc(
         }
         WM_CHAR => {
             (*gui).on_char(wparam as u32);
+            0
+        }
+        WM_IME_SETCONTEXT => {
+            let mut context = lparam;
+            if wparam != 0 {
+                context &= !ISC_SHOWUICOMPOSITIONWINDOW;
+            }
+            DefWindowProcW(hwnd, msg, wparam, context)
+        }
+        WM_IME_STARTCOMPOSITION => {
+            (*gui).on_ime_start();
+            0
+        }
+        WM_IME_COMPOSITION => {
+            (*gui).on_ime_composition(lparam as DWORD);
+            0
+        }
+        WM_IME_ENDCOMPOSITION => {
+            (*gui).on_ime_end();
             0
         }
         WM_MOUSEWHEEL => {
@@ -961,6 +1219,70 @@ fn choose_font(current: &str, _wide: bool) -> Option<String> {
         points
     };
     Some(format!("{}:h{}", face, chosen_points.round() as i32))
+}
+
+fn normalize_newlines(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn read_clipboard_text(hwnd: HWND) -> Option<String> {
+    unsafe {
+        if IsClipboardFormatAvailable(CF_UNICODETEXT) == 0 {
+            return None;
+        }
+        if OpenClipboard(hwnd) == 0 {
+            return None;
+        }
+        let handle = GetClipboardData(CF_UNICODETEXT);
+        if handle.is_null() {
+            CloseClipboard();
+            return None;
+        }
+        let pointer = GlobalLock(handle as HGLOBAL) as *const u16;
+        if pointer.is_null() {
+            CloseClipboard();
+            return None;
+        }
+        let mut len = 0usize;
+        while *pointer.add(len) != 0 {
+            len += 1;
+        }
+        let text = String::from_utf16_lossy(std::slice::from_raw_parts(pointer, len));
+        GlobalUnlock(handle as HGLOBAL);
+        CloseClipboard();
+        Some(normalize_newlines(&text))
+    }
+}
+
+fn write_clipboard_text(hwnd: HWND, text: &str) -> bool {
+    let mut wide: Vec<u16> = text.replace('\n', "\r\n").encode_utf16().collect();
+    wide.push(0);
+    unsafe {
+        if OpenClipboard(hwnd) == 0 {
+            return false;
+        }
+        EmptyClipboard();
+        let memory = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2);
+        if memory.is_null() {
+            CloseClipboard();
+            return false;
+        }
+        let pointer = GlobalLock(memory) as *mut u16;
+        if pointer.is_null() {
+            GlobalFree(memory);
+            CloseClipboard();
+            return false;
+        }
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), pointer, wide.len());
+        GlobalUnlock(memory);
+        if SetClipboardData(CF_UNICODETEXT, memory as HANDLE).is_null() {
+            GlobalFree(memory);
+            CloseClipboard();
+            return false;
+        }
+        CloseClipboard();
+        true
+    }
 }
 
 fn colors(style: Style) -> ((u8, u8, u8), (u8, u8, u8)) {

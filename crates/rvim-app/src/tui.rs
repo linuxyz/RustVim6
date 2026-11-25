@@ -179,6 +179,8 @@ pub struct Tui {
     seen_messages: usize,
     /// Geometry of the last rendered frame (updated when the terminal resizes).
     pub screen_size: (usize, usize),
+    /// Whether the tabline row is part of the grid (GUI guioptions e).
+    show_tabline: bool,
     last_frame: Option<Grid>,
 }
 
@@ -202,6 +204,7 @@ impl Tui {
             history_saved: None,
             seen_messages: 0,
             screen_size: (80, 24),
+            show_tabline: true,
             last_frame: None,
         };
         tui.seen_messages = tui.session.message_history().len();
@@ -1602,11 +1605,16 @@ impl Tui {
         })
     }
 
+    /// GUI front-ends can hide the tabline via guioptions (the e flag).
+    pub fn set_show_tabline(&mut self, show: bool) {
+        self.show_tabline = show;
+    }
+
     pub fn grid(&mut self, cols: usize, rows: usize) -> Grid {
         let cols = cols.max(1);
         let rows = rows.max(1);
         let tabpages = self.session.editor.tabpage_count();
-        let tabline_rows = usize::from(tabpages > 1);
+        let tabline_rows = usize::from(self.show_tabline && tabpages > 1);
         let avail = rows.saturating_sub(1 + tabline_rows).max(2);
         // Fold levels depend on the buffer and the window options, so they are
         // recomputed once per frame (O(lines) for indent/marker folds).
