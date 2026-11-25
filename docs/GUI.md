@@ -108,9 +108,10 @@ The renderer uses up to four sources:
 4. DirectWrite's system font fallback for characters missing from the selected
    family (for example Latin in a CJK-only font or a rare CJK glyph).
 
-Cursor positions come from character display width, not from the font: a Latin
-cell moves one column, a CJK/emoji cell moves two. DirectWrite may use more
-fallback faces inside a run; the cell grid stays monospaced.
+Cursor positions and the statusline ruler use character display width, not the
+font or UTF-8 byte offset: a Latin cell moves one column, a CJK/emoji cell moves
+two. DirectWrite may use more fallback faces inside a run; the cell grid stays
+monospaced.
 
 ## Input
 

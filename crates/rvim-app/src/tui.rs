@@ -14,7 +14,9 @@ use rvim_normal::{NormalEngine, insert};
 use rvim_term::pane::{
     CmdlineText, PaneView, RowView, ScreenLayout, SelectionView, WildmenuItems, render_layout,
 };
-use rvim_term::{Color, Grid, Input, KeySource, Style, Theme, display_col, gutter_width};
+use rvim_term::{
+    Color, Grid, Input, KeySource, Style, Theme, display_col, expand_cells, gutter_width,
+};
 
 use crate::Session;
 
@@ -1720,7 +1722,11 @@ impl Tui {
         };
         let left = format!("{name}{modified}");
         let line = win.cursor.line + 1;
-        let col = win.cursor.col + 1;
+        let tabstop = self.tabstop();
+        let line_text = buffer
+            .and_then(|b| b.line_str(win.cursor.line).ok())
+            .unwrap_or_default();
+        let col = display_col(line_text, win.cursor.col, tabstop) + 1;
         let mode = ed.mode.vim_name();
         let total = buffer.map(|b| b.line_count()).unwrap_or(1).max(1);
         let above = win.top_line as i64;
@@ -1733,8 +1739,8 @@ impl Tui {
             format!("{}%", above * 100 / (above + below))
         };
         let right = format!("{line},{col}  {percent}  [{mode}]");
-        let left_len = left.chars().count();
-        let right_len = right.chars().count();
+        let left_len = expand_cells(&left, tabstop).len();
+        let right_len = expand_cells(&right, tabstop).len();
         if left_len + right_len + 1 > cols {
             return right;
         }
@@ -1915,5 +1921,32 @@ fn map_mode_for(mode: Mode) -> Option<MapMode> {
         Mode::Visual | Mode::VisualLine | Mode::VisualBlock | Mode::Select => Some(MapMode::Visual),
         Mode::CommandLine => Some(MapMode::Cmdline),
         Mode::Terminal => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_column_uses_display_cells_for_cjk() {
+        let mut tui = Tui::new(Session::new());
+        tui.session
+            .editor
+            .set_line_text(0, "中文abc".to_string())
+            .unwrap();
+        let id = tui.session.editor.windows.current_id();
+
+        tui.session.editor.set_cursor(Pos::new(0, 3));
+        let status = tui.statusline_for(id, 80, 10);
+        assert!(status.contains("1,3"), "{status}");
+
+        tui.session.editor.set_cursor(Pos::new(0, 6));
+        let status = tui.statusline_for(id, 80, 10);
+        assert!(status.contains("1,5"), "{status}");
+
+        tui.session.editor.set_cursor(Pos::new(0, 7));
+        let status = tui.statusline_for(id, 80, 10);
+        assert!(status.contains("1,6"), "{status}");
     }
 }
