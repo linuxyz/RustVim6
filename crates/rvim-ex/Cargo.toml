@@ -16,3 +16,4 @@ rvim-editor = { path = "../rvim-editor" }
 rvim-normal = { path = "../rvim-normal" }
 rvim-syntax = { path = "../rvim-syntax" }
 rvim-viml = { path = "../rvim-viml" }
+rvim-termio = { path = "../rvim-termio" }

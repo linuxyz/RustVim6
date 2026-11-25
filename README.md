@@ -1,25 +1,30 @@
 # RustVim
 
 A Vim-compatible editor written from scratch in Rust, with **no third-party crates**
-(`std` only) and an offline build. Behaviour is anchored to Vim `v8.2.5172`
-(`src/` + `runtime/` as the only reference). The sole dependency exception is the
-M8 encryption/compression work (see [docs/PLAN.md](docs/PLAN.md)).
+(`std` only) and an offline build. The editor baseline is Vim `v8.2.5172`;
+**Vim9 script** is anchored to Vim `v9.2.1398`
+(`https://github.com/vim/vim/tree/v9.2.1398`), including class/interface/enum/type
+alias syntax. The sole dependency exception is the M8 encryption/compression work
+(see [docs/PLAN.md](docs/PLAN.md)).
 
-## Status: M7 + M8 / 1.0 (jobs/channels/timers/terminal, encryption, packaging)
+## Status: M9 / 1.1 (Vim9 script, jobs/channels/timers/terminal, encryption, packaging)
 
 | Milestone | Delivered |
 |---|---|
 | M0 | workspace, CI gates, golden-test harness `rvim --version` / `-es` |
 | M1 | headless editing core (buffers, undo tree, marks, registers, options) |
-| M2 | 589-entry Ex command table, 294 implemented, command line + completion, maps/abbrevs |
-| M3 | legacy VimL interpreter, 441/543 builtins, autocmd dispatch, `:source` of real runtime scripts |
+| M2 | 589-entry Ex command table, 311 implemented (after M9), command line + completion, maps/abbrevs |
+| M3 | legacy VimL interpreter, **543/543 builtins wired** (subsystem-less ones are documented stubs), autocmd dispatch, `:source` of real runtime scripts |
 | M4 | terminal TUI (grid, keys, mappings, search, message paging, resize) |
 | M5 | windows/tabpages, folds, diff (`rvim -d`), quickfix/location lists, visual mode + text objects, `.` repeat, jumps/changes, viminfo, sign/textprop/popup APIs |
 | M6 | syntax highlighting: `rvim-syntax` (keyword/match/region, contained/transparent/skip/nextgroup, sync, runtime `syntax/*.vim`), 20 built-in filetypes, `:syntax`/`:highlight`, `synID()` family, coloured TUI cells; regex closures (`\zs`, backrefs, lookaround, `\_.`, magic levels); `:s` replacement specials; spell (`.spl`/word lists, suggestions, Spell* highlighting); tags (`:tag` family, tag stack, `<C-]>`); `cindent`/`smartindent`; `:vimgrep` |
 | M7 | jobs (`job_start`/callbacks), TCP channels + JSON-RPC (`ch_*`), timers (`timer_*`), minimal terminal buffers (`term_start`, `term_getline`), `:sleep` event pumping |
-| M8 | compatibility closure: encryption/compression (`zip`, `blowfish`, `blowfish2`), `has()` feature list, `:redir`, session/view files, packaging script (Windows zip / Unix tar.gz, runtime merge), installed `$VIMRUNTIME` lookup, `rvim 1.0` |
+| M8 | compatibility closure: encryption/compression (`zip`, `blowfish`, `blowfish2`), `has()` feature list, `:redir`, session/view files, packaging script (Windows zip / Unix tar.gz, runtime merge), **multi-size HiDPI Windows icon (16-256 px, embedded in exe + installer)**, installed `$VIMRUNTIME` lookup, `rvim 1.0` |
+| M9 | Vim9 script (`rvim 1.1`, reference **v9.2.1398**): `vim9script`, typed `def`/`var`/`const`/`final`, `import`/`export`, lambdas, method calls, interpolation, exceptions, **classes/objects/static members**, **enums**, interfaces, type aliases; 7/8 Vim 9.2 Vim9 autoloads source; 9.2 conformance subset 26/322 pass (8.1%), 123 run to completion |
 
-Next: **M9** Vim9 script (`rvim 1.1`). M7 (jobs/channels/timers/minimal terminal) and M8 (1.0) are delivered above.
+All nine milestones are delivered. See [docs/VIM9.md](docs/VIM9.md) for the Vim9 9.2
+feature matrix and the published conformance numbers, and
+[docs/PLAN.md](docs/PLAN.md) for the remaining known deviations.
 
 Coverage tables are generated, never hand-edited: `cargo run -p rvim-tools -- coverage`.
 Known deviations are enumerated in [docs/compat_deviations.md](docs/compat_deviations.md).
@@ -37,6 +42,40 @@ target\debug\rvim.exe -es -c '%s/a/b/g' -c 'wq' file.txt                        
 target\debug\rvim.exe -d old.txt new.txt                                          # vimdiff
 ```
 
+## Vim9 script (M9)
+
+Vim9 is implemented against **Vim 9.2.1398** (the editor's compatibility baseline
+stays 8.2.5172). Supported: typed `def`, `var/const/final`, `import/export`,
+lambdas, method calls, interpolation, exceptions, classes/objects with
+`new()`/`this`/static members, enums, interfaces and type aliases.
+
+```vim
+vim9script
+class Counter
+  var count: number = 0
+  static var total: number = 0
+  def new()
+    total += 1
+  enddef
+  def Inc(): number
+    this.count += 1
+    return this.count
+  enddef
+endclass
+var c = Counter.new()
+g:result = c.Inc()
+```
+
+`:source` compiles and runs the file; `:vim9cmd` runs one Vim9 command line.
+Fetch the 9.2 reference and reproduce the conformance run with:
+
+```powershell
+pwsh -File scripts/fetch-vim9-reference.ps1
+pwsh -File scripts/vim9_conformance.ps1
+```
+
+See [docs/VIM9.md](docs/VIM9.md) for the matrix and known gaps.
+
 ## Packaging (M8)
 
 ```powershell
@@ -46,6 +85,8 @@ makensis packaging\rvim.nsi                    # optional NSIS installer
 ```
 
 The installer/staged tree ships `rvim`/`rvim.exe`, docs and a merged `runtime/`.
+`rvim.exe` and the NSIS installer embed the 10-size icon from [assets/icon](assets/icon); Windows
+picks the native 16/20/24/32/40/48/64/96/128/256 px image for the current DPI.
 `default_runtimepath()` finds `runtime` next to the executable (or in
 `../runtime`), then falls back to `$RVIM_RUNTIME` and the development baseline.
 

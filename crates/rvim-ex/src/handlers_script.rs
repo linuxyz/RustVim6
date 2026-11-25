@@ -380,15 +380,7 @@ pub fn source_file(
     let text = std::fs::read_to_string(path)
         .map_err(|e| VimError::new("E484", format!("Can't open file {}: {e}", path.display())))?;
     if is_vim9_script(&text) {
-        // The legacy VimL interpreter (M3) cannot run Vim9 script. Report it
-        // once and clearly instead of failing on every `var`/`def` command.
-        return Err(VimError::new(
-            "ERV338",
-            format!(
-                "Vim9 script is not supported (legacy VimL only): {}",
-                path.display()
-            ),
-        ));
+        return source_vim9_script(ed, env, state, path, &text);
     }
     let sid = env.push_script();
     state.script_files.push(path.to_path_buf());
@@ -421,6 +413,101 @@ pub fn source_file(
         Err(e) => Err(e),
     }
 }
+/// Source a Vim9 script: parse/compile the whole file, register its
+/// functions and execute the top-level statements. Reference:
+/// vim9script.c:335-438 (compile_script/compile_one_script).
+fn source_vim9_script(
+    ed: &mut Editor,
+    env: &mut Env,
+    state: &mut ScriptState,
+    path: &Path,
+    text: &str,
+) -> VimResult<ExOutcome> {
+    let sid = env.push_script();
+    state.script_files.push(path.to_path_buf());
+    ed.script_depth += 1;
+    let prefix = autoload_prefix(ed, path);
+    let lines: Vec<String> = text
+        .lines()
+        .map(|l| l.trim_end_matches('\r').to_string())
+        .collect();
+    let parsed =
+        rvim_viml::vim9::parser::parse_script(&lines, &path.to_string_lossy(), sid, &prefix);
+    let result = match parsed {
+        Ok(script) => {
+            let mut host = crate::script::make_host(ed, state);
+            rvim_viml::vim9::run_script(&script, env, &mut host)
+        }
+        Err(error) => Err(error),
+    };
+    ed.script_depth -= 1;
+    state.script_files.pop();
+    env.pop_script();
+    result?;
+    Ok(ExOutcome::Continue)
+}
+
+/// Canonical autoload prefix for a script path (dist/ft.vim -> dist#ft).
+fn autoload_prefix(ed: &Editor, path: &Path) -> String {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    for base in runtime_paths(ed) {
+        let base = std::fs::canonicalize(&base).unwrap_or(base);
+        let Ok(relative) = canonical.strip_prefix(&base) else {
+            continue;
+        };
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        if let Some(rest) = relative.strip_prefix("autoload/") {
+            if let Some(stem) = rest.strip_suffix(".vim") {
+                return stem.replace('/', "#");
+            }
+        }
+    }
+    String::new()
+}
+
+/// Source the current buffer as a script (used by ':source' in Vim9 test
+/// helpers and by interactive editing).
+fn source_current_buffer(
+    ed: &mut Editor,
+    env: &mut Env,
+    state: &mut ScriptState,
+) -> VimResult<ExOutcome> {
+    let text: String = {
+        let buffer = ed.current_buffer();
+        let mut lines = Vec::new();
+        for i in 0..buffer.line_count() {
+            lines.push(buffer.line_str(i)?.to_string());
+        }
+        lines.join("\n")
+    };
+    let path = std::path::PathBuf::from("<buffer>");
+    if is_vim9_script(&text) {
+        return source_vim9_script(ed, env, state, &path, &text);
+    }
+    let sid = env.push_script();
+    state.script_files.push(path);
+    ed.script_depth += 1;
+    let lines: Vec<String> = text
+        .lines()
+        .map(|l| l.trim_end_matches('\r').to_string())
+        .collect();
+    let result = script::parse_script_lines(&lines, sid)
+        .and_then(|stmts| script::exec_stmts(ed, env, state, &stmts));
+    ed.script_depth -= 1;
+    state.script_files.pop();
+    env.pop_script();
+    match result {
+        Ok(script::Flow::Quit(ExOutcome::Finish)) => Ok(ExOutcome::Continue),
+        Ok(script::Flow::Quit(other)) => Ok(other),
+        Ok(script::Flow::Throw(value)) => Err(VimError::aborting(
+            "E605",
+            format!("Exception not caught: {}", value.to_string_value()),
+        )),
+        Ok(_) => Ok(ExOutcome::Continue),
+        Err(error) => Err(error),
+    }
+}
+
 pub fn cmd_source(
     ed: &mut Editor,
     env: &mut Env,
@@ -429,7 +516,9 @@ pub fn cmd_source(
 ) -> VimResult<ExOutcome> {
     let arg = p.args.trim();
     if arg.is_empty() {
-        return Err(VimError::range_required());
+        // ':source' without an argument sources the current buffer
+        // (scriptfile.c: do_source() with fname == NULL).
+        return source_current_buffer(ed, env, state);
     }
     // ":source" does NOT search 'runtimepath' (scriptfile.c:1150-1175: the
     // name is used as-is, with only the usual special-character expansion).
@@ -589,6 +678,42 @@ fn is_vim9_script(text: &str) -> bool {
             let lower = line.to_ascii_lowercase();
             lower == "vim9script" || lower.starts_with("vim9script ")
         })
+}
+
+/// ':vim9cmd {cmd}' and the Ex forms of :var/:const/:final.
+pub fn cmd_vim9_line(
+    ed: &mut Editor,
+    env: &mut Env,
+    state: &mut ScriptState,
+    line: &str,
+) -> VimResult<ExOutcome> {
+    let path = state
+        .script_files
+        .last()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let mut host = crate::script::make_host(ed, state);
+    rvim_viml::vim9::run_command_line(line, env.current_sid, &path, "", env, &mut host)?;
+    Ok(ExOutcome::Continue)
+}
+
+/// ':import' outside a vim9script file (legacy tests import the vim9.vim
+/// helper module).
+pub fn cmd_import(
+    ed: &mut Editor,
+    env: &mut Env,
+    state: &mut ScriptState,
+    p: &ParsedEx,
+) -> VimResult<ExOutcome> {
+    let path = state
+        .script_files
+        .last()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let line = format!("import {}", p.args);
+    let mut host = crate::script::make_host(ed, state);
+    rvim_viml::vim9::run_import_line(&line, env.current_sid, &path, "", env, &mut host)?;
+    Ok(ExOutcome::Continue)
 }
 
 pub(crate) fn find_in_runtime(ed: &Editor, name: &str) -> Option<PathBuf> {

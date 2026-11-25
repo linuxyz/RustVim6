@@ -9,7 +9,7 @@
 ```
 M0 脚手架 ─► M1 Headless 编辑内核 ─► M2 Ex 命令体系 ─► M3 VimL 解释器
         ─► M4 TUI 终端前端 ─► M5 窗口/高级编辑 ─► M6 语法/拼写/标签
-        ─► M7 Job/Channel/Terminal ─► M8 兼容收口/加密/发布（1.0） ─► M9 Vim9 script（1.1）
+        ─► M7 Job/Channel/Terminal ─► M8 兼容收口/加密/发布（1.0） ─► M9 Vim9 script（1.1，✅）
 ```
 
 > **路线变更**：Vim9 script 原属 M8，现拆分为独立里程碑 **M9**；M8 收敛为「兼容收口 + 加密/压缩 + 发布（1.0）」，Vim9 以 1.1 增量交付，不阻塞 1.0。
@@ -88,15 +88,15 @@ M0 脚手架 ─► M1 Headless 编辑内核 ─► M2 Ex 命令体系 ─► M3
 2. ✅ **语句+函数**：`:let`（含 `+= -= *= /= %= .=`、列表/字典/切片赋值、解构）、`:unlet`、`:if/elseif/else/endif`、`:while/endwhile`、`:for/endfor`（range 迭代）、`:try/catch/finally/endtry`、`:throw`、`:return`、`:break`/`:continue`、`:function[!]`/`:endfunction`（参数、`...` 变参、`dict` 属性、脚本作用域）、`:delfunction`、`:execute`、`:eval`、`:call`、`:echo/echomsg/echon/echoerr`（表达式求值）。
 3. ✅ **脚本执行**：`do_cmdline` 式语句树解析（控制流为节点，普通命令仍是 Ex 行）；`\` 续行；`:finish` 只结束当前脚本；错误默认不中断脚本（try 内为严格模式）；脚本作用域 `s:` 按脚本隔离、`<SID>`；`:source`/`:runtime`/`:runtime!`/`-u vimrc` 全部走同一执行器。
 4. ✅ **函数生态**：用户函数调用栈/`a:1..a:N/a:0/a:000`/`l:`、Funcref 与 lambda（闭包捕获）、`function()`/`call()`/`map()`/`filter()`/`sort()` 回调、autoload（`foo#bar#baz()` → `autoload/foo/bar.vim` 按需 source）、`:delfunction`。
-5. ✅ **内置函数 389/543（71.6%）**：纯函数分 7 个模块（core + a-e/f-l/m-r/s1/s2 + assert/misc），宿主相关分 4 组（editor 核心、单窗口/标签/折叠、弹窗/属性/标记/历史、arglist/字符位置/补全/高亮组）；`assert_*`/`test_*` 全族按 vim 测试助手语义实现。
+5. ✅ **内置函数 543/543（100%）**：纯函数分 7 个模块，宿主相关分 5 组（editor 核心、单窗口/标签/折叠、弹窗/属性/标记/历史、arglist/字符位置/补全/高亮组、M3 收口组 `host_extra`）；无对应子系统的函数按 Vim 语义返回 no-op/E319（登记 `docs/compat_deviations.md` §15）。
 6. ✅ **迷你正则引擎**（`regex_mvp`）：字面量 `.` `*` `\+` `\?` `\=` `\{n,m}` `^ $` 字符类（含 `\d\w\s`）`\(...\)` `\|`、`\c/\C`；用于 `=~`/`!~`、`:g`、搜索地址与 `match()` 系列（完整 NFA 仍留 M6）。
 7. ✅ **真实脚本验证**：`:source reference/vim/runtime/defaults.vim` 与 `filetype.vim`（1871 行、811 条 autocmd、2 个函数）**零错误执行**，成为 M3 回归测试。
 
 **出口标准进度**：
 1. `:source runtime/defaults.vim` 与 `filetype.vim`：✅ 全部零错误 source（`m3_features.rs` 断言无 E 错误、选项/映射/autocmd/函数/`did_load_filetypes` 生效）。
-2. 内置函数覆盖率 ≥70%：✅ **389/543（71.6%）**（`crates/rvim-tools/tests/builtin_coverage.rs` 门禁测试确保不再回退），见 `docs/COVERAGE.md`。
+2. 内置函数覆盖率 ≥70%：✅ **543/543（100%）**（`crates/rvim-tools/tests/builtin_coverage.rs` 门禁测试确保不再回退），见 `docs/COVERAGE.md`。
 3. **脚本兼容通过率统计**：官方 `testdir` 驱动依赖 M4 的输入层（`:normal`/按键循环）暂未接入，改用**当前可运行的口径**：`reference/vim/runtime/autoload/**/*.vim` 共 52 个脚本，**33 个零错误 source（63.5%）**（`cargo test -p rvim-app --test m3_dispatch` 只覆盖其中样本，完整统计用 `scripts/smoke.ps1` 的手工口径复核）。未通过的 19 个分成三类，均已登记：
-   - **Vim9 script（3 个）**：`autoload/dist/ft.vim`、`autoload/dist/script.vim`、`autoload/ccomplete.vim` → 显式 `ERV338`（M9 恢复）；
+   - **Vim9 script（3 个）**：`autoload/dist/ft.vim`、`autoload/dist/script.vim`、`autoload/ccomplete.vim` → 显式 `ERV338`（M9 已恢复，见 §M9）；
    - **嵌入式语言 heredoc**（`python << EOF`、`perl` 等，如 `pythoncomplete.vim`、`netrw.vim`）→ 解释器不支持宿主语言，正文被当作 Ex 行解析；
    - **Vim5 时代遗留**（`ada.vim` 等使用裸 `version` 变量）。
 
@@ -109,11 +109,11 @@ M0 脚手架 ─► M1 Headless 编辑内核 ─► M2 Ex 命令体系 ─► M3
 | **filetype 检测真正生效** | `:filetype on` 首次开启时 source 运行时 `filetype.vim`（`filetype_script_loaded` 去重）；`.py`/`.vim`/`.sh` 等 `setf` 规则可直接检测 | `filetype_vim_detects_a_python_file` |
 | **`\\|\\|` 不当作命令分隔符** | `:echo a \|\| b`、`:if (a \|\| b)`、`:let x = a \|\| b` 保持完整（vim 先解析表达式再找 `\|`） | `logical_or_is_not_a_command_separator` |
 | **`.` 的连接/成员二义性** | 依被求值左侧类型决定：字典才走成员访问，否则连接；`'a' . strlen('b')` 此前误判成变量而 E121（`eval.c:6420`） | `dot_concatenation_with_a_function_call`、`dict_member_access_still_works` |
-| **Vim9 脚本显式拒绝** | 旧版解释器遇到 `vim9script` 直接 `ERV338`，避免逐行 `var`/`def` 报错刷屏 | `vim9_scripts_are_rejected_with_one_clear_error` |
+| **Vim9 脚本显式拒绝（M3 历史行为）** | M3 时代旧解释器遇到 `vim9script` 直接 `ERV338`；M9 已由 `rvim-viml::vim9` 接管 | `vim9_scripts_are_sourced`（M9） |
 
 > **复核轮 2（M3）**：整数回绕与 legacy 除零、`%g` 浮点格式化、字符串真值、`is/isnot`、字符串索引/切片越界、类型敏感容器比较、`vim_str2nr` 语义、`map()`/`filter()` 原地修改、`a:1..a:N` 仅变参、作用域字典 `g:`/`v:` 等、异常跨函数与 `abort`、`:finally` 中的 `:return`、双引号转义、`:execute` 多表达式、`0o17`/`..`、`len()`、深递归 E132、`printf`/`split`/`get`/`count`/`sort`/`call`/`expand`/`getline`/`fnamemodify` 等内置函数修正。逐条见 `docs/compat_deviations.md` §7.3。
 >
-**已知偏差（登记 docs/compat_deviations.md）**：正则仅 MVP 子集；`:echo` 多表达式按空白回退拆分；`v:` 只读变量集合不完整；dict-function 的 `self` 仅绑定首参；`:redir`/`:normal`/profiler 未实现；错误信息文本未逐字对齐；Vim9 script 与嵌入式语言 heredoc 不支持；`.c` 等依赖 `dist#ft#*` 的检测规则因该 autoload 是 Vim9 而失效。
+**已知偏差（登记 docs/compat_deviations.md）**：正则仅 MVP 子集；`:echo` 多表达式按空白回退拆分；`v:` 只读变量集合不完整；dict-function 的 `self` 仅绑定首参；`:redir`/`:normal`/profiler 未实现；错误信息文本未逐字对齐；嵌入式语言 heredoc 仅按数据跳过；Vim9 与 `.c` 等 `dist#ft#*` 检测已在 M9 恢复。
 
 ---
 ## M4 — 终端 TUI 前端（✅ 已完成）
@@ -200,21 +200,30 @@ M0 脚手架 ─► M1 Headless 编辑内核 ─► M2 Ex 命令体系 ─► M3
 - ✅ **加密与压缩**（std-only 自研，未引入第三方 crate）：`zip`（PKZIP 流密码）、`blowfish`、`blowfish2`（SHA-256 1001 轮密钥强化 + Blowfish CFB）与 Vim 文件头 `VimCrypt~01/02/03!`；`:set key=`/`:X`/`:set cryptmethod=`，读写与真实 Vim **双向互读**。`.spl`/swapfile 不涉及；xchacha20（libsodium）显式不支持。
 - ✅ **兼容收口**：`:redir`（变量/寄存器/文件）、`:mksession`/`:mkvimrc`/`:mkview`/`:loadview`、`:noautocmd`、`:packadd`/`:packloadall`/`:behave`/`:legacy`/`:mode`/`:open` 与菜单类空操作；`has()` 特性表对齐（crypt-*、spell、syntax、quickfix、folding、diff、windows、tabpages、patch-*、平台）；`:version` 输出 feature 行；覆盖率分母冻结。
 - ✅ **打包与发布**：`scripts/package.ps1` 生成 Windows zip / Unix tar.gz（含可执行文件、docs 与合并的 runtime），`default_runtimepath()` 支持 exe 同目录/上级的 `runtime` 与 `$RVIM_RUNTIME`；Windows release 单 exe 可直接运行。
-- 明确不支持并登记：libsodium xchacha20、swapfile 加密（无 swapfile 子系统）、GUI、Vim9（M9）；作业/通道/定时器/最小 terminal 在 M7 已提供（无 PTY/ConPTY 交互式终端）。
+- ✅ **Windows 图标/HiDPI**：`assets/icon/rvim.ico` 含 16/20/24/32/40/48/64/96/128/256 十个原生尺寸（256 为 PNG，其余 32-bit DIB+AND mask）；`bin/rvim/build.rs` 用 Windows SDK `rc.exe` 嵌入 exe，NSIS 安装器/卸载器/快捷方式/Add-Remove Programs 复用同一图标。
+- 明确不支持并登记：libsodium xchacha20、swapfile 加密（无 swapfile 子系统）、GUI；Vim9 由 M9 增量交付（已交付）；作业/通道/定时器/最小 terminal 在 M7 已提供（无 PTY/ConPTY 交互式终端）。
 - 本里程碑**不包含 Vim9 script**：Vim9 是 M9 的增量能力，不阻塞 1.0。
 
 **出口标准（已达成）**：`rvim 1.0`；加密/压缩与真实 Vim 互读通过（三种方法）；`scripts/package.ps1` 生成 Windows/Linux 包；`has()`/`:version`/`:redir`/`:mksession` 回归通过。
 
 ---
 
-## M9 — Vim9 script（1.1）
+## M9 — Vim9 script（1.1，✅ 已交付；参考 **Vim 9.2.1398**）
 
-- `vim9script` 语境、类型系统（`vim9type.c`）、编译器（`vim9compile.c`）、字节码 VM（`vim9execute.c/vim9instr.c`）、`def/enddef`、`import`（`runtime/import/`）、class（若基线含）。
-- legacy/vim9 互操作、`defcompile`、性能基准（对拍相同脚本的 vim 耗时）。
-- 让 runtime 中仅有的 3 个 Vim9 autoload（`autoload/dist/ft.vim`、`autoload/dist/script.vim`、`autoload/ccomplete.vim`）可执行，从而恢复 `.c` 等依赖 `dist#ft#*` 的 filetype 检测。
-- 与 M6 的语法/拼写收口互不阻塞：M9 只承担脚本引擎本身。
+> 参考版本：`https://github.com/vim/vim/tree/v9.2.1398`。编辑器主体仍以 v8.2.5172 为兼容基线，
+> 只有 Vim9 script 以 9.2.1398 为准。9.2 新增 class/interface/enum/type alias/generics，
+> 因此 M9 不再以“8.2 没有 class”为由跳过这些语法。
 
-**出口标准**：上述 3 个 autoload 零错误 source；Vim9 脚本测试子集（`test_vim9_*`）可跑并公开通过率；发布 `rvim 1.1`。
+- ✅ **引擎**（`crates/rvim-viml/src/vim9/`）：类型系统（types.rs）、词法（lexer.rs）、逻辑行 + 表达式/语句/类解析（parser.rs）、类型化 AST（ast.rs）、求值器（eval.rs）、类/枚举/模块状态（runtime.rs）。
+  - 设计说明：计划写的是“字节码 VM”；实际交付**类型检查 + 结构化 AST 求值器**（未生成 vim9instr.c 风格指令流），差异登记在 `docs/compat_deviations.md` §14。
+- ✅ **语法**：`vim9script [noclear]`、`var/const/final`、`def/enddef`、`export`、类型注解（list/dict/func/tuple）、`if/while/for/try/catch/finally`、`++/--`、复合赋值、`?`/`??`、`&&/||`、`..`、`->`、索引/切片、`{}`/`#{}`（含计算键）、插值字符串、lambda（表达式体）、`:import`（脚本/命名/autoload）。
+- ✅ **9.2 类型/对象**：`class`（成员、`public`、`static`、`new()`、方法、`this`、`Class.new()`、`Class.static`）、`enum`（`Name.Member`）、`interface`（注册/签名）、`type Alias = ...`；`type(obj)`/`typename(obj)` 返回 `t_object`/`object<Name>`，类与枚举返回 `t_class`/`t_enum`。
+- ✅ **互操作**：legacy `def`、Vim9 调用 legacy/内置函数、legacy 调用 Vim9 全局/autoload 函数、Vim9 脚本内嵌 legacy `func` 块、`:vim9cmd`/`:defcompile`/`:def`/`:var`/`:const`/`:final`。
+- ✅ **Vim 9.2 autoload**：`scripts/fetch-vim9-reference.ps1` 取 v9.2.1398 并抽取；9.2 的 7/8 个 Vim9 autoload 零错误 source（`dist/{ft,script,vim9,vim,json,man}.vim`、`ccomplete.vim`；`dist/vimindent.vim` 待收口）；v8.2 的 3 个 autoload 仍作为回归保留。
+- ⚠️ **官方 9.2 测试**：class/enum/interface/typealias/generics 共 **322** 个 `Test_*`，**26 通过（8.1%）**，123 个执行到结尾；`scripts/vim9_conformance.ps1` 可复现。明细与失败分类见 `docs/VIM9.md` §6。
+- ⚠️ **未做/偏差**：字节码、完整编译期类型检查、泛型、继承/`super`、接口实现约束、块 lambda、`null_class`、共享单元闭包、`assert_fails()` 的 `{lnum}`/`{context}` 校验；9.2 的 `test_vim9_expr/func/script/cmd/assign.vim` 仍有少数字无法完整 source。详见 `docs/VIM9.md` §7 与 `docs/compat_deviations.md` §14。
+
+**出口标准（已按 9.2 参考达成）**：9.2 的 7/8 个 Vim9 autoload 零错误 source；9.2 class/enum/interface/typealias/generics 测试子集可跑并公开 26/322 通过率；`rvim 1.1` 发布。
 
 ---
 
@@ -256,4 +265,5 @@ M0 脚手架 ─► M1 Headless 编辑内核 ─► M2 Ex 命令体系 ─► M3
 ## 版本与兼容策略
 - 语义化版本：0.x 期里程碑即 minor；**1.0 = M8 出口**（legacy Vim 8.2 兼容 + 打包），**1.1 = M9 出口**（Vim9 script）。
 - `--version` 同时报告 RustVim 版本与锚定的 Vim tag/patch（`Included patches: 1-5172` 兼容展示）。
+- Vim9 script 参考 **Vim 9.2.1398**（class/enum/interface/type alias/generics），编辑器其余部分仍以 v8.2.5172 为基线；两套版本号在 `docs/VIM9.md` 说明。
 - 升级 Vim 基线需走 RFC：更新三张表分母、全量对拍、文档标注差异。

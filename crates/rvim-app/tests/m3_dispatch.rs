@@ -136,17 +136,17 @@ fn did_filetype_tracks_the_filetype_option() {
 }
 
 #[test]
-fn vim9_scripts_are_rejected_with_one_clear_error() {
-    // Only a few v8.2.5172 runtime files are Vim9 (`autoload/dist/ft.vim`);
-    // sourcing one must fail once with ERV338 instead of cascading errors.
-    let path = temp_file(
-        "vim9.vim",
-        "vim9script\nvar x = 1\nexport def Foo()\nenddef\n",
-    );
+fn vim9_scripts_are_sourced() {
+    // M9: the runtime Vim9 autoloads (autoload/dist/ft.vim, dist/script.vim,
+    // autoload/ccomplete.vim) are compiled and executed by the Vim9 engine.
+    let path = temp_file("vim9.vim", "vim9script\nvar x = 1\ng:result = x + 1\n");
     let mut s = Session::new();
-    let err = s.ex(&format!("source {}", path.display())).unwrap_err();
-    assert_eq!(err.code, "ERV338");
-    assert_eq!(s.report.error_count, 1);
+    s.ex(&format!("source {}", path.display())).unwrap();
+    assert_eq!(
+        s.viml.env.get_var("g:result"),
+        Some(rvim_viml::value::Value::Number(2))
+    );
+    assert_eq!(s.report.error_count, 0);
     let _ = std::fs::remove_file(&path);
 }
 

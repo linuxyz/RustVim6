@@ -63,7 +63,7 @@
 | 正则 | 完整 NFA/BT 正则引擎 | ⚠️ `:s`/`:g`/搜索地址仅字面量匹配 + `ignorecase`，无元字符 | M6（rvim-regex） |
 | 撤销结构 | 撤销树（分支、`g-`/`g+`、undofile） | ⚠️ 线性 undo/redo 链；新编辑截断 redo 分支已对齐 | M5（rvim-undo 树化） |
 | 窗口/标签 | 多窗口、tabpage | ❌ 单窗口；`split/vsplit/tab/wincmd` 调用走未实现报错 | M5 |
-| VimL | 完整解释器、350+ 函数 | ✅ M3 已落地解释器并接通 autocmd 派发（见 §5）；剩余差距：`v:` 变量仅常用子集、Vim9/嵌入式 heredoc 不支持 | 随需求补 |
+| VimL | 完整解释器、350+ 函数 | ✅ M3 已落地解释器并接通 autocmd 派发（见 §5）；剩余差距：`v:` 变量仅常用子集（Vim9 见 §14；嵌入式语言 heredoc 按数据跳过） | 随需求补 |
 | 选项全集 | 429 项，含 window/buffer 作用域 | ⚠️ 124 项选项（含 window/buffer 近似）；`setlocal/setglobal` 已作用于窗口局部表 | M8 持续 |
 | 交互前端 | 终端 TUI、键码映射、鼠标 | ⚠️ M4 已落地 TUI（正常/插入/命令行模式、映射展开、状态行、`~` 补白、横纵滚动、wildmenu、更多的分页）；**视觉模式、鼠标、软换行、`relativenumber`** 未实现 | M5 |
 | quickfix/会话 | `make/cgrep/copen`、`mksession/mkview` | ❌ 声明表内，调用走未实现报错 | M5 |
@@ -88,10 +88,10 @@
 | `:execute`/`:eval`/`:echo` | 表达式求值后执行/显示；echo 支持多表达式 | ✅（echo 多表达式以「整体解析失败→空白拆分」回退） | `execute_builds_and_runs_commands` |
 | 真实 runtime 脚本 | `defaults.vim`、`filetype.vim` 可 source | ✅ 两者零错误 source（811 autocmd / 2 函数） | `sources_defaults_vim_cleanly`、`sources_filetype_vim_cleanly` |
 | **autocmd 事件派发** | `apply_autocmds()` 在打开/写入/切换缓冲等位置触发；`++once`、`++nested`、忙时抑制（`autocmd.c:1948,2166`）；`FileType` 以 force 触发（`optionstr.c:2551`） | ✅ `rvim-ex::autodispatch` 在 `:e`/`:w`/`:b*`/`:setf` 处派发；`:doautocmd` 复用同一派发器；此前只有声明、无派发 | `m3_dispatch.rs`（12 例）、`autodispatch::tests` |
-| **filetype 检测** | `:filetype on` source `$VIMRUNTIME/filetype.vim`，`au BufRead *.py setf python` 类规则生效 | ⚠️ `setf` 直连规则生效（`.py`/`.vim`/`.sh` 等）；依赖 `dist#ft#*` 的规则（`.c` 等）因该 autoload 为 Vim9 而不可用 | `filetype_vim_detects_a_python_file` |
+| **filetype 检测** | `:filetype on` source `$VIMRUNTIME/filetype.vim`，`au BufRead *.py setf python` 类规则生效 | ✅ `setf` 直连规则生效（`.py`/`.vim`/`.sh` 等）；依赖 `dist#ft#*` 的规则（`.c` 等）在 M9 后可用（autoload 为 Vim9，由 Vim9 引擎执行） | `filetype_vim_detects_a_python_file` |
 | `\\|\\|` 与命令分隔符 | 先解析表达式（消耗 `\\|\\|`）再找 `\\|`（`ex_docmd.c:check_nextcmd`） | ✅ `split_bars`/`find_bar` 跳过 `\\|\\|`；此前 `:echo 1 \\|\\| 0` 被切成两条命令 | `logical_or_is_not_a_command_separator` |
 | `.` 的成员/连接判定 | 依被求值左侧类型：字典→成员访问，否则连接（`eval.c:6420`） | ✅ 求值期判定；`'a' . strlen('b')` 不再误判为变量（E121） | `dot_concatenation_with_a_function_call`、`dict_member_access_still_works` |
-| Vim9 script | vim 8.2 可直接执行 | ❌ 显式 `ERV338`（旧版解释器仅支持 legacy VimL）；运行时中仅 3 个 autoload 文件属 Vim9；**计划 M9 实现** | `vim9_scripts_are_rejected_with_one_clear_error` |
+| Vim9 script | vim 8.2 可直接执行 | ✅ M9：`vim9script/def/var/import/export` 等由 `rvim-viml::vim9` 执行；3 个 runtime autoload 零错误 source；已知限制见 §14 | `m9_vim9.rs`、`vim9_scripts_are_sourced` |
 
 ### M3 已知偏差
 
@@ -353,3 +353,35 @@
 | Terminal | libvterm + PTY/ConPTY，term_* 全族 | ⚠️ 最小实现：`term_start`/`:terminal` 打开 terminal 缓冲区，捕获 stdout 为行，`term_wait/term_getline/term_getsize/term_getstatus/term_getjob/term_list/term_sendkeys/term_scrape`；无 PTY/ConPTY，不是完整屏幕模拟器 |
 | 线程模型 | 子线程只投递事件，主线程写 Editor | ✅ 子线程只读 pipe/socket 并经 mpsc 投递 `Vec<u8>`；`m7::pump()` 在主线程序列化回调；无 unsafe、无跨线程 Editor |
 | 已知偏差 | — | 无 clientserver、named pipe、PTY；`ch_evalexpr` 仅按行 JSON-RPC；terminal 无光标/颜色/滚动；`job_start` 的 `in_io`/`out_io` 文件重定向未实现 |
+
+
+## 14. M9 Vim9 script（1.1，参考 Vim 9.2.1398）
+
+| 主题 | Vim / 计划 | RustVim |
+|---|---|---|
+| 交付形态 | 词法 → 类型检查 → 字节码 → 栈式 VM（vim9compile/vim9execute/vim9instr） | ⚠️ 类型化 AST + 树遍历求值器；**未生成字节码**。语义优先，性能/可复用字节码留后续 |
+| 类型检查 | 编译期完整检查（E1001/E1012/E1013/…） | ⚠️ 声明初始化、函数参数/返回值、赋值做运行期检查；编译期只做语法与块结构检查；部分错误码/文本不对齐 |
+| 闭包 | 捕获变量单元（共享） | ⚠️ 定义时快照（与 legacy lambda 同模型）：定义后修改外层变量，闭包看不到新值 |
+| class/interface/enum/type alias | 9.2 完整：继承、接口约束、泛型、`this`/`super`、对象/类类型 | ⚠️ 基础语义已实现：`class`（成员/public/static/new/方法/this/Class.new/Class.static）、`enum`、`interface` 注册、`type Alias = ...`；`type()/typename()` 可识别类/对象/枚举。**继承 `extends` 不参与成员查找、无 `super`、接口只注册不校验、类型别名不展开** |
+| 泛型 | 函数/类型/类的泛型参数与实例化 | ❌ 未实现（9.2 `test_vim9_generics.vim` 0/65） |
+| 对象模型 | 原生 object 值、`string(obj)`/`object<Name>` | ⚠️ 对象内部用 `VimDict` + 对象注册表实现；`type/typename` 正确，但 `string()`/部分 dict 内建仍把对象当字典 |
+| 块 lambda | `(x) => { ... }` | ❌ 仅表达式体 lambda；块体报语法错误 |
+| import | 脚本/autoload/from/命名空间 | ✅ `import './x.vim' as ns`、`import {A,B} from './x.vim'`、`import autoload 'dist/ft.vim'`；无循环 import 检测、无 `import ... as` 重命名冲突诊断 |
+| defcompile | 预编译全部 :def | ⚠️ no-op（函数在 source 时已编译/注册） |
+| :vim9cmd / :def / :var | 全量 | ✅ `:vim9cmd` 执行单行；`:def` 列表；`:var/:const/:final` 走 Vim9 语句 |
+| assert_fails 的 {lnum}/{context} | 校验错误行号/上下文 | ⚠️ 接受但忽略（未把 SOURCING_LNUM 接入消息发射）；Vim9 官方测试因此有失败项 |
+| 官方测试 | 9.2 test_vim9_* 全量 | ⚠️ 9.2 的 class/enum/interface/typealias/generics 共 322 个 `Test_*`：26 通过（8.1%），123 个执行到结尾；9.2 的 expr/func/script/cmd/assign 尚不能完整 source；口径见 docs/VIM9.md §6 |
+| 性能基准 | 与 Vim 对拍同脚本耗时 | ❌ 未建立基准（AST 解释器预期慢于 Vim 字节码） |
+
+
+## 15. M3 内置函数收口（543/543）
+
+`host_extra.rs` 补齐了 543 分母里最后 102 个函数。行为分三类：
+
+| 类别 | 函数 | 行为 |
+|---|---|---|
+| 真实实现 | `autocmd_add/delete/get`、`search/searchpos/searchpair/searchpairpos/searchcount/searchdecl`、`getreginfo`、`strptime`、`getcharsearch/setcharsearch`、`setcursorcharpos`、`winnr`、`last_buffer_nr`、`diff_filler`、`expandcmd`、`hasmapto`、`complete*/complete_info`、`prompt_*`、`setenv` | 编辑器/缓冲区/查找/时间等可观察行为；部分为子集（`searchpair` 不处理 middle/skip、`strptime` 支持常用 `%Y%m%dHMSFT%/`）；`setenv` 经 `rvim-termio` 平台层调用 `std::env::set_var` |
+| 无子系统 → Vim 兼容 no-op | `browse/browsedir`、`feedkeys`、`foreground`、`input*`/`confirm`/`getchar*`/`getmousepos`、`libcall/libcallnr`、`listener_*`、`menu_info`、`popup_dialog/popup_filter_*`、`remote_*`/`server*`、`sound_*`、`swapinfo/swapname`、`term_*`、`screen*`、`setcellwidths`、`setcmdpos` | 返回空字符串/0/空列表/空字典；`term_*` 不模拟屏幕，`screen*` 不读取真实屏幕 |
+| 显式不支持 | `luaeval`、`mzeval`、`perleval`、`py3eval`、`pyeval`、`pyxeval`、`rubyeval` | `E319: Sorry, the ... interpreter is not available` |
+
+`cargo run -p rvim-tools -- missing-funcs` 输出 0；`docs/COVERAGE.md` 显示 543/543。

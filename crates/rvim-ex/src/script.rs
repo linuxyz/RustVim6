@@ -27,6 +27,8 @@ pub use rvim_viml::eval::call_function;
 pub struct UserFunc {
     pub name: String,
     pub params: Vec<String>,
+    /// Default expression for each parameter (parallel to 'params').
+    pub defaults: Vec<Option<String>>,
     pub varargs: bool,
     pub body: Vec<String>,
     pub stmts: Vec<Stmt>,
@@ -60,6 +62,8 @@ pub struct ScriptState {
     pub more: crate::host_more::MoreState,
     /// Jobs, channels, timers and terminal buffers (M7).
     pub m7: crate::m7::M7State,
+    /// Small states used by the remaining builtins (M3 extras).
+    pub extra: crate::host_extra::ExtraState,
 }
 
 /// Evaluation context: variables plus script state.
@@ -112,6 +116,8 @@ pub enum Stmt {
         finally: Vec<Stmt>,
     },
     FuncDef(Box<UserFunc>),
+    /// A ':def' block compiled by the Vim9 engine (M9).
+    Vim9FuncDef(Box<rvim_viml::vim9::Vim9Func>),
     Return(Option<String>),
     Throw(String),
     Break,
@@ -130,6 +136,14 @@ fn structural_command(line: &str) -> Option<String> {
     let trimmed = strip_modifiers(line);
     let parsed = parse_line(trimmed, 1).ok()?;
     let canonical = lookup(&parsed.command)?.name;
+    // 'enddef: value' is a dictionary key, not a command. The same guard keeps
+    // 'var: 1' and similar expression lines out of the statement parser.
+    if trimmed[canonical.len().min(trimmed.len())..]
+        .trim_start()
+        .starts_with(':')
+    {
+        return None;
+    }
     Some(canonical.to_string())
 }
 
@@ -197,6 +211,7 @@ impl<'a> BlockParser<'a> {
                 "for" => out.push(self.parse_for()?),
                 "try" => out.push(self.parse_try()?),
                 "function" => out.push(self.parse_function(&raw)?),
+                "def" => out.push(self.parse_vim9_def(&raw)?),
                 "return" => out.push(Stmt::Return(nonempty_args(&raw))),
                 "throw" => {
                     out.push(Stmt::Throw(args_of(&raw)));
@@ -322,6 +337,7 @@ impl<'a> BlockParser<'a> {
     fn parse_function(&mut self, header: &str) -> VimResult<Stmt> {
         let spec = args_of(header);
         // Collect body lines until :endfunction (nested :function not allowed).
+        let start_line = self.pos + 1;
         let mut body = Vec::new();
         let mut found_end = false;
         while self.pos < self.lines.len() {
@@ -331,16 +347,36 @@ impl<'a> BlockParser<'a> {
                 found_end = true;
                 break;
             }
+            let marker = rvim_viml::vim9::parser::heredoc_marker(line);
             body.push(line.clone());
+            if let Some(marker) = marker {
+                // Heredoc text is data: it may contain 'endfunction'.
+                while self.pos < self.lines.len() {
+                    let next = self.lines[self.pos].clone();
+                    let done = next.trim() == marker;
+                    self.pos += 1;
+                    body.push(next);
+                    if done {
+                        break;
+                    }
+                }
+            }
         }
         if !found_end {
-            return Err(VimError::new("E126", "Missing :endfunction".to_string()));
+            return Err(VimError::new(
+                "E126",
+                format!("Missing :endfunction (body starts at line {start_line})"),
+            ));
         }
-        let (name, params, varargs, dict, abort) = parse_func_signature(&spec, self.sid)?;
-        let stmts = parse_script_lines(&body, self.sid)?;
+        let (name, params, defaults, varargs, dict, abort) = parse_func_signature(&spec, self.sid)?;
+        // Embedded-language heredocs (python << EOF ...) inside a legacy
+        // :function body are data, not Ex commands; skip them when parsing.
+        let parse_body = strip_embedded_heredocs(&body);
+        let stmts = parse_script_lines(&parse_body, self.sid)?;
         Ok(Stmt::FuncDef(Box::new(UserFunc {
             name,
             params,
+            defaults,
             varargs,
             body,
             stmts,
@@ -348,6 +384,112 @@ impl<'a> BlockParser<'a> {
             dict,
             abort,
         })))
+    }
+
+    fn parse_vim9_def(&mut self, header: &str) -> VimResult<Stmt> {
+        let def_line = self.pos + 1;
+        let mut header = rvim_viml::vim9::parser::strip_comment(
+            strip_modifiers(header).trim_start_matches(':').trim(),
+        );
+        // A Vim9 signature may span several lines and carry # comments.
+        let mut balance = paren_balance(&header);
+        while balance > 0 && self.pos < self.lines.len() {
+            let next = rvim_viml::vim9::parser::strip_comment(&self.lines[self.pos]);
+            self.pos += 1;
+            header.push(' ');
+            header.push_str(next.trim());
+            balance += paren_balance(&next);
+        }
+        let mut body = Vec::new();
+        let mut depth = 1usize;
+        let mut found_end = false;
+        while self.pos < self.lines.len() {
+            let line = self.lines[self.pos].clone();
+            let keyword = structural_command(&line);
+            if keyword.as_deref() == Some("enddef") {
+                depth -= 1;
+                if depth == 0 {
+                    self.pos += 1;
+                    found_end = true;
+                    break;
+                }
+            } else if keyword.as_deref() == Some("def")
+                && line
+                    .split_once("def")
+                    .is_some_and(|(_, rest)| rest.contains('('))
+            {
+                depth += 1;
+            }
+            self.pos += 1;
+            let marker = rvim_viml::vim9::parser::heredoc_marker(&line);
+            body.push(line);
+            if let Some(marker) = marker {
+                // Skip a heredoc body; it may contain ':enddef' text.
+                while self.pos < self.lines.len() {
+                    let line = self.lines[self.pos].clone();
+                    let done = line.trim() == marker;
+                    self.pos += 1;
+                    body.push(line);
+                    if done {
+                        break;
+                    }
+                }
+            }
+        }
+        if !found_end {
+            return Err(VimError::new(
+                "E126",
+                format!("Missing :enddef for def at line {def_line}"),
+            ));
+        }
+        let func = rvim_viml::vim9::parse_function(&header, &body, self.sid, "", self.pos)
+            .map_err(|e| VimError {
+                code: e.code,
+                message: format!("{} (def {header} at line {def_line})", e.message),
+                abort: e.abort,
+            })?;
+        Ok(Stmt::Vim9FuncDef(Box::new((*func).clone())))
+    }
+}
+
+/// Remove embedded-language heredoc bodies (python << EOF ... EOF) from a
+/// legacy function body before parsing its statements.
+fn strip_embedded_heredocs(body: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(body.len());
+    let mut skip: Option<String> = None;
+    for line in body {
+        if let Some(marker) = &skip {
+            if line.trim() == marker {
+                skip = None;
+            }
+            continue;
+        }
+        if let Some(marker) = embedded_heredoc_marker(line) {
+            skip = Some(marker);
+            continue;
+        }
+        out.push(line.clone());
+    }
+    out
+}
+
+fn embedded_heredoc_marker(line: &str) -> Option<String> {
+    let text = line.trim_start();
+    let lower = text.to_ascii_lowercase();
+    if !(lower.starts_with("python") || lower.starts_with("execute") || lower.starts_with("py3")) {
+        return None;
+    }
+    let idx = text.find("<<")?;
+    let rest = text[idx + 2..].trim_start();
+    let marker: String = rest
+        .trim_matches(|c: char| c == '"' || c == '\'' || c == ' ')
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    if marker.is_empty() {
+        None
+    } else {
+        Some(marker)
     }
 }
 
@@ -388,7 +530,14 @@ fn parse_catch_pattern(spec: &str) -> Option<String> {
 
 /// Parts of a `:function` signature: name, named params, "..." marker, `self`
 /// dict attribute and `abort` attribute.
-type FuncSignature = (String, Vec<String>, bool, Option<String>, bool);
+type FuncSignature = (
+    String,
+    Vec<String>,
+    Vec<Option<String>>,
+    bool,
+    Option<String>,
+    bool,
+);
 
 /// Parse `s:Foo(a, b, ...) dict abort range` into its parts.
 fn parse_func_signature(spec: &str, _sid: usize) -> VimResult<FuncSignature> {
@@ -406,6 +555,7 @@ fn parse_func_signature(spec: &str, _sid: usize) -> VimResult<FuncSignature> {
         .ok_or_else(|| VimError::new("E124", format!("Invalid argument for :function: {spec}")))?;
     let params_raw = &spec[paren + 1..close];
     let mut params = Vec::new();
+    let mut defaults = Vec::new();
     for p in params_raw.split(',') {
         let p = p.trim();
         if p.is_empty() {
@@ -415,7 +565,16 @@ fn parse_func_signature(spec: &str, _sid: usize) -> VimResult<FuncSignature> {
             // Varargs marker.
             continue;
         }
-        params.push(p.to_string());
+        match p.find('=') {
+            Some(pos) => {
+                params.push(p[..pos].trim().to_string());
+                defaults.push(Some(p[pos + 1..].trim().to_string()));
+            }
+            None => {
+                params.push(p.to_string());
+                defaults.push(None);
+            }
+        }
     }
     let varargs = params_raw.contains("...");
     let attrs = spec[close + 1..].trim();
@@ -426,12 +585,13 @@ fn parse_func_signature(spec: &str, _sid: usize) -> VimResult<FuncSignature> {
         None
     };
     let abort = attr_words.contains(&"abort");
-    Ok((name, params, varargs, dict, abort))
+    Ok((name, params, defaults, varargs, dict, abort))
 }
 
 /// Parse a script body into statements.
 pub fn parse_script_lines(lines: &[String], sid: usize) -> VimResult<Vec<Stmt>> {
-    let joined = join_continuations(lines);
+    let expanded = expand_heredocs(lines);
+    let joined = join_continuations(&expanded);
     let mut parser = BlockParser {
         lines: &joined,
         pos: 0,
@@ -445,6 +605,72 @@ pub fn parse_script_lines(lines: &[String], sid: usize) -> VimResult<Vec<Stmt>> 
         ));
     }
     Ok(stmts)
+}
+
+/// Expand ':let x =<< trim END' heredocs into a list literal so the statement
+/// parser sees a single line. Reference: eval.c heredoc handling in
+/// getline()-style assignments (`:help let-heredoc`).
+fn expand_heredocs(lines: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(lines.len());
+    let mut i = 0usize;
+    while i < lines.len() {
+        let line = &lines[i];
+        let Some(idx) = rvim_viml::vim9::parser::find_outside_quotes(line, "=<<") else {
+            out.push(line.clone());
+            i += 1;
+            continue;
+        };
+        let prefix = line[..idx].trim_end().to_string();
+        let spec = line[idx + 3..].trim();
+        let mut words: Vec<&str> = spec.split_whitespace().collect();
+        let Some(marker) = words.pop() else {
+            out.push(line.clone());
+            i += 1;
+            continue;
+        };
+        let trim = words.iter().any(|w| w.eq_ignore_ascii_case("trim"));
+        let mut content = Vec::new();
+        let mut found = false;
+        i += 1;
+        while i < lines.len() {
+            let text = lines[i].clone();
+            if text.trim() == marker {
+                found = true;
+                break;
+            }
+            content.push(text);
+            i += 1;
+        }
+        if !found {
+            // An unterminated heredoc is an error the caller reports; do not
+            // swallow the rest of the file while scanning.
+            out.push(line.clone());
+            i -= content.len();
+            i += 1;
+            continue;
+        }
+        if trim {
+            let indent = content
+                .iter()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| l.len() - l.trim_start().len())
+                .min()
+                .unwrap_or(0);
+            for text in &mut content {
+                if text.len() >= indent {
+                    *text = text[indent..].to_string();
+                }
+            }
+        }
+        let items: Vec<String> = content
+            .iter()
+            .map(|text| format!("'{}'", text.replace('\'', "''")))
+            .collect();
+        let separator = if prefix.contains('=') { "" } else { " = " };
+        out.push(format!("{prefix}{separator}[{}]", items.join(", ")));
+        i += 1;
+    }
+    out
 }
 
 /// Join legacy `\` continuation lines onto the previous line.
@@ -570,13 +796,57 @@ impl Host for ExHost<'_> {
         if let Some(func) = self.state.funcs.get(&resolved).cloned() {
             return Some(call_user_func(self.ed, env, self.state, &func, args));
         }
+        // Vim9 functions (M9) are looked up by canonical name; an unexported
+        // function of the current script is reached through <SNR>.
+        if let Some(result) = self.call_vim9_named(name, args.clone(), env) {
+            return Some(result);
+        }
         // Autoload: `foo#bar#baz()` loads `autoload/foo/bar.vim` on first use.
         if name.contains('#') && try_autoload(self.ed, env, self.state, name) {
+            let resolved = resolve_function_name(name, self.state, env.current_sid);
             if let Some(func) = self.state.funcs.get(&resolved).cloned() {
-                return Some(call_user_func(self.ed, env, self.state, &func, args));
+                return Some(call_user_func(
+                    self.ed,
+                    env,
+                    self.state,
+                    &func,
+                    args.clone(),
+                ));
+            }
+            if let Some(result) = self.call_vim9_named(name, args, env) {
+                return Some(result);
             }
         }
         None
+    }
+
+    fn source_script(
+        &mut self,
+        path: &std::path::Path,
+        env: &mut Env,
+    ) -> Option<rvim_core::VimResult<()>> {
+        Some(crate::handlers_script::source_file(self.ed, env, self.state, path).map(|_| ()))
+    }
+
+    fn define_legacy_function(
+        &mut self,
+        header: &str,
+        body: &[String],
+        sid: usize,
+        env: &mut Env,
+    ) -> Option<rvim_core::VimResult<()>> {
+        Some(crate::script::define_legacy_function(
+            self.ed, env, self.state, header, body, sid,
+        ))
+    }
+
+    fn echo_message(&mut self, text: &str, err: bool) -> Option<rvim_core::VimResult<()>> {
+        if err {
+            Some(Err(VimError::new("E0", text.to_string())))
+        } else {
+            self.ed.messages.info(text.to_string());
+            Some(Ok(()))
+        }
     }
 
     fn call_host_builtin(
@@ -589,6 +859,9 @@ impl Host for ExHost<'_> {
             if let Some(result) = host_builtin(self.ed, env, self.state, name, args.clone()) {
                 return Some(result);
             }
+        }
+        if let Some(result) = crate::host_extra::call(name, &args, self.ed, env, self.state) {
+            return Some(result);
         }
         if let Some(result) = crate::host_win::call(name, &args, self.ed, env, self.state) {
             return Some(result);
@@ -603,6 +876,7 @@ impl Host for ExHost<'_> {
     /// ordinary (non-builtin) calls. See [`Host::is_host_builtin`].
     fn is_host_builtin(&self, name: &str) -> bool {
         HOST_BUILTINS.contains(&name)
+            || crate::host_extra::FUNCS.contains(&name)
             || crate::host_win::FUNCS.contains(&name)
             || crate::host_meta::FUNCS.contains(&name)
             || crate::host_more::FUNCS.contains(&name)
@@ -658,6 +932,27 @@ impl Host for ExHost<'_> {
     }
 }
 
+impl ExHost<'_> {
+    /// Dispatch a call to a compiled Vim9 function, if one matches.
+    fn call_vim9_named(
+        &mut self,
+        name: &str,
+        args: Vec<Value>,
+        env: &mut Env,
+    ) -> Option<rvim_viml::value::ValueResult> {
+        let mut candidates = vec![name.to_string()];
+        if !name.starts_with('<') && !name.contains('#') {
+            candidates.push(format!("<SNR>{}_{}", env.current_sid, name));
+        }
+        for candidate in candidates {
+            if let Some(func) = env.vim9.function(&candidate) {
+                return Some(rvim_viml::vim9::call_vim9(&func, args, env, self));
+            }
+        }
+        None
+    }
+}
+
 fn builtin_buffer_var(ed: &Editor, name: &str) -> Option<Value> {
     match name {
         // b:changedtick is the buffer's monotonic change counter (change.c).
@@ -700,7 +995,7 @@ fn host_has(ed: &Editor, feature: &str) -> bool {
         | "cmdline_compl" | "cmdline_hist" | "quickfix" | "folding" | "diff" | "windows"
         | "tabpages" | "spell" | "tag_binary" | "crypt" | "cryptv" | "crypt-blowfish"
         | "crypt-blowfish2" | "crypt-zip" | "job" | "channel" | "terminal" | "timers"
-        | "vim_starting" => true,
+        | "vim9script" | "float" | "vim_starting" => true,
         // Platforms and explicitly unsupported subsystems.
         "win32" | "win64" => cfg!(windows),
         "unix" => cfg!(unix),
@@ -901,6 +1196,7 @@ fn stmt_command_name(stmt: &Stmt) -> &'static str {
         Stmt::For { .. } => "for",
         Stmt::Try { .. } => "try",
         Stmt::FuncDef(_) => "function",
+        Stmt::Vim9FuncDef(_) => "def",
         Stmt::Return(_) => "return",
         Stmt::Throw(_) => "throw",
         Stmt::Break => "break",
@@ -1025,6 +1321,10 @@ fn exec_stmt(
             state.funcs.insert(key, (**func).clone());
             Ok(Flow::Next)
         }
+        Stmt::Vim9FuncDef(func) => {
+            env.vim9.add_function(std::rc::Rc::new((**func).clone()));
+            Ok(Flow::Next)
+        }
         Stmt::Return(expr) => {
             if env.frames.is_empty() {
                 return Err(VimError::new(
@@ -1045,6 +1345,30 @@ fn exec_stmt(
         Stmt::Break => Ok(Flow::Break),
         Stmt::Continue => Ok(Flow::Continue),
     }
+}
+
+fn paren_balance(text: &str) -> i32 {
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                if c == '\\' && q == '"' {
+                    chars.next();
+                } else if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '\'' | '"' => quote = Some(c),
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            },
+        }
+    }
+    depth
 }
 
 fn func_key(func: &UserFunc) -> String {
@@ -1287,6 +1611,34 @@ pub fn invoke_callback(
 }
 
 /// Call a user function: bind arguments, execute the body, catch `:return`.
+/// Define a legacy ':func ... :endfunc' found inside a Vim9 script.
+///
+/// The Ex layer owns legacy functions, so the Vim9 engine hands the block back
+/// here; we synthesise a ':function' script and run it, which reuses the normal
+/// signature parser and registration path.
+pub fn define_legacy_function(
+    ed: &mut Editor,
+    env: &mut Env,
+    state: &mut ScriptState,
+    header: &str,
+    body: &[String],
+    sid: usize,
+) -> VimResult<()> {
+    let header = header.trim();
+    let normalized = if header.starts_with("func ") || header.starts_with("function ") {
+        header.replacen("func", "function", 1)
+    } else {
+        format!("function {header}")
+    };
+    let mut lines = Vec::with_capacity(body.len() + 2);
+    lines.push(normalized);
+    lines.extend(body.iter().cloned());
+    lines.push("endfunction".to_string());
+    let stmts = parse_script_lines(&lines, sid)?;
+    exec_stmts(ed, env, state, &stmts)?;
+    Ok(())
+}
+
 pub fn call_user_func(
     ed: &mut Editor,
     env: &mut Env,
@@ -1307,7 +1659,8 @@ pub fn call_user_func(
         locals: HashMap::new(),
         sid: func.sid,
     };
-    if args.len() < func.params.len() {
+    let required = func.defaults.iter().filter(|d| d.is_none()).count();
+    if args.len() < required {
         return Err(VimError::new(
             "E119",
             format!("Not enough arguments for function: {}", func.name),
@@ -1330,7 +1683,13 @@ pub fn call_user_func(
         .insert("lastline".to_string(), Value::Number(call_line));
     // Named arguments live in a: under their names (userfunc.c:2735-2769).
     for (i, param) in func.params.iter().enumerate() {
-        let value = args.get(i).cloned().unwrap_or(Value::Null);
+        let value = match args.get(i) {
+            Some(value) => value.clone(),
+            None => match func.defaults.get(i).and_then(|d| d.as_deref()) {
+                Some(expr) => eval_expr(ed, env, state, expr)?,
+                None => Value::Null,
+            },
+        };
         frame.args.insert(param.clone(), value);
     }
     let extra = args.len().saturating_sub(func.params.len());

@@ -639,6 +639,11 @@ pub fn call_value(
 ) -> ValueResult {
     match target {
         Value::Funcref(f) => {
+            if let Some(lambda) = &f.vim9_lambda {
+                let mut bound = f.partial.clone();
+                bound.append(&mut args);
+                return crate::vim9::eval::call_vim9_lambda(lambda, bound, env, host);
+            }
             if let Some(lambda) = &f.lambda {
                 let mut bound = f.partial.clone();
                 bound.append(&mut args);

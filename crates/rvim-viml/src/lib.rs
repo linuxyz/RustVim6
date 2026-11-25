@@ -23,6 +23,7 @@ pub mod func_table;
 pub mod lexer;
 pub mod regex_mvp;
 pub mod value;
+pub mod vim9;
 
 pub use env::{Env, Frame, Host};
 pub use eval::{call_function, call_value, eval};

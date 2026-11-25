@@ -443,6 +443,15 @@ impl Parser {
                 while self.peek().is_some_and(|c| c.is_ascii_alphabetic()) {
                     self.pos += 1;
                 }
+                // ':vim9cmd' / ':vim9script' are the only commands whose name
+                // contains a digit; keep the digit and the letters after it.
+                let word: String = self.chars[start..self.pos].iter().collect();
+                if word == "vim" && self.peek() == Some('9') {
+                    self.pos += 1;
+                    while self.peek().is_some_and(|c| c.is_ascii_alphabetic()) {
+                        self.pos += 1;
+                    }
+                }
             }
             Some('@' | '*' | '!' | '=' | '>' | '<' | '&' | '~' | '#' | '}') => {
                 self.pos += 1;

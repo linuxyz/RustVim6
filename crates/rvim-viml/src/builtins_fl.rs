@@ -1348,6 +1348,7 @@ fn funcref(args: &[Value]) -> ValueResult {
         partial,
         dict,
         lambda,
+        vim9_lambda: None,
     })))
 }
 

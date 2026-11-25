@@ -40,7 +40,7 @@
 | `macros/` | 17 项 | less/matchit 等宏脚本 | runtime 分发 + 脚本支持 | M3 |
 | `print/` | 33 项 | postscript 打印支持 | hardcopy（低优先级） | M8/不支持登记 |
 | `tools/` | 23 项 | 外部辅助工具 | 原样分发 | 打包 |
-| `import/` | 1 项 | Vim9 import 模块 | vim9 子系统 | M9 |
+| `import/` | 1 项 | Vim9 import 模块 | vim9 子系统（基本 import/export） | M9 已交付 |
 | `bitmaps icons pixmaps` | 少量 | GUI 资源 | TUI 不消费；GUI 期处理 | 后置 |
 | `defaults.vim` | 155 行 | 无 vimrc 时的默认配置（nocompatible/ruler/augroup...） | **启动序列原样 source** | M3 |
 | `filetype.vim` | 68 KB | 文件类型检测总分发 | VimL 驱动（要求函数/augroup 齐备） | M3 末/M6 |
@@ -94,7 +94,7 @@ RustVim 严格按以下顺序（M1 先实现标注 ✅ 的环节，其余为占�
 | Funcref/字典函数/方法调用 `list->map()` | M3-3 | 8.2 已有 lambda 风格调用 |
 | 内置函数 350+ | M3-3 起持续 | 见 §6 覆盖率表 |
 | 调试器 :debug/breakpoint/profile | M3-4 | |
-| **vim9script/def/import/class/字节码** | **M9**（1.1） | 独立子系统，见 ARCH §5.4；不阻塞 M8 的 1.0 |
+| **vim9script/def/import/class/字节码** | **M9（1.1）已交付，参考 Vim 9.2.1398** | 独立子系统，见 ARCH §5.4 与 docs/VIM9.md；class/enum/interface/type alias 已支持基础语义；无字节码（AST 求值器） |
 
 ### 4.2 特殊变量 v: 全集
 M3 建立 `v:` 变量表（`v:true false null version errmsg warningmsg shell_error count argc regtype ...`），
@@ -129,7 +129,8 @@ M3 落全量事件名表（约 80+：BufNewFile/BufReadPre/BufRead/BufEnter/File
 
 ## 6. 内置函数与 `:call` 兼容
 
-- 基线：evalfunc.c 约 350+ 函数；M3 起按域分批：字符串 → 集合 → 数学/转换 → 缓冲/窗口/标签 → 搜索/正则 → 路径/glob → 系统/job → JSON/Blob/float → 调试/测试。
+- 基线：evalfunc.c 543 个函数，现已 **543/543** 全部接线（`docs/COVERAGE.md`）；纯函数在 `rvim-viml`，宿主相关在 `rvim-ex`，最后的 102 个在 `host_extra.rs`。
+- 无对应子系统的函数（屏幕、音频、远程 server、外部语言、libcall、swap 等）按 Vim 语义返回 no-op/E319，逐条登记在 `docs/compat_deviations.md` §15。
 - 签名（必选/可选参数个数、类型）按函数表强校验，参数数目错误报 `E119/E118` 同号。
 - 测试函数 `test_*()` 仅实现对测试 harness 有价值的子集（如 `test_override` 部分），其余明确报未实现。
 - `system()/readfile()/writefile()` 行尾/编码/二进制模式（`'b'` flag）逐一对拍。
@@ -145,7 +146,7 @@ M3 落全量事件名表（约 80+：BufNewFile/BufReadPre/BufRead/BufEnter/File
 | L2 交互 | TUI 全模式编辑体验与 vim 一致，常见 runtime 高亮/ftplugin 生效 | M4/M6 |
 | L3 生态 | job/channel/terminal/spell/encrypt/tags 齐备，testdir 通过率 ≥ 90% | M7 |
 | L4 全兼容 | 剩余边角清零，偏差清单仅含显式不支持项（GUI/语言绑定） | M8 / 1.0 |
-| L5 Vim9 | vim9script/def/import/class | M9 / 1.1 |
+| L5 Vim9 | vim9script/def/import/class/enum/interface/type alias（参考 Vim 9.2.1398） | M9 / 1.1 ✅ |
 
 验收度量（每次里程碑自动产出）：
 1. 三张覆盖率表：Ex x/589、Option x/429、Function x/350+。

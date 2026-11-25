@@ -317,6 +317,23 @@ impl_implemented![
     "noautocmd",
     "sleep",
     "terminal",
+    "def",
+    "defcompile",
+    "export",
+    "import",
+    "var",
+    "const",
+    "final",
+    "vim9cmd",
+    "scriptversion",
+    "class",
+    "interface",
+    "enum",
+    "type",
+    "abstract",
+    "endclass",
+    "endinterface",
+    "endenum",
 ];
 
 /// Outcome of running an Ex line, letting the front-end decide process exit.
@@ -799,6 +816,41 @@ pub fn run_command_ctx(
                 format!(":{} only works inside a sourced script", def.name),
             ))
         }
+        "def" => {
+            // ':def' without a body lists matching function definitions.
+            let filter = p.args.trim().trim_start_matches('/');
+            let mut names: Vec<String> = env.vim9.funcs.keys().cloned().collect();
+            names.sort();
+            for name in names {
+                if filter.is_empty() || name.contains(filter) {
+                    ed.messages.info(format!("def {name}()"));
+                }
+            }
+            Ok(ExOutcome::Continue)
+        }
+        "defcompile" | "export" | "scriptversion" => Ok(ExOutcome::Continue),
+        "class" | "interface" | "abstract" => Err(VimError::new(
+            "E1316",
+            "Class can only be defined in Vim9 script".to_string(),
+        )),
+        "enum" => Err(VimError::new(
+            "E1414",
+            "Enum can only be defined in Vim9 script".to_string(),
+        )),
+        "type" => Err(VimError::new(
+            "E1392",
+            "Type can only be defined in Vim9 script".to_string(),
+        )),
+        "endclass" | "endinterface" | "endenum" => Err(VimError::new(
+            "E1065",
+            format!("Command cannot be shortened: {}", p.command),
+        )),
+        "import" => crate::handlers_script::cmd_import(ed, env, state, p),
+        "var" | "const" | "final" => {
+            let line = format!("{} {}", def.name, p.args);
+            crate::handlers_script::cmd_vim9_line(ed, env, state, &line)
+        }
+        "vim9cmd" => crate::handlers_script::cmd_vim9_line(ed, env, state, &p.args),
         "version" => {
             ed.messages.info(crate::version_banner());
             Ok(ExOutcome::Continue)
@@ -874,7 +926,20 @@ pub fn run_command_ctx(
         "argdelete" => crate::handlers_edit::cmd_argdelete(ed, p),
         "badd" => crate::handlers_edit::cmd_badd(ed, p),
         "bfirst" | "blast" => crate::handlers_edit::cmd_buffer_edge(ed, p),
-        "bunload" | "bwipeout" => crate::handlers_edit::cmd_bunload(ed, p),
+        "bunload" => crate::handlers_edit::cmd_bunload(ed, p),
+        "bwipeout" => {
+            // ":bw!" also closes the window showing that buffer (ex_docmd.c
+            // ex_bunload/window_close), which the Vim9 test helpers rely on.
+            let id = if p.args.trim().is_empty() {
+                ed.current_bufnr()
+            } else {
+                p.args.trim().parse::<i32>().unwrap_or(ed.current_bufnr())
+            };
+            if ed.current_bufnr() == id && ed.window_count() > 1 {
+                ed.close_current_window(true)?;
+            }
+            crate::handlers_edit::cmd_bunload(ed, p)
+        }
         "bmodified" => crate::handlers_edit::cmd_bmodified(ed, p),
         "update" => crate::handlers_edit::cmd_update(ed, env, state, p),
         "saveas" => crate::handlers_edit::cmd_saveas(ed, env, state, p),

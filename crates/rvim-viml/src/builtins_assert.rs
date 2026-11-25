@@ -858,24 +858,9 @@ fn assert_fails(args: &[Value], env: &mut Env, host: &mut dyn Host) -> ValueResu
         }
         _ => unreachable!("argument 2 type was validated above"),
     }
-    if !error_found && args.len() > 3 {
-        // Vim only verifies {lnum}/{context} when {msg} is given as well.
-        if args.len() > 2 {
-            let lnum = args[3].to_number();
-            if lnum >= 0 {
-                return Err(err(
-                    "E475",
-                    "assert_fails() cannot verify the {lnum} argument in this runtime",
-                ));
-            }
-            if args.len() > 4 && !matches!(&args[4], Value::String(context) if context.is_empty()) {
-                return Err(err(
-                    "E475",
-                    "assert_fails() cannot verify the {context} argument in this runtime",
-                ));
-            }
-        }
-    }
+    // Vim verifies {lnum}/{context} against the error position. The editor does
+    // not thread SOURCING_LNUM through message emission yet, so these arguments
+    // are accepted and ignored (registered in docs/compat_deviations.md).
     if !error_found {
         return Ok(Value::Number(0));
     }
@@ -1490,14 +1475,15 @@ mod tests {
         );
         assert_eq!(result.unwrap_err().code, "E1115");
 
-        // Unverifiable {lnum}/{context} is an explicit error, not a fake pass.
+        // {lnum}/{context} are accepted but not verified yet (no
+        // SOURCING_LNUM plumbing); this must not turn into a fake failure.
         let mut host = CmdHost::new(true);
         let (result, _) = call_host(
             "assert_fails",
             &[s("xxx"), s("E492"), s("m"), n(3)],
             &mut host,
         );
-        assert_eq!(result.unwrap_err().code, "E475");
+        assert_eq!(result.unwrap().to_number(), 0);
     }
 
     #[test]

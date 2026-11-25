@@ -115,7 +115,7 @@ pub fn render(usage: &Usage, all_runtime: &Usage) -> String {
     let mut line = String::new();
     for name in &implemented {
         if line.len() + name.len() + 2 > 76 {
-            let _ = writeln!(out, "{line}");
+            let _ = writeln!(out, "{}", line.trim_end());
             line.clear();
         }
         line.push(':');
@@ -149,13 +149,7 @@ pub fn render(usage: &Usage, all_runtime: &Usage) -> String {
 
     let _ = writeln!(out, "\n## 4. 其它兼容表\n");
     let func_total = rvim_viml::FUNC_COUNT;
-    let mut names: Vec<&'static str> = rvim_viml::builtins::implemented_funcs();
-    names.extend_from_slice(rvim_ex::script::HOST_BUILTINS);
-    names.extend_from_slice(rvim_ex::host_win::FUNCS);
-    names.extend_from_slice(rvim_ex::host_meta::FUNCS);
-    names.extend_from_slice(rvim_ex::host_more::FUNCS);
-    names.sort_unstable();
-    names.dedup();
+    let names = implemented_builtins();
     let func_done = names.len();
     let _ = writeln!(
         out,
@@ -174,6 +168,43 @@ pub fn render(usage: &Usage, all_runtime: &Usage) -> String {
         pct(func_done, func_total)
     );
     out
+}
+
+/// Names with a pure or host implementation, matching the coverage count.
+pub fn implemented_builtins() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = rvim_viml::builtins::implemented_funcs();
+    names.extend_from_slice(rvim_ex::script::HOST_BUILTINS);
+    names.extend_from_slice(rvim_ex::host_win::FUNCS);
+    names.extend_from_slice(rvim_ex::host_meta::FUNCS);
+    names.extend_from_slice(rvim_ex::host_more::FUNCS);
+    names.extend_from_slice(rvim_ex::host_extra::FUNCS);
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+/// Builtins from the 543-entry denominator that have no implementation yet.
+pub fn missing_builtins() -> Vec<&'static str> {
+    let implemented = implemented_builtins();
+    rvim_viml::FUNCTIONS
+        .iter()
+        .map(|func| func.name)
+        .filter(|name| !implemented.contains(name))
+        .collect()
+}
+
+/// Print the missing builtin names (used by the maintenance CLI).
+pub fn report_missing() -> Result<(), String> {
+    let missing = missing_builtins();
+    println!(
+        "missing builtins: {}/{}",
+        missing.len(),
+        rvim_viml::FUNC_COUNT
+    );
+    for name in missing {
+        println!("{name}");
+    }
+    Ok(())
 }
 
 pub fn run(root: &Path, check: bool) -> Result<(), String> {

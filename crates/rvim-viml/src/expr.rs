@@ -258,6 +258,7 @@ impl Parser {
                 Ok(Expr::List(items))
             }
             Token::LBrace => self.parse_brace(),
+            Token::HashBrace => self.parse_hash_dict(),
             Token::Ident(name) => {
                 if name == "v:true" {
                     return Ok(Expr::Bool(true));
@@ -275,6 +276,39 @@ impl Parser {
                 format!("Invalid expression: unexpected {other:?}"),
             )),
         }
+    }
+
+    /// '#{key: value, ...}': bare keys are literal strings.
+    fn parse_hash_dict(&mut self) -> VimResult<Expr> {
+        let mut entries = Vec::new();
+        if self.eat(&Token::RBrace) {
+            return Ok(Expr::Dict(entries));
+        }
+        loop {
+            let key = match self.bump() {
+                Token::Ident(name) => name,
+                Token::Str(text) => text,
+                Token::Number(n) => n.to_string(),
+                other => {
+                    return Err(VimError::new(
+                        "E15",
+                        format!("Invalid dictionary key: {other:?}"),
+                    ));
+                }
+            };
+            self.expect(Token::Colon)?;
+            let value = self.parse_expr(0)?;
+            entries.push((Expr::Str(key), value));
+            if self.eat(&Token::Comma) {
+                if self.peek() == &Token::RBrace {
+                    break;
+                }
+                continue;
+            }
+            break;
+        }
+        self.expect(Token::RBrace)?;
+        Ok(Expr::Dict(entries))
     }
 
     /// `{ ... }`: either a dict literal or a lambda.

@@ -25,6 +25,7 @@ pub mod handlers_syntax;
 pub mod handlers_tags;
 pub mod handlers_viml;
 pub mod handlers_win;
+pub mod host_extra;
 pub mod host_meta;
 pub mod host_more;
 pub mod host_spell;

@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "rvim"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "rvim-app",
  "rvim-editor",
@@ -15,7 +15,7 @@ dependencies = [
 
 [[package]]
 name = "rvim-app"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "rvim-buffer",
  "rvim-cmdline",
@@ -31,14 +31,14 @@ dependencies = [
 
 [[package]]
 name = "rvim-buffer"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "rvim-core",
 ]
 
 [[package]]
 name = "rvim-cmdline"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "rvim-core",
  "rvim-editor",
@@ -47,15 +47,15 @@ dependencies = [
 
 [[package]]
 name = "rvim-core"
-version = "1.0.0"
+version = "1.1.0"
 
 [[package]]
 name = "rvim-diff"
-version = "1.0.0"
+version = "1.1.0"
 
 [[package]]
 name = "rvim-editor"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "rvim-buffer",
  "rvim-core",
@@ -66,19 +66,20 @@ dependencies = [
 
 [[package]]
 name = "rvim-ex"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "rvim-buffer",
  "rvim-core",
  "rvim-editor",
  "rvim-normal",
  "rvim-syntax",
+ "rvim-termio",
  "rvim-viml",
 ]
 
 [[package]]
 name = "rvim-normal"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "rvim-buffer",
  "rvim-core",
@@ -87,7 +88,7 @@ dependencies = [
 
 [[package]]
 name = "rvim-syntax"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "rvim-core",
  "rvim-viml",
@@ -95,7 +96,7 @@ dependencies = [
 
 [[package]]
 name = "rvim-term"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "rvim-core",
  "rvim-editor",
@@ -104,11 +105,11 @@ dependencies = [
 
 [[package]]
 name = "rvim-termio"
-version = "1.0.0"
+version = "1.1.0"
 
 [[package]]
 name = "rvim-tools"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "rvim-editor",
  "rvim-ex",
@@ -117,7 +118,7 @@ dependencies = [
 
 [[package]]
 name = "rvim-undo"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "rvim-buffer",
  "rvim-core",
@@ -125,7 +126,7 @@ dependencies = [
 
 [[package]]
 name = "rvim-viml"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "rvim-core",
 ]

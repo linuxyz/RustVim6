@@ -34,12 +34,7 @@ use crate::value::{Value, ValueResult};
 pub const FUNCS: &[&str] = &["tr", "typename", "undofile", "wildmenumode", "writefile"];
 
 /// Dispatch a call; returns None when the name is not handled here.
-pub fn call(
-    name: &str,
-    args: &[Value],
-    _env: &mut Env,
-    host: &mut dyn Host,
-) -> Option<ValueResult> {
+pub fn call(name: &str, args: &[Value], env: &mut Env, host: &mut dyn Host) -> Option<ValueResult> {
     if !FUNCS.contains(&name) {
         return None;
     }
@@ -47,7 +42,7 @@ pub fn call(
         check_arity(name, args)?;
         match name {
             "tr" => tr(args),
-            "typename" => typename(args),
+            "typename" => typename(args, env),
             "undofile" => undofile(args, host),
             "wildmenumode" => Ok(Value::Number(0)),
             "writefile" => writefile(args),
@@ -114,8 +109,21 @@ fn tr(args: &[Value]) -> ValueResult {
 ///
 /// The string mirrors Vim's type printer: `list<number>`, `dict<any>`,
 /// `list<unknown>` for empty containers, `special` for `v:null`, etc.
-fn typename(args: &[Value]) -> ValueResult {
+fn typename(args: &[Value], env: &Env) -> ValueResult {
     let value = arg(args, 0);
+    if let Value::Funcref(func) = &value {
+        if let Some(name) = func.name.strip_prefix("<class>") {
+            let short = name.rsplit('_').next().unwrap_or(name);
+            return Ok(Value::string(format!("class<{short}>")));
+        }
+        if let Some(name) = func.name.strip_prefix("<enum>") {
+            let short = name.rsplit('_').next().unwrap_or(name);
+            return Ok(Value::string(format!("enum<{short}>")));
+        }
+    }
+    if let Some(class) = env.vim9.object_class(&value) {
+        return Ok(Value::string(format!("object<{}>", class.def.name)));
+    }
     let ty = typename_of(&value, &mut Vec::new(), 0);
     Ok(Value::String(type_name(&ty)))
 }

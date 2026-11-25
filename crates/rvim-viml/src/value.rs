@@ -87,6 +87,8 @@ pub struct FuncRef {
     pub dict: Option<Value>,
     /// Present for lambdas.
     pub lambda: Option<Rc<Lambda>>,
+    /// Present for compiled Vim9 lambdas.
+    pub vim9_lambda: Option<Rc<crate::vim9::runtime::Vim9Lambda>>,
 }
 
 impl PartialEq for FuncRef {
@@ -102,6 +104,7 @@ impl FuncRef {
             partial: Vec::new(),
             dict: None,
             lambda: None,
+            vim9_lambda: None,
         }
     }
 
@@ -111,6 +114,7 @@ impl FuncRef {
             partial: Vec::new(),
             dict: None,
             lambda: Some(Rc::new(lambda)),
+            vim9_lambda: None,
         }
     }
 }

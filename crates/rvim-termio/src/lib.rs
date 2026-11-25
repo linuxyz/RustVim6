@@ -371,6 +371,19 @@ mod platform {
     }
 }
 
+/// Set an environment variable for this process.
+///
+/// The editor runs builtins on one thread; this is the platform-layer wrapper
+/// for the edition-2024 unsafe 'std::env::set_var' call.
+#[allow(unsafe_code)]
+pub fn set_env(name: &str, value: &str) {
+    // SAFETY: called from the single-threaded editor loop, never while another
+    // thread reads the environment.
+    unsafe {
+        std::env::set_var(name, value);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

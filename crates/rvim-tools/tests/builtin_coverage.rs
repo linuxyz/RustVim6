@@ -10,6 +10,7 @@ fn implemented_names() -> Vec<&'static str> {
     names.extend_from_slice(rvim_ex::host_win::FUNCS);
     names.extend_from_slice(rvim_ex::host_meta::FUNCS);
     names.extend_from_slice(rvim_ex::host_more::FUNCS);
+    names.extend_from_slice(rvim_ex::host_extra::FUNCS);
     names.sort_unstable();
     names.dedup();
     names
@@ -44,11 +45,12 @@ fn no_function_is_implemented_twice_across_layers() {
     // names the host deliberately shadows (they are deduped for coverage but
     // should stay a short, reviewed list).
     let pure: Vec<&str> = rvim_viml::builtins::implemented_funcs();
-    let host_groups: [&[&str]; 4] = [
+    let host_groups: [&[&str]; 5] = [
         rvim_ex::script::HOST_BUILTINS,
         rvim_ex::host_win::FUNCS,
         rvim_ex::host_meta::FUNCS,
         rvim_ex::host_more::FUNCS,
+        rvim_ex::host_extra::FUNCS,
     ];
     let mut overlaps = Vec::new();
     for group in host_groups {

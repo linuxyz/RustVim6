@@ -226,17 +226,31 @@ pub fn call_builtin(
 fn dispatch(name: &str, args: &[Value], env: &mut Env, host: &mut dyn Host) -> ValueResult {
     match name {
         // ---------------------------------------------------------- types
-        "type" => Ok(Value::Number(match arg(args, 0) {
-            Value::Number(_) => 0,
-            Value::String(_) => 1,
-            Value::Funcref(_) => 2,
-            Value::List(_) => 3,
-            Value::Dict(_) => 4,
-            Value::Float(_) => 5,
-            Value::Bool(_) => 6,
-            Value::Null => 7,
-            Value::Blob(_) => 10,
-        })),
+        "type" => {
+            let value = arg(args, 0);
+            if let Value::Funcref(func) = &value {
+                if func.name.starts_with("<class>") {
+                    return Ok(Value::Number(12));
+                }
+                if func.name.starts_with("<enum>") {
+                    return Ok(Value::Number(15));
+                }
+            }
+            if env.vim9.object_class(&value).is_some() {
+                return Ok(Value::Number(13));
+            }
+            Ok(Value::Number(match value {
+                Value::Number(_) => 0,
+                Value::String(_) => 1,
+                Value::Funcref(_) => 2,
+                Value::List(_) => 3,
+                Value::Dict(_) => 4,
+                Value::Float(_) => 5,
+                Value::Bool(_) => 6,
+                Value::Null => 7,
+                Value::Blob(_) => 10,
+            }))
+        }
         "empty" => Ok(Value::Number(if is_empty(&arg(args, 0)) { 1 } else { 0 })),
         "len" => Ok(Value::Number(match arg(args, 0) {
             Value::List(l) => l.borrow().len() as i64,
@@ -1225,55 +1239,58 @@ fn split_text(text: &str, pattern: &str, keepempty: bool) -> Vec<String> {
 
 fn substitute_text(text: &str, pattern: &str, replacement: &str, global: bool) -> String {
     let mut out = String::new();
-    let mut rest = text;
-    loop {
-        match regex_mvp::find(pattern, rest, false) {
-            Some((b, e)) => {
-                out.push_str(&rest[..b]);
-                out.push_str(&expand_replacement(replacement, &rest[b..e]));
-                if e == 0 && b == 0 {
-                    // Zero-width match: copy one char to make progress.
-                    if let Some(c) = rest.chars().next() {
-                        out.push(c);
-                        rest = &rest[c.len_utf8()..];
-                        if !global {
-                            out.push_str(rest);
-                            break;
-                        }
-                        continue;
-                    }
-                    break;
-                }
-                rest = &rest[e..];
-                if !global {
-                    out.push_str(rest);
-                    break;
-                }
-                if rest.is_empty() {
-                    break;
-                }
-            }
-            None => {
-                out.push_str(rest);
+    let mut pos = 0usize;
+    while pos <= text.len() {
+        let Some(m) = regex_mvp::find_from(pattern, text, pos, false) else {
+            out.push_str(&text[pos..]);
+            break;
+        };
+        out.push_str(&text[pos..m.start]);
+        out.push_str(&expand_replacement(replacement, text, &m));
+        if m.end == m.start {
+            // Zero-width match: copy one character so the loop makes progress.
+            if m.start >= text.len() {
                 break;
             }
+            let ch = text[m.start..].chars().next().unwrap_or('\0');
+            out.push(ch);
+            pos = m.start + ch.len_utf8();
+            if !global {
+                out.push_str(&text[pos..]);
+                break;
+            }
+            continue;
+        }
+        pos = m.end;
+        if !global {
+            out.push_str(&text[pos..]);
+            break;
         }
     }
     out
 }
 
-fn expand_replacement(replacement: &str, matched: &str) -> String {
+/// Expand a sub() replacement, including \0..\9 capture references.
+fn expand_replacement(replacement: &str, text: &str, m: &regex_mvp::Match) -> String {
     let mut out = String::new();
     let mut chars = replacement.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
-            '&' => out.push_str(matched),
+            '&' => out.push_str(&text[m.start..m.end]),
             '\\' => match chars.next() {
                 Some('n') => out.push('\0'),
                 Some('t') => out.push('\t'),
                 Some('r') => out.push('\r'),
                 Some('&') => out.push('&'),
                 Some('\\') => out.push('\\'),
+                Some(d) if d.is_ascii_digit() => {
+                    let index = d.to_digit(10).unwrap_or(0) as usize;
+                    if index == 0 {
+                        out.push_str(&text[m.start..m.end]);
+                    } else if let Some(Some((start, end))) = m.groups.get(index - 1) {
+                        out.push_str(&text[*start..*end]);
+                    }
+                }
                 Some(other) => {
                     out.push('\\');
                     out.push(other);
@@ -1547,6 +1564,21 @@ mod tests {
     fn run(src: &str, env: &mut Env) -> Value {
         let expr = parse_expression(src).unwrap();
         eval(&expr, env, &mut NoHost).unwrap()
+    }
+
+    #[test]
+    fn substitute_expands_capture_groups() {
+        // M9 needs this for dist#ft#SetFileTypeShell()/script detection:
+        // substitute('#!/bin/sh', '...\(\i\+\)', '\1', '') must yield 'sh'.
+        assert_eq!(substitute_text("abc", "\\(b\\)", "\\1", false), "abc");
+        assert_eq!(
+            substitute_text("#!/bin/sh", "^#!.*[/\\\\]\\(\\i\\+\\)", "\\1", false),
+            "sh"
+        );
+        assert_eq!(
+            substitute_text("a1 b2", "\\w\\(\\d\\)", "<\\1>", true),
+            "<1> <2>"
+        );
     }
 
     #[test]

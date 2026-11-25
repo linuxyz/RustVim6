@@ -436,6 +436,17 @@ impl Editor {
     /// The new window inherits the cursor and window-local options of the one it
     /// was split from, like vim`s `win_split()`.
     pub fn split_window(&mut self, vertical: bool) -> VimResult<WindowId> {
+        // Batch/Ex mode has no real screen; test scripts split many scratch
+        // windows (and close them again), so give the layout room instead of
+        // failing with E36 after a few splits.
+        if self.exmode {
+            let win = self.windows.current_mut();
+            if vertical {
+                win.width = win.width.max(200);
+            } else {
+                win.height = win.height.max(200);
+            }
+        }
         let bufnr = self.current_bufnr();
         let id = self.windows.split(vertical, bufnr, true)?;
         self.sync_fileformat_option(bufnr);

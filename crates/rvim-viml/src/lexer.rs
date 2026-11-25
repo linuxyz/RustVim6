@@ -24,6 +24,8 @@ pub enum Token {
     RBracket,
     LBrace,
     RBrace,
+    /// '#{' Vim9-style dictionary literal (bare keys).
+    HashBrace,
     Comma,
     Colon,
     Semicolon,
@@ -119,6 +121,10 @@ impl Lexer {
                 ']' => {
                     self.bump();
                     Token::RBracket
+                }
+                '#' if self.peek_at(1) == Some('{') => {
+                    self.pos += 2;
+                    Token::HashBrace
                 }
                 '{' => {
                     self.bump();

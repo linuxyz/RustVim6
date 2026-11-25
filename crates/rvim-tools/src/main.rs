@@ -34,6 +34,7 @@ fn main() -> ExitCode {
         Some("gen-cmds") => gencmds::run(&root),
         Some("gen-funcs") => genfuncs::run(&root),
         Some("coverage") => coverage::run(&root, args.iter().any(|a| a == "--check")),
+        Some("missing-funcs") => coverage::report_missing(),
         Some("freq") => freq::run(&root),
         Some("freq-top") => {
             let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(40);
@@ -42,7 +43,7 @@ fn main() -> ExitCode {
         Some("help") | Some("--help") | Some("-h") | None => {
             println!(
                 "rvim-tools <command>\n\n  gen-cmds   regenerate the 589-entry Ex command table\n  gen-funcs  regenerate the 543-entry builtin function table\n  \
-                 coverage   write docs/COVERAGE.md (--check: fail if out of date)\n  \
+                 coverage   write docs/COVERAGE.md (--check: fail if out of date)\n  missing-funcs  list builtins from the 543-entry denominator without an implementation\n  \
                  freq       frequency-weighted implementation report from runtime scripts"
             );
             Ok(())

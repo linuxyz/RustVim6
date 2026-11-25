@@ -1,5 +1,10 @@
 # M3 builtin-function implementation plan
 
+> **状态（已收口）**：543/543 个函数都已有实现入口（`crates/rvim-viml` 纯函数 +
+> `crates/rvim-ex` 宿主函数）。原计划中的 102 个缺口由 `crates/rvim-ex/src/host_extra.rs`
+> 收口；其中依赖未建子系统的函数按 Vim 语义返回 no-op/E319，逐条登记在
+> `docs/compat_deviations.md` §15。覆盖率校验：`cargo run -p rvim-tools -- missing-funcs`。
+
 Baseline denominator: 543 functions (`evalfunc.c` global_functions[]). Target: >= 70% (381 implemented).
 Already implemented (77 pure in `builtins.rs` + 24 host in `rvim-ex::script`) are excluded below.
 

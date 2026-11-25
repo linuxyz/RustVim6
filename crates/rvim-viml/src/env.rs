@@ -7,11 +7,13 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::Path;
 use std::rc::Rc;
 
 use rvim_core::{VimError, VimResult};
 
 use crate::value::{Value, ValueResult, VimDict};
+use crate::vim9::runtime::Vim9State;
 
 /// One function-call frame.
 #[derive(Debug, Default, Clone)]
@@ -49,8 +51,14 @@ fn scope_key(name: &str) -> Option<ScopeKey> {
 pub struct Env {
     pub globals: HashMap<String, Value>,
     pub vvars: HashMap<String, Value>,
-    /// One map per sourced script (`s:` variables); the last one is current.
+    /// One map per sourced script ('s:' variables), indexed by script id.
+    /// The maps are kept after the script finishes so 's:' variables and Vim9
+    /// script-local state survive (Vim's behaviour).
     pub scripts: Vec<HashMap<String, Value>>,
+    /// Stack of previous script ids, restored by [Env::pop_script].
+    pub sid_stack: Vec<usize>,
+    /// Vim9 state: compiled functions, modules and imports (M9).
+    pub vim9: Vim9State,
     pub frames: Vec<Frame>,
     /// Current script id for `<SID>` resolution.
     pub current_sid: usize,
@@ -84,6 +92,8 @@ impl Env {
             globals: HashMap::new(),
             vvars: HashMap::new(),
             scripts: vec![HashMap::new()],
+            sid_stack: Vec::new(),
+            vim9: Vim9State::default(),
             frames: Vec::new(),
             current_sid: 0,
             call_depth: 0,
@@ -107,6 +117,23 @@ impl Env {
             ("null", Value::Null),
             ("none", Value::Null),
             ("version", Value::Number(802)),
+            // Vim9 type constants (vim9type.c); legacy scripts use them too.
+            ("t_number", Value::Number(0)),
+            ("t_string", Value::Number(1)),
+            ("t_func", Value::Number(2)),
+            ("t_list", Value::Number(3)),
+            ("t_dict", Value::Number(4)),
+            ("t_float", Value::Number(5)),
+            ("t_bool", Value::Number(6)),
+            ("t_none", Value::Number(7)),
+            ("t_job", Value::Number(8)),
+            ("t_channel", Value::Number(9)),
+            ("t_blob", Value::Number(10)),
+            ("t_class", Value::Number(12)),
+            ("t_object", Value::Number(13)),
+            ("t_typealias", Value::Number(14)),
+            ("t_enum", Value::Number(15)),
+            ("t_enumvalue", Value::Number(16)),
             ("progname", Value::string("rvim")),
             ("progpath", Value::string("")),
             ("errmsg", Value::string("")),
@@ -151,6 +178,27 @@ impl Env {
             ("swapcommand", Value::string("")),
             ("servername", Value::string("")),
             ("versionlong", Value::Number(802)),
+            // Vim 9.2 typed null values. They are distinct from v:null in Vim;
+            // here they start as the type's empty value so scripts can load.
+            ("null_string", Value::String(String::new())),
+            (
+                "null_list",
+                Value::List(std::rc::Rc::new(std::cell::RefCell::new(Vec::new()))),
+            ),
+            (
+                "null_dict",
+                Value::Dict(std::rc::Rc::new(std::cell::RefCell::new(
+                    crate::value::VimDict::new(),
+                ))),
+            ),
+            (
+                "null_blob",
+                Value::Blob(std::rc::Rc::new(std::cell::RefCell::new(Vec::new()))),
+            ),
+            ("null_function", Value::Null),
+            ("null_partial", Value::Null),
+            ("null_class", Value::Null),
+            ("null_object", Value::Null),
         ];
         for (name, value) in defaults {
             self.vvars.insert((*name).to_string(), value.clone());
@@ -158,17 +206,17 @@ impl Env {
     }
 
     pub fn push_script(&mut self) -> usize {
+        self.sid_stack.push(self.current_sid);
         self.scripts.push(HashMap::new());
         self.current_sid = self.scripts.len() - 1;
         self.current_sid
     }
 
+    /// Leave a sourced script. The script's variable map is kept (Vim's 's:'
+    /// variables remain reachable after :source returns).
     pub fn pop_script(&mut self) -> usize {
         let sid = self.current_sid;
-        if self.scripts.len() > 1 {
-            self.scripts.pop();
-        }
-        self.current_sid = self.scripts.len().saturating_sub(1);
+        self.current_sid = self.sid_stack.pop().unwrap_or(0);
         sid
     }
 
@@ -532,8 +580,30 @@ pub trait Host {
         false
     }
 
-    /// Execute one Ex command line (used by `:execute` inside functions).
+    /// Execute one Ex command line (used by ':execute' inside functions).
     fn execute_command(&mut self, _line: &str, _env: &mut Env) -> Option<VimResult<()>> {
+        None
+    }
+
+    /// Source a script file on behalf of a Vim9 'import' statement.
+    fn source_script(&mut self, _path: &Path, _env: &mut Env) -> Option<VimResult<()>> {
+        None
+    }
+
+    /// Define a legacy ':func' found inside a Vim9 script. The Ex layer owns
+    /// the legacy function representation, so it does the work.
+    fn define_legacy_function(
+        &mut self,
+        _header: &str,
+        _body: &[String],
+        _sid: usize,
+        _env: &mut Env,
+    ) -> Option<VimResult<()>> {
+        None
+    }
+
+    /// Print one ':echo'/':echomsg'/':echoerr' argument.
+    fn echo_message(&mut self, _text: &str, _err: bool) -> Option<VimResult<()>> {
         None
     }
 }
