@@ -381,24 +381,35 @@ impl Gui {
                 let Some(cell) = grid.cell(row, col) else {
                     break;
                 };
+                if cell.continuation {
+                    col += 1;
+                    continue;
+                }
                 let style = cell.style;
                 let start = col;
                 let mut text = String::new();
+                let mut span = 0usize;
                 let wide = is_wide_char(cell.ch);
                 while col < self.cols {
                     let Some(next) = grid.cell(row, col) else {
                         break;
                     };
+                    if next.continuation {
+                        col += 1;
+                        continue;
+                    }
                     if next.style != style || (!text.is_empty() && is_wide_char(next.ch) != wide) {
                         break;
                     }
                     text.push(next.ch);
-                    col += 1;
+                    let width = rvim_term::char_width(next.ch).max(1);
+                    span += width;
+                    col += width;
                 }
                 let (fg, bg) = colors(style);
                 let x = start as f32 * self.cell_w;
                 let y = row as f32 * self.cell_h;
-                let width = (col - start) as f32 * self.cell_w;
+                let width = span as f32 * self.cell_w;
                 if bg != DEFAULT_BG {
                     let rect = D2D1_RECT_F {
                         left: x,
@@ -477,7 +488,11 @@ impl Gui {
             return;
         }
         let wide: Vec<u16> = text.encode_utf16().collect();
-        let max_w = text.chars().count() as f32 * self.cell_w + 4.0;
+        let display_width: usize = text
+            .chars()
+            .map(|ch| rvim_term::char_width(ch).max(1))
+            .sum();
+        let max_w = display_width as f32 * self.cell_w + 4.0;
         let mut layout: *mut IDWriteTextLayout = null_mut();
         let hr = unsafe {
             (*self.dwrite).CreateTextLayout(
@@ -510,12 +525,16 @@ impl Gui {
         let (fg, bg) = self.cursor_colors();
         let x = col as f32 * self.cell_w;
         let y = row as f32 * self.cell_h;
+        let cell_width = cell
+            .map(|(ch, _)| rvim_term::char_width(ch).max(1))
+            .unwrap_or(1) as f32
+            * self.cell_w;
         match cursor_shape(self.tui.session.editor.mode) {
             CursorShape::Block => {
                 let rect = D2D1_RECT_F {
                     left: x,
                     top: y,
-                    right: x + self.cell_w,
+                    right: x + cell_width,
                     bottom: y + self.cell_h,
                 };
                 let brush = self.brush(bg);
@@ -550,7 +569,7 @@ impl Gui {
                 let rect = D2D1_RECT_F {
                     left: x,
                     top: y + self.cell_h - height,
-                    right: x + self.cell_w,
+                    right: x + cell_width,
                     bottom: y + self.cell_h,
                 };
                 let brush = self.brush(bg);
@@ -1156,19 +1175,7 @@ fn hl_rgb(color: HlColor) -> (u8, u8, u8) {
 }
 
 fn is_wide_char(ch: char) -> bool {
-    matches!(
-        ch as u32,
-        0x1100..=0x115f
-            | 0x2e80..=0xa4cf
-            | 0xac00..=0xd7a3
-            | 0xf900..=0xfaff
-            | 0xfe10..=0xfe19
-            | 0xfe30..=0xfe6f
-            | 0xff00..=0xff60
-            | 0xffe0..=0xffe6
-            | 0x1f300..=0x1faff
-            | 0x20000..=0x3fffd
-    )
+    rvim_term::char_width(ch) == 2
 }
 
 fn parse_font(spec: &str) -> (String, f32) {

@@ -20,6 +20,9 @@ GUI. The console/TUI remains the default when a terminal is attached.
 - Each row is split into same-style runs; backgrounds are filled with
   `ID2D1SolidColorBrush`, text is drawn with `DrawTextLayout`, and the cursor
   uses the Vim block/vertical/horizontal shapes described below.
+- East Asian wide glyphs occupy two grid cells (the second is a continuation
+  cell skipped by both the terminal renderer and Direct2D); `guifontwide` is
+  used for wide runs.
 - 256-colour ANSI values and 24-bit RGB values are both mapped to Direct2D
   colours. The default font is Consolas at 12 pt (16 DIPs at 96 DPI), scaled by
   the window DPI and configurable with `guifont` / `guifontwide`.
@@ -86,7 +89,8 @@ The GUI follows Vim's `guioptions` **e** flag for the tabline. The default is
 ## Limitations
 
 - No mouse click-to-position or drag selection, native menus, or cursor shape
-  customization through `guicursor` yet.
+  customization through `guicursor` yet. Combining marks are not attached to
+  the preceding glyph by the simple cell model (wide CJK glyphs are supported).
 - The GUI still runs the console-subsystem `rvim.exe` and detaches its console
   with `FreeConsole`; a dedicated GUI-subsystem launcher is not shipped.
 - Windows-only. `rvim --gui` on other platforms returns an error (the Linux

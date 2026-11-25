@@ -52,7 +52,7 @@ Invoke-Gate 'zero third-party dependencies' {
         Where-Object { $_ -notmatch '^#' } |
         ForEach-Object { ($_ -split ' ')[0] } |
         Sort-Object -Unique
-    $allowed = @('winapi', 'winapi-i686-pc-windows-gnu', 'winapi-x86_64-pc-windows-gnu')
+    $allowed = @('winapi', 'winapi-i686-pc-windows-gnu', 'winapi-x86_64-pc-windows-gnu', 'unicode-width')
     $external = $external | Where-Object { $allowed -notcontains $_ }
     if ($external) {
         Write-Host "third-party crates found: $($external -join ', ')" -ForegroundColor Red

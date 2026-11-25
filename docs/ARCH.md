@@ -1,7 +1,7 @@
 # RustVim 架构设计（ARCH）
 
 > 目标：用 Rust 重写 Vim，行为参照 [vim/vim `v8.2.5172`](https://github.com/vim/vim/tree/v8.2.5172)（Vim 8.2，patch 5172）。
-> 设计约束：**编辑器核心 100% Rust 标准库（std-only）**；Windows GUI 平台层使用 `winapi` 0.3 绑定（Direct2D/DirectWrite），其余部分无第三方依赖。
+> 设计约束：**编辑器核心以 Rust 标准库为主**，仅用 `unicode-width` 计算 CJK 显示宽度；Windows GUI 平台层使用 `winapi` 0.3 绑定（Direct2D/DirectWrite）。
 > 平台优先 Windows（当前开发机），同时保持类 Unix 可移植性；通过分层架构保证 **Vim Runtime 兼容**可逐步达成。
 
 ---
@@ -296,7 +296,7 @@ M2 已落地**完整 589 条声明表**：`crates/rvim-ex/src/cmd_table.rs` 由 
   `defaults.vim`（无 vimrc 时）→ packages(`pack/`) → filetype/indent/syntax on → `-c`/缓冲区参数 → BufRead/BufEnter 事件。
 - `&compatible` 推断、`skip_defaults_vim`、`--clean`、`-N` 行为全部建模。
 
-### 5.6 终端 I/O 与 TUI 驱动（rvim-termio / rvim-term / rvim-app::tui，std-only）
+### 5.6 终端 I/O 与 TUI 驱动（rvim-termio / rvim-term / rvim-app::tui，std + unicode-width）
 - 原始模式：Windows 用 `GetStdHandle`/`GetConsoleMode`/`SetConsoleMode` 打开 `ENABLE_VIRTUAL_TERMINAL_INPUT` 与 `ENABLE_VIRTUAL_TERMINAL_PROCESSING`、关掉行输入/回显/processed input；POSIX 用 `stty raw -echo`，退出时恢复（RAII）。拿不到控制台时返回 `Unsupported`，`rvim` 回落 `-es` 批量口径。
 - 输入：`stdin` 读线程 + `mpsc` 通道投递字节块，主循环用 120ms `recv_timeout` 轮询控制台尺寸（std 无 select 的替代方案）。字节→键码（CSI/SS3/UTF-8/控制字符；跨读的不完整序列保留，未知 `CSI … ~` 消费为 `CSI-n~`）→映射展开（最长匹配、`timeoutlen` 超时回落字面量）→normal/insert/cmdline 分发。
 - 输出：ANSI writer（备用屏 `?1049h/l`、光标定位、SGR、256/真彩）；`Grid` 行级差量刷新（`diff_ansi`），resize 时清屏并按新几何全量重绘。

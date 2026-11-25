@@ -2,12 +2,15 @@
 //! in vim's `screen.c`, `update_screen()`/`screen_line()`).
 
 use crate::style::Style;
+use crate::width::char_width;
 
 /// One character cell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cell {
     pub ch: char,
     pub style: Style,
+    /// Second cell of a double-width character; skipped when painting.
+    pub continuation: bool,
 }
 
 impl Default for Cell {
@@ -15,6 +18,7 @@ impl Default for Cell {
         Self {
             ch: ' ',
             style: Style::NORMAL,
+            continuation: false,
         }
     }
 }
@@ -69,12 +73,49 @@ impl Grid {
         if row >= self.rows {
             return;
         }
-        for (offset, ch) in text.chars().enumerate() {
-            let x = col + offset;
+        let mut x = col;
+        let mut first = true;
+        for ch in text.chars() {
+            if ch == '\0' {
+                // Continuation cell already placed by the preceding wide glyph.
+                // If a horizontal slice starts on one, leave its first half blank.
+                if first && x < self.cols {
+                    x += 1;
+                }
+                first = false;
+                continue;
+            }
+            let width = char_width(ch);
+            if width == 0 {
+                continue;
+            }
             if x >= self.cols {
                 break;
             }
-            self.cells[row * self.cols + x] = Cell { ch, style };
+            if x + width > self.cols {
+                self.cells[row * self.cols + x] = Cell {
+                    ch: ' ',
+                    style,
+                    continuation: false,
+                };
+                x += width;
+                first = false;
+                continue;
+            }
+            self.cells[row * self.cols + x] = Cell {
+                ch,
+                style,
+                continuation: false,
+            };
+            for offset in 1..width {
+                self.cells[row * self.cols + x + offset] = Cell {
+                    ch: '\0',
+                    style,
+                    continuation: true,
+                };
+            }
+            x += width;
+            first = false;
         }
     }
 
@@ -97,7 +138,11 @@ impl Grid {
             return;
         }
         for col in 0..self.cols {
-            self.cells[row * self.cols + col] = Cell { ch, style };
+            self.cells[row * self.cols + col] = Cell {
+                ch,
+                style,
+                continuation: false,
+            };
         }
     }
 
@@ -108,7 +153,8 @@ impl Grid {
         }
         let text: String = self.cells[row * self.cols..(row + 1) * self.cols]
             .iter()
-            .map(|c| c.ch)
+            .filter(|cell| !cell.continuation)
+            .map(|cell| cell.ch)
             .collect();
         text.trim_end().to_string()
     }
@@ -168,6 +214,9 @@ impl Grid {
             let Some(cell) = self.cell(row, col) else {
                 break;
             };
+            if cell.continuation {
+                continue;
+            }
             if cell.style != style {
                 out.push_str(&cell.style.sgr());
                 style = cell.style;
@@ -193,6 +242,27 @@ mod tests {
         grid.put(0, 0, "abcdef", Style::NORMAL);
         assert_eq!(grid.row_text(0), "abcde");
         assert_eq!(grid.row_text(1), "");
+    }
+
+    #[test]
+    fn wide_glyphs_use_a_continuation_cell() {
+        let mut grid = Grid::new(6, 1);
+        grid.put(0, 0, "漢字x", Style::NORMAL);
+        assert_eq!(grid.row_text(0), "漢字x");
+        assert_eq!(grid.cell(0, 0).unwrap().ch, '漢');
+        assert!(grid.cell(0, 1).unwrap().continuation);
+        assert_eq!(grid.cell(0, 2).unwrap().ch, '字');
+        assert!(grid.cell(0, 3).unwrap().continuation);
+        assert_eq!(grid.cell(0, 4).unwrap().ch, 'x');
+        assert!(!grid.row_ansi(0).contains('\0'));
+    }
+
+    #[test]
+    fn a_wide_glyph_at_the_right_edge_becomes_a_space() {
+        let mut grid = Grid::new(2, 1);
+        grid.put(0, 1, "漢", Style::NORMAL);
+        assert_eq!(grid.cell(0, 1).unwrap().ch, ' ');
+        assert_eq!(grid.row_text(0), "");
     }
 
     #[test]

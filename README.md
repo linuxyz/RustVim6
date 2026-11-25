@@ -1,7 +1,8 @@
 # RustVim
 
 A Vim-compatible editor written from scratch in Rust. The editor core is
-**`std`-only**; the Windows GUI platform layer uses the `winapi` 0.3 bindings.
+**`std`-only** apart from the small `unicode-width` table used for CJK display
+width; the Windows GUI platform layer uses the `winapi` 0.3 bindings.
 The editor baseline is Vim `v8.2.5172`;
 **Vim9 script** is anchored to Vim `v9.2.1398`
 (`https://github.com/vim/vim/tree/v9.2.1398`), including class/interface/enum/type
@@ -16,13 +17,13 @@ M8 encryption/compression is self-contained (see [docs/PLAN.md](docs/PLAN.md)).
 | M1 | headless editing core (buffers, undo tree, marks, registers, options) |
 | M2 | 589-entry Ex command table, 311 implemented (after M9), command line + completion, maps/abbrevs |
 | M3 | legacy VimL interpreter, **543/543 builtins wired** (subsystem-less ones are documented stubs), autocmd dispatch, `:source` of real runtime scripts |
-| M4 | terminal TUI (grid, keys, mappings, search, message paging, resize) |
+| M4 | terminal TUI (grid, keys, mappings, search, message paging, resize), CJK/wide-glyph cell layout |
 | M5 | windows/tabpages, folds, diff (`rvim -d`), quickfix/location lists, visual mode + text objects, `.` repeat, jumps/changes, viminfo, sign/textprop/popup APIs |
 | M6 | syntax highlighting: `rvim-syntax` (keyword/match/region, contained/transparent/skip/nextgroup, sync, runtime `syntax/*.vim`), 20 built-in filetypes, `:syntax`/`:highlight`, `synID()` family, coloured TUI cells; regex closures (`\zs`, backrefs, lookaround, `\_.`, magic levels); `:s` replacement specials; spell (`.spl`/word lists, suggestions, Spell* highlighting); tags (`:tag` family, tag stack, `<C-]>`); `cindent`/`smartindent`; `:vimgrep` |
 | M7 | jobs (`job_start`/callbacks), TCP channels + JSON-RPC (`ch_*`), timers (`timer_*`), minimal terminal buffers (`term_start`, `term_getline`), `:sleep` event pumping |
 | M8 | compatibility closure: encryption/compression (`zip`, `blowfish`, `blowfish2`), `has()` feature list, `:redir`, session/view files, packaging script (Windows zip / Unix tar.gz, runtime merge), **multi-size HiDPI Windows icon (16-256 px, embedded in exe + installer)**, installed `$VIMRUNTIME` lookup, `rvim 1.0` |
 | M9 | Vim9 script (`rvim 1.1`, reference **v9.2.1398**): `vim9script`, typed `def`/`var`/`const`/`final`, `import`/`export`, lambdas, method calls, interpolation, exceptions, **classes/objects/static members**, **enums**, interfaces, type aliases; 7/8 Vim 9.2 Vim9 autoloads source; 9.2 conformance subset 26/322 pass (8.1%), 123 run to completion |
-| GUI | Windows **Direct2D/DirectWrite** front-end (`rvim --gui` or no console): native window, `Tui` grid rendering, keyboard/mouse-wheel input, IME, `*` clipboard, Vim cursors, `guifont`/`guifontwide`, guioptions tabline, resize and PerMonitorV2 DPI; see [docs/GUI.md](docs/GUI.md) |
+| GUI | Windows **Direct2D/DirectWrite** front-end (`rvim --gui` or no console): native window, `Tui` grid rendering, keyboard/mouse-wheel input, IME, `*` clipboard, Vim cursors, CJK/wide-glyph rendering, `guifont`/`guifontwide`, guioptions tabline, resize and PerMonitorV2 DPI; see [docs/GUI.md](docs/GUI.md) |
 
 All nine milestones are delivered. See [docs/VIM9.md](docs/VIM9.md) for the Vim9 9.2
 feature matrix and the published conformance numbers, and

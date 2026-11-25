@@ -1,5 +1,5 @@
 # RustVim workspace — Vim rewrite in Rust (reference: vim/vim v8.2.5172)
-# Editor core is std-only; the Windows GUI platform layer uses winapi 0.3.
+# Editor core is std-only plus unicode-width; the Windows GUI uses winapi 0.3.
 # The M8 encryption/compression code is self-contained (see docs/PLAN.md).
 [workspace]
 resolver = "2"

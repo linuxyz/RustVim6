@@ -4,6 +4,7 @@
 
 use crate::grid::Grid;
 use crate::style::{Color, Style};
+use crate::width::char_width;
 
 /// Command-line row contents (`:` or `/` prompt).
 #[derive(Clone, Copy, Debug)]
@@ -150,7 +151,18 @@ pub fn expand_cells(text: &str, tabstop: usize) -> Vec<char> {
                 cells.push('^');
                 cells.push(char::from(b'@' + c as u8));
             }
-            c => cells.push(c),
+            c => {
+                let width = char_width(c);
+                if width == 0 {
+                    // Combining marks have no cell of their own; the simple
+                    // Grid cell model cannot attach them to the previous glyph.
+                    continue;
+                }
+                cells.push(c);
+                if width > 1 {
+                    cells.resize(cells.len() + width - 1, '\0');
+                }
+            }
         }
     }
     cells
@@ -418,7 +430,13 @@ mod tests {
     fn display_column_counts_characters_not_bytes() {
         assert_eq!(display_col("abc", 3, 8), 3);
         assert_eq!(display_col("héllo", 3, 8), 2, "é is two bytes, one column");
-        assert_eq!(display_col("漢字", 3, 8), 1);
+        assert_eq!(display_col("漢字", 3, 8), 2, "CJK glyphs occupy two cells");
+        assert_eq!(display_col("漢字", 6, 8), 4);
+        assert_eq!(
+            expand_cells("漢x", 8),
+            vec!['漢', '\0', 'x'],
+            "wide glyphs reserve a continuation cell"
+        );
     }
 
     #[test]

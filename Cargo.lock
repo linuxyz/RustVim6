@@ -116,6 +116,7 @@ dependencies = [
  "rvim-core",
  "rvim-editor",
  "rvim-termio",
+ "unicode-width",
 ]
 
 [[package]]
@@ -145,6 +146,12 @@ version = "1.1.0"
 dependencies = [
  "rvim-core",
 ]
+
+[[package]]
+name = "unicode-width"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
 
 [[package]]
 name = "winapi"

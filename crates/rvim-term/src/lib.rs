@@ -14,6 +14,7 @@ pub mod key;
 pub mod pane;
 pub mod render;
 pub mod style;
+pub mod width;
 
 pub use grid::{Cell, Grid};
 pub use key::{Decoded, decode_keys, encode_keys};
@@ -21,6 +22,7 @@ pub use render::{
     CmdlineView, ScreenModel, Theme, WildmenuView, display_col, expand_cells, gutter_width, render,
 };
 pub use style::{Color, Style};
+pub use width::char_width;
 
 use std::io;
 use std::time::Duration;
