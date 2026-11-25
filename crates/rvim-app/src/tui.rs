@@ -1739,13 +1739,28 @@ impl Tui {
             format!("{}%", above * 100 / (above + below))
         };
         let right = format!("{line},{col}  {percent}  [{mode}]");
-        let left_len = expand_cells(&left, tabstop).len();
-        let right_len = expand_cells(&right, tabstop).len();
-        if left_len + right_len + 1 > cols {
-            return right;
+        Self::align_statusline(&left, &right, cols, tabstop)
+    }
+
+    /// Pad a statusline so its right block ends at the last column, even when the
+    /// left block no longer fits after a resize. The returned string is exactly
+    /// cols display cells wide when possible.
+    fn align_statusline(left: &str, right: &str, cols: usize, tabstop: usize) -> String {
+        let left_len = expand_cells(left, tabstop).len();
+        let right_len = expand_cells(right, tabstop).len();
+        if cols == 0 {
+            return String::new();
         }
-        let pad = cols - left_len - right_len;
-        format!("{left}{}{right}", " ".repeat(pad))
+        if left_len + right_len < cols {
+            return format!("{left}{}{right}", " ".repeat(cols - left_len - right_len));
+        }
+        if right_len >= cols {
+            // The right block is already wider than the window. Keep its last
+            // columns so the mode/ruler ends at the right edge.
+            let skip = right_len - cols;
+            return right.chars().skip(skip).collect();
+        }
+        format!("{}{right}", " ".repeat(cols - right_len))
     }
 
     /// Statusline of the current window (kept for the `--script` driver).
@@ -1927,6 +1942,20 @@ fn map_mode_for(mode: Mode) -> Option<MapMode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn statusline_right_block_stays_right_aligned_after_resize() {
+        let left = "file.txt";
+        let right = "1,1  All  [NORMAL]";
+        let status = Tui::align_statusline(left, right, 20, 8);
+        assert_eq!(expand_cells(&status, 8).len(), 20);
+        assert!(status.ends_with(right), "{status:?}");
+        assert!(status.starts_with(' '), "{status:?}");
+
+        let status = Tui::align_statusline("文件名很长", right, 20, 8);
+        assert_eq!(expand_cells(&status, 8).len(), 20);
+        assert!(status.ends_with(right), "{status:?}");
+    }
 
     #[test]
     fn status_column_uses_display_cells_for_cjk() {
