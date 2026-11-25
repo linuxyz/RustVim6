@@ -117,6 +117,15 @@ font or UTF-8 byte offset: a Latin cell moves one column, a CJK/emoji cell moves
 two. DirectWrite may use more fallback faces inside a run; the cell grid stays
 monospaced.
 
+## DPI changes
+
+The manifest declares PerMonitorV2. On `WM_DPICHANGED` the suggested window
+rectangle is applied, then the text formats and cell metrics are rebuilt from
+the DPI in `wParam` (not only `GetDpiForWindow`, which can still report the old
+monitor during the transition). Font sizes are specified in points, so moving
+between 100%, 150% and 200% monitors changes physical cell size and the number
+of columns/rows while keeping the same logical font size.
+
 ## Input
 
 - `WM_CHAR` feeds printable characters; `WM_KEYDOWN` maps Enter, Backspace,

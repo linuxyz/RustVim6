@@ -265,9 +265,13 @@ impl Gui {
         let dpi = if self.hwnd.is_null() {
             96
         } else {
-            unsafe { GetDpiForWindow(self.hwnd) }.max(96)
+            unsafe { GetDpiForWindow(self.hwnd) }
         };
-        let scale = dpi as f32 / 96.0;
+        self.update_metrics_at(dpi);
+    }
+
+    fn update_metrics_at(&mut self, dpi: u32) {
+        let scale = dpi.max(96) as f32 / 96.0;
         let font_spec = self.tui.session.editor.options.str_or("guifont", "");
         let wide_spec = self.tui.session.editor.options.str_or("guifontwide", "");
         if (scale - self.scale).abs() > 0.01
@@ -1104,6 +1108,14 @@ unsafe extern "system" fn wndproc(
                 suggested.bottom - suggested.top,
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
+            // WM_SIZE normally lands before this message returns, but update
+            // explicitly from the authoritative WM_DPICHANGED DPI value so the
+            // font formats are rebuilt even when the suggested size is
+            // unchanged.
+            let new_dpi = (wparam & 0xffff) as u32;
+            (*gui).update_metrics_at(new_dpi);
+            (*gui).resize_target();
+            InvalidateRect(hwnd, null(), 0);
             0
         }
         WM_CLOSE => {
