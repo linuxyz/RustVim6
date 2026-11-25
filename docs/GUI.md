@@ -53,12 +53,16 @@ set guifontwide=MS\ Gothic:h14
 set guifont?
 ```
 
-`hN` is the point size. `guifontwide` is used for East Asian wide-character
-runs. If `guifontwide` omits `hN`, it inherits the `guifont` point size;
-if it specifies `hN`, that size is used. The normal font defines the cell
-width and height, using Vim's average-width measurement over the Latin
-alphabet; `guifontwide` changes the wide glyph shape/size but does not widen
-Latin cells. Changing either size updates the layout on the next frame.
+`hN` is the point size. If `guifontwide` specifies `hN`, that size also sets
+the normal `guifont` size. The wide format is then measured with the 20 Han
+characters `一二三人口手千千万万大大反方上海重启还在` (40 cells) and its
+point size is adjusted automatically so those glyphs fit exactly 40 normal
+cells; the fitted format is what gets used. If `guifontwide` omits `hN`, it
+inherits the `guifont` size.
+
+The normal font defines the cell width and height, using Vim's average-width
+measurement over the Latin alphabet; the fitted wide font does not widen Latin
+cells. Changing either size updates the layout on the next frame.
 
 In the GUI, a bare `:set guifont`, `:set guifontwide`, `:set guifont=*` or
 `:set guifont=` opens the native Windows **Font** dialog (ChooseFont); the

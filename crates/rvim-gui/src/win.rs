@@ -274,18 +274,42 @@ impl Gui {
             || font_spec != self.font_spec
             || wide_spec != self.wide_spec
         {
-            let (family, points) = parse_font(&font_spec);
+            let (family, mut points) = parse_font(&font_spec);
+            // A wide font's explicit :hN is the master size: it also sets the
+            // normal font, then the wide font is fitted to the 40-cell sample.
+            if let Some(wide_height) = explicit_height(&wide_spec) {
+                points = wide_height;
+            }
             if let Ok(formats) = make_formats(self.dwrite, scale, &family, points) {
+                let (cell_width, _) = formats
+                    .first()
+                    .copied()
+                    .map(|format| measure_cell(self.dwrite, format))
+                    .unwrap_or((9.0 * scale, 18.0 * scale));
                 let wide_formats = if wide_spec.is_empty() {
                     Vec::new()
                 } else {
                     let (wide_family, wide_points) = parse_font_with_default(&wide_spec, points);
-                    make_formats(self.dwrite, scale, &wide_family, wide_points).unwrap_or_default()
-                };
-                let (_, emoji_points) = parse_font(&font_spec);
-                let emoji_formats =
-                    make_formats(self.dwrite, scale, "Segoe UI Emoji", emoji_points)
+                    let mut wide = make_formats(self.dwrite, scale, &wide_family, wide_points)
                         .unwrap_or_default();
+                    if let Some(format) = wide.first().copied() {
+                        let fitted = fit_wide_points(self.dwrite, format, wide_points, cell_width);
+                        if (fitted - wide_points).abs() > 0.05 {
+                            if let Ok(next) = make_formats(self.dwrite, scale, &wide_family, fitted)
+                            {
+                                unsafe {
+                                    for old in wide.drain(..) {
+                                        release(old);
+                                    }
+                                }
+                                wide = next;
+                            }
+                        }
+                    }
+                    wide
+                };
+                let emoji_formats =
+                    make_formats(self.dwrite, scale, "Segoe UI Emoji", points).unwrap_or_default();
                 unsafe {
                     for format in self.formats.drain(..) {
                         release(format);
@@ -1152,6 +1176,63 @@ fn make_formats(
     Ok(formats)
 }
 
+const WIDE_FIT_SAMPLE: &str = "一二三人口手千千万万大大反方上海重启还在";
+
+fn explicit_height(spec: &str) -> Option<f32> {
+    spec.split(':').skip(1).find_map(|part| {
+        part.strip_prefix('h')
+            .and_then(|height| height.parse::<f32>().ok())
+            .map(|height| height.clamp(4.0, 200.0))
+    })
+}
+
+fn measure_text(
+    dwrite: *mut IDWriteFactory,
+    format: *mut IDWriteTextFormat,
+    text: &str,
+) -> (f32, f32) {
+    let sample = wide(text);
+    let mut layout: *mut IDWriteTextLayout = null_mut();
+    let count = text.chars().count().max(1) as u32;
+    let hr = unsafe {
+        (*dwrite).CreateTextLayout(
+            sample.as_ptr(),
+            count,
+            format,
+            100_000.0,
+            200.0,
+            &mut layout,
+        )
+    };
+    if hr < 0 || layout.is_null() {
+        return (9.0, 18.0);
+    }
+    let mut metrics: DWRITE_TEXT_METRICS = unsafe { zeroed() };
+    unsafe {
+        (*layout).GetMetrics(&mut metrics);
+        release(layout);
+    }
+    (metrics.width.max(0.0), (metrics.height * 1.05).max(1.0))
+}
+
+fn fitted_points(points: f32, target: f32, measured: f32) -> f32 {
+    if measured <= 0.0 || target <= 0.0 {
+        return points;
+    }
+    (points * target / measured).clamp(4.0, 200.0)
+}
+
+fn fit_wide_points(
+    dwrite: *mut IDWriteFactory,
+    format: *mut IDWriteTextFormat,
+    points: f32,
+    cell_width: f32,
+) -> f32 {
+    let target = 40.0 * cell_width;
+    let (measured, _) = measure_text(dwrite, format, WIDE_FIT_SAMPLE);
+    fitted_points(points, target, measured)
+}
+
 fn measure_cell(dwrite: *mut IDWriteFactory, format: *mut IDWriteTextFormat) -> (f32, f32) {
     const LATIN_SAMPLE: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
     let sample = wide(LATIN_SAMPLE);
@@ -1523,6 +1604,32 @@ mod tests {
             parse_font_with_default("MSGothic", 20.0),
             ("MSGothic".to_string(), 20.0)
         );
+    }
+
+    #[test]
+    fn wide_fit_sample_is_twenty_han_chars() {
+        assert_eq!(WIDE_FIT_SAMPLE.chars().count(), 20);
+        assert_eq!(
+            WIDE_FIT_SAMPLE
+                .chars()
+                .map(rvim_term::char_width)
+                .sum::<usize>(),
+            40
+        );
+    }
+
+    #[test]
+    fn wide_points_are_scaled_to_the_forty_cell_target() {
+        assert!((fitted_points(12.0, 400.0, 480.0) - 10.0).abs() < 0.001);
+        assert!((fitted_points(12.0, 400.0, 320.0) - 15.0).abs() < 0.001);
+        assert_eq!(fitted_points(12.0, 400.0, 0.0), 12.0);
+    }
+
+    #[test]
+    fn explicit_height_reads_only_height_suffixes() {
+        assert_eq!(explicit_height("Cascadia Code:h14"), Some(14.0));
+        assert_eq!(explicit_height("Cascadia Code"), None);
+        assert_eq!(explicit_height(":/h14"), None);
     }
 
     #[test]
