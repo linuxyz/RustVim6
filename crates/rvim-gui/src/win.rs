@@ -1159,13 +1159,14 @@ fn make_formats(
 }
 
 fn cell_metrics(normal: (f32, f32), wide: Option<(f32, f32)>) -> (f32, f32) {
-    let mut width = normal.0;
+    // The normal font defines the monospace cell grid. A wide font may be
+    // taller (or a different face), but it must fit into the same two cells;
+    // using its width here would make every Latin cell wider as well.
     let mut height = normal.1;
-    if let Some((wide_width, wide_height)) = wide {
-        width = width.max(wide_width / 2.0);
+    if let Some((_wide_width, wide_height)) = wide {
         height = height.max(wide_height);
     }
-    (width, height)
+    (normal.0, height)
 }
 
 fn measure_cell(
@@ -1542,7 +1543,7 @@ mod tests {
     #[test]
     fn cell_metrics_follow_the_wide_font_size() {
         assert_eq!(cell_metrics((9.0, 18.0), Some((18.0, 18.0))), (9.0, 18.0));
-        assert_eq!(cell_metrics((9.0, 18.0), Some((22.0, 26.0))), (11.0, 26.0));
+        assert_eq!(cell_metrics((9.0, 18.0), Some((22.0, 26.0))), (9.0, 26.0));
         assert_eq!(cell_metrics((9.0, 18.0), None), (9.0, 18.0));
     }
 
