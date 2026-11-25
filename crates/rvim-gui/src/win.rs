@@ -32,11 +32,11 @@ use winapi::um::commdlg::{
     CF_EFFECTS, CF_INITTOLOGFONTSTRUCT, CF_SCREENFONTS, CHOOSEFONTW, ChooseFontW,
 };
 use winapi::um::d2d1::{
-    D2D1_COLOR_F, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-    D2D1_FEATURE_LEVEL_DEFAULT, D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_POINT_2F,
-    D2D1_PRESENT_OPTIONS_NONE, D2D1_RECT_F, D2D1_RENDER_TARGET_PROPERTIES,
-    D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_SIZE_U,
-    D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, D2D1CreateFactory, ID2D1Brush, ID2D1Factory,
+    D2D1_COLOR_F, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
+    D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_POINT_2F, D2D1_PRESENT_OPTIONS_NONE, D2D1_RECT_F,
+    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
+    D2D1_SIZE_U, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, D2D1CreateFactory, ID2D1Brush, ID2D1Factory,
     ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
 };
 use winapi::um::dcommon::{D2D1_ALPHA_MODE_IGNORE, D2D1_PIXEL_FORMAT};
@@ -109,6 +109,7 @@ struct Gui {
     rt: *mut ID2D1HwndRenderTarget,
     formats: Vec<*mut IDWriteTextFormat>,
     wide_formats: Vec<*mut IDWriteTextFormat>,
+    emoji_formats: Vec<*mut IDWriteTextFormat>,
     font_spec: String,
     wide_spec: String,
     brushes: HashMap<u32, *mut ID2D1SolidColorBrush>,
@@ -171,6 +172,8 @@ impl Gui {
         }
         let dwrite = unknown as *mut IDWriteFactory;
 
+        let emoji_formats =
+            make_formats(dwrite, 1.0, "Segoe UI Emoji", BASE_FONT_POINTS).unwrap_or_default();
         let formats = match make_formats(dwrite, 1.0, DEFAULT_FONT, BASE_FONT_POINTS) {
             Ok(formats) => formats,
             Err(error) => {
@@ -190,6 +193,7 @@ impl Gui {
             dwrite,
             rt: null_mut(),
             formats,
+            emoji_formats,
             wide_formats: Vec::new(),
             font_spec: String::new(),
             wide_spec: String::new(),
@@ -223,6 +227,9 @@ impl Gui {
                 release(format);
             }
             for format in self.wide_formats.drain(..) {
+                release(format);
+            }
+            for format in self.emoji_formats.drain(..) {
                 release(format);
             }
             release(self.dwrite);
@@ -275,6 +282,10 @@ impl Gui {
                     let (wide_family, wide_points) = parse_font(&wide_spec);
                     make_formats(self.dwrite, scale, &wide_family, wide_points).unwrap_or_default()
                 };
+                let (_, emoji_points) = parse_font(&font_spec);
+                let emoji_formats =
+                    make_formats(self.dwrite, scale, "Segoe UI Emoji", emoji_points)
+                        .unwrap_or_default();
                 unsafe {
                     for format in self.formats.drain(..) {
                         release(format);
@@ -282,9 +293,13 @@ impl Gui {
                     for format in self.wide_formats.drain(..) {
                         release(format);
                     }
+                    for format in self.emoji_formats.drain(..) {
+                        release(format);
+                    }
                 }
                 self.formats = formats;
                 self.wide_formats = wide_formats;
+                self.emoji_formats = emoji_formats;
                 self.scale = scale;
                 self.font_spec = font_spec;
                 self.wide_spec = wide_spec;
@@ -390,6 +405,7 @@ impl Gui {
                 let mut text = String::new();
                 let mut span = 0usize;
                 let wide = is_wide_char(cell.ch);
+                let emoji = is_emoji(cell.ch);
                 while col < self.cols {
                     let Some(next) = grid.cell(row, col) else {
                         break;
@@ -398,7 +414,10 @@ impl Gui {
                         col += 1;
                         continue;
                     }
-                    if next.style != style || (!text.is_empty() && is_wide_char(next.ch) != wide) {
+                    if next.style != style
+                        || (!text.is_empty()
+                            && (is_wide_char(next.ch) != wide || is_emoji(next.ch) != emoji))
+                    {
                         break;
                     }
                     text.push(next.ch);
@@ -514,7 +533,7 @@ impl Gui {
                     D2D1_POINT_2F { x, y },
                     layout,
                     brush as *mut ID2D1Brush,
-                    D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                    D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
                 );
             }
         }
@@ -1178,6 +1197,13 @@ fn is_wide_char(ch: char) -> bool {
     rvim_term::char_width(ch) == 2
 }
 
+fn is_emoji(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x1f000..=0x1faff | 0x2600..=0x27bf | 0x2300..=0x23ff | 0x2b00..=0x2bff | 0xfe00..=0xfe0f
+    )
+}
+
 fn parse_font(spec: &str) -> (String, f32) {
     let mut family = DEFAULT_FONT.to_string();
     let mut points = BASE_FONT_POINTS;
@@ -1490,5 +1516,9 @@ mod tests {
         assert!(is_wide_char('漢'));
         assert!(is_wide_char('한'));
         assert!(!is_wide_char('A'));
+        assert!(is_emoji('😀'));
+        assert!(is_emoji('🚀'));
+        assert!(!is_emoji('A'));
+        assert_eq!(rvim_term::char_width('😀'), 2);
     }
 }

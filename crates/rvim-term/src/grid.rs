@@ -258,6 +258,16 @@ mod tests {
     }
 
     #[test]
+    fn emoji_use_a_continuation_cell_too() {
+        let mut grid = Grid::new(4, 1);
+        grid.put(0, 0, "😀x", Style::NORMAL);
+        assert_eq!(grid.row_text(0), "😀x");
+        assert_eq!(grid.cell(0, 0).unwrap().ch, '😀');
+        assert!(grid.cell(0, 1).unwrap().continuation);
+        assert_eq!(grid.cell(0, 2).unwrap().ch, 'x');
+    }
+
+    #[test]
     fn a_wide_glyph_at_the_right_edge_becomes_a_space() {
         let mut grid = Grid::new(2, 1);
         grid.put(0, 1, "漢", Style::NORMAL);

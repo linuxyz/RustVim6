@@ -77,6 +77,19 @@ The GUI follows Vim's `guioptions` **e** flag for the tabline. The default is
 `egmrLtT`; use `:set guioptions-=e` to hide the tabline, or
 `:set guioptions+=e` to show it when more than one tab page exists.
 
+## Emoji and ligatures
+
+- Emoji runs use **Segoe UI Emoji** with Direct2D's
+  `DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT`, so colour emoji are rendered instead
+  of missing-glyph boxes. Emoji occupy two grid cells.
+- Text runs are shaped by DirectWrite as a unit. A font with programming
+  ligatures (for example `Cascadia Code` or `Fira Code`) can be selected with
+  `set guifont=Cascadia\ Code:h12`; standard ligatures such as `->` are
+  applied within a style run.
+- The simple cell model does not join ZWJ emoji sequences (for example
+  family/skin-tone sequences) into one grapheme; individual emoji glyphs still
+  render correctly.
+
 ## Input
 
 - `WM_CHAR` feeds printable characters; `WM_KEYDOWN` maps Enter, Backspace,
