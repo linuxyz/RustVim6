@@ -432,6 +432,8 @@ mod tests {
         assert_eq!(display_col("héllo", 3, 8), 2, "é is two bytes, one column");
         assert_eq!(display_col("漢字", 3, 8), 2, "CJK glyphs occupy two cells");
         assert_eq!(display_col("漢字", 6, 8), 4);
+        assert_eq!(display_col("a漢b", 1, 8), 1, "Latin still moves one cell");
+        assert_eq!(display_col("a漢b", 4, 8), 3, "a + wide CJK = three cells");
         assert_eq!(
             expand_cells("漢x", 8),
             vec!['漢', '\0', 'x'],

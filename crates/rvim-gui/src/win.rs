@@ -306,17 +306,11 @@ impl Gui {
             }
         }
 
-        let normal_metrics = if let Some(format) = self.formats.first().copied() {
-            measure_cell(self.dwrite, format, "M")
+        let (cell_w, cell_h) = if let Some(format) = self.formats.first().copied() {
+            measure_cell(self.dwrite, format)
         } else {
             (9.0 * self.scale, 18.0 * self.scale)
         };
-        let wide_metrics = self
-            .wide_formats
-            .first()
-            .copied()
-            .map(|format| measure_cell(self.dwrite, format, "漢"));
-        let (cell_w, cell_h) = cell_metrics(normal_metrics, wide_metrics);
         self.cell_w = cell_w.max(1.0);
         self.cell_h = cell_h.max(1.0);
         self.cols = ((self.client_w as f32 / self.cell_w).floor() as usize).max(1);
@@ -1158,26 +1152,14 @@ fn make_formats(
     Ok(formats)
 }
 
-fn cell_metrics(normal: (f32, f32), wide: Option<(f32, f32)>) -> (f32, f32) {
-    // The normal font defines the monospace cell grid. A wide font may be
-    // taller (or a different face), but it must fit into the same two cells;
-    // using its width here would make every Latin cell wider as well.
-    let mut height = normal.1;
-    if let Some((_wide_width, wide_height)) = wide {
-        height = height.max(wide_height);
-    }
-    (normal.0, height)
-}
-
-fn measure_cell(
-    dwrite: *mut IDWriteFactory,
-    format: *mut IDWriteTextFormat,
-    sample_text: &str,
-) -> (f32, f32) {
-    let sample = wide(sample_text);
+fn measure_cell(dwrite: *mut IDWriteFactory, format: *mut IDWriteTextFormat) -> (f32, f32) {
+    const LATIN_SAMPLE: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    let sample = wide(LATIN_SAMPLE);
     let mut layout: *mut IDWriteTextLayout = null_mut();
-    let hr =
-        unsafe { (*dwrite).CreateTextLayout(sample.as_ptr(), 1, format, 64.0, 64.0, &mut layout) };
+    let count = LATIN_SAMPLE.chars().count() as u32;
+    let hr = unsafe {
+        (*dwrite).CreateTextLayout(sample.as_ptr(), count, format, 100_000.0, 64.0, &mut layout)
+    };
     if hr < 0 || layout.is_null() {
         return (9.0, 18.0);
     }
@@ -1186,7 +1168,10 @@ fn measure_cell(
         (*layout).GetMetrics(&mut metrics);
         release(layout);
     }
-    (metrics.width.max(1.0), (metrics.height * 1.05).max(1.0))
+    (
+        (metrics.width / count as f32).max(1.0),
+        (metrics.height * 1.05).max(1.0),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -1538,13 +1523,6 @@ mod tests {
             parse_font_with_default("MSGothic", 20.0),
             ("MSGothic".to_string(), 20.0)
         );
-    }
-
-    #[test]
-    fn cell_metrics_follow_the_wide_font_size() {
-        assert_eq!(cell_metrics((9.0, 18.0), Some((18.0, 18.0))), (9.0, 18.0));
-        assert_eq!(cell_metrics((9.0, 18.0), Some((22.0, 26.0))), (9.0, 26.0));
-        assert_eq!(cell_metrics((9.0, 18.0), None), (9.0, 18.0));
     }
 
     #[test]

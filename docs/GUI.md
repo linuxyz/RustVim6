@@ -56,10 +56,12 @@ set guifont?
 `hN` is the point size. `guifontwide` is used for East Asian wide-character
 runs. If `guifontwide` omits `hN`, it inherits the `guifont` point size;
 if it specifies `hN`, that size is used. The normal font defines the cell
-width; `guifontwide` can change the row height and the wide glyph size, but the
-wide glyph is clipped to the normal two-cell width. Changing either size
-updates the layout on the next frame. In the GUI, a bare `:set guifont`, `:set guifontwide`, `:set guifont=*`
-or `:set guifont=` opens the native Windows **Font** dialog (ChooseFont); the
+width and height, using Vim's average-width measurement over the Latin
+alphabet; `guifontwide` changes the wide glyph shape/size but does not widen
+Latin cells. Changing either size updates the layout on the next frame.
+
+In the GUI, a bare `:set guifont`, `:set guifontwide`, `:set guifont=*` or
+`:set guifont=` opens the native Windows **Font** dialog (ChooseFont); the
 selection is written back as `Family:hN`. Cancelling the dialog leaves the
 option unchanged.
 
@@ -93,6 +95,22 @@ The GUI follows Vim's `guioptions` **e** flag for the tabline. The default is
 - The simple cell model does not join ZWJ emoji sequences (for example
   family/skin-tone sequences) into one grapheme; individual emoji glyphs still
   render correctly.
+
+### Which fonts are used
+
+The renderer uses up to four sources:
+
+1. `guifont` for ordinary cells (the cell width is the average Latin advance,
+   matching Vim's `GetAverageFontSize()`; this is why choosing a CJK font does
+   not double Latin cursor movement);
+2. `guifontwide` for double-width runs when configured;
+3. **Segoe UI Emoji** for emoji runs, with colour-glyph rendering;
+4. DirectWrite's system font fallback for characters missing from the selected
+   family (for example Latin in a CJK-only font or a rare CJK glyph).
+
+Cursor positions come from character display width, not from the font: a Latin
+cell moves one column, a CJK/emoji cell moves two. DirectWrite may use more
+fallback faces inside a run; the cell grid stays monospaced.
 
 ## Input
 
