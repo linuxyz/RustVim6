@@ -279,7 +279,7 @@ impl Gui {
                 let wide_formats = if wide_spec.is_empty() {
                     Vec::new()
                 } else {
-                    let (wide_family, wide_points) = parse_font(&wide_spec);
+                    let (wide_family, wide_points) = parse_font_with_default(&wide_spec, points);
                     make_formats(self.dwrite, scale, &wide_family, wide_points).unwrap_or_default()
                 };
                 let (_, emoji_points) = parse_font(&font_spec);
@@ -306,11 +306,17 @@ impl Gui {
             }
         }
 
-        let (cell_w, cell_h) = if let Some(format) = self.formats.first().copied() {
-            measure_cell(self.dwrite, format)
+        let normal_metrics = if let Some(format) = self.formats.first().copied() {
+            measure_cell(self.dwrite, format, "M")
         } else {
             (9.0 * self.scale, 18.0 * self.scale)
         };
+        let wide_metrics = self
+            .wide_formats
+            .first()
+            .copied()
+            .map(|format| measure_cell(self.dwrite, format, "漢"));
+        let (cell_w, cell_h) = cell_metrics(normal_metrics, wide_metrics);
         self.cell_w = cell_w.max(1.0);
         self.cell_h = cell_h.max(1.0);
         self.cols = ((self.client_w as f32 / self.cell_w).floor() as usize).max(1);
@@ -1152,8 +1158,22 @@ fn make_formats(
     Ok(formats)
 }
 
-fn measure_cell(dwrite: *mut IDWriteFactory, format: *mut IDWriteTextFormat) -> (f32, f32) {
-    let sample = wide("M");
+fn cell_metrics(normal: (f32, f32), wide: Option<(f32, f32)>) -> (f32, f32) {
+    let mut width = normal.0;
+    let mut height = normal.1;
+    if let Some((wide_width, wide_height)) = wide {
+        width = width.max(wide_width / 2.0);
+        height = height.max(wide_height);
+    }
+    (width, height)
+}
+
+fn measure_cell(
+    dwrite: *mut IDWriteFactory,
+    format: *mut IDWriteTextFormat,
+    sample_text: &str,
+) -> (f32, f32) {
+    let sample = wide(sample_text);
     let mut layout: *mut IDWriteTextLayout = null_mut();
     let hr =
         unsafe { (*dwrite).CreateTextLayout(sample.as_ptr(), 1, format, 64.0, 64.0, &mut layout) };
@@ -1205,8 +1225,12 @@ fn is_emoji(ch: char) -> bool {
 }
 
 fn parse_font(spec: &str) -> (String, f32) {
+    parse_font_with_default(spec, BASE_FONT_POINTS)
+}
+
+fn parse_font_with_default(spec: &str, default_points: f32) -> (String, f32) {
     let mut family = DEFAULT_FONT.to_string();
-    let mut points = BASE_FONT_POINTS;
+    let mut points = default_points;
     for (index, part) in spec.split(':').enumerate() {
         if index == 0 {
             if !part.is_empty() && part != "*" {
@@ -1509,6 +1533,17 @@ mod tests {
             ("Cascadia Mono".to_string(), 18.0)
         );
         assert_eq!(parse_font("Consolas:h4"), ("Consolas".to_string(), 4.0));
+        assert_eq!(
+            parse_font_with_default("MSGothic", 20.0),
+            ("MSGothic".to_string(), 20.0)
+        );
+    }
+
+    #[test]
+    fn cell_metrics_follow_the_wide_font_size() {
+        assert_eq!(cell_metrics((9.0, 18.0), Some((18.0, 18.0))), (9.0, 18.0));
+        assert_eq!(cell_metrics((9.0, 18.0), Some((22.0, 26.0))), (11.0, 26.0));
+        assert_eq!(cell_metrics((9.0, 18.0), None), (9.0, 18.0));
     }
 
     #[test]

@@ -54,7 +54,10 @@ set guifont?
 ```
 
 `hN` is the point size. `guifontwide` is used for East Asian wide-character
-runs. In the GUI, a bare `:set guifont`, `:set guifontwide`, `:set guifont=*`
+runs. If `guifontwide` omits `hN`, it inherits the `guifont` point size;
+if it specifies `hN`, that size is used. Cell width/height are recomputed from
+both formats (the wide font must fit in two cells), so changing the size in
+either option updates the layout on the next frame. In the GUI, a bare `:set guifont`, `:set guifontwide`, `:set guifont=*`
 or `:set guifont=` opens the native Windows **Font** dialog (ChooseFont); the
 selection is written back as `Family:hN`. Cancelling the dialog leaves the
 option unchanged.
