@@ -19,11 +19,42 @@ GUI. The console/TUI remains the default when a terminal is attached.
   `IDWriteFactory`/`IDWriteTextFormat` set (normal, bold, italic, bold-italic).
 - Each row is split into same-style runs; backgrounds are filled with
   `ID2D1SolidColorBrush`, text is drawn with `DrawTextLayout`, and the cursor
-  is a green cell outline.
+  uses the Vim block/vertical/horizontal shapes described below.
 - 256-colour ANSI values and 24-bit RGB values are both mapped to Direct2D
-  colours. The font is Consolas at 16 DIPs, scaled by the window DPI.
+  colours. The default font is Consolas at 12 pt (16 DIPs at 96 DPI), scaled by
+  the window DPI and configurable with `guifont` / `guifontwide`.
 - The executable manifest requests PerMonitorV2 DPI awareness and the icon is
   embedded from `assets/icon/rvim.ico`.
+
+## Cursor
+
+The cursor follows Vim's GUI shapes:
+
+| Mode | Shape |
+|---|---|
+| Normal, Visual, Select, Command-line | block |
+| Insert | vertical bar (25% cell width) |
+| Replace | horizontal bar (20% cell height) |
+| Operator-pending | horizontal bar (50% cell height) |
+
+The block is filled with the `Cursor` highlight group (or the inverse of
+`Normal` when `Cursor` is undefined), and the character under it is redrawn in
+the cursor foreground. Blinking follows Vim's default timings (700 ms wait,
+400 ms off, 250 ms on) and resets to visible on every key press.
+
+## Fonts
+
+```vim
+set guifont=Consolas:h12
+set guifontwide=MS\ Gothic:h14
+set guifont?
+```
+
+`hN` is the point size. `guifontwide` is used for East Asian wide-character
+runs. In the GUI, a bare `:set guifont`, `:set guifontwide`, `:set guifont=*`
+or `:set guifont=` opens the native Windows **Font** dialog (ChooseFont); the
+selection is written back as `Family:hN`. Cancelling the dialog leaves the
+option unchanged.
 
 ## Input
 
@@ -37,8 +68,8 @@ GUI. The console/TUI remains the default when a terminal is attached.
 ## Limitations
 
 - No IME composition, native clipboard bridge, mouse click-to-position,
-  drag selection, or native menus/dialogs yet.
-- No cursor blink; the cursor is drawn as a static cell outline.
+  drag selection, native menus, or cursor shape customization through
+  `guicursor` yet.
 - The GUI still runs the console-subsystem `rvim.exe` and detaches its console
   with `FreeConsole`; a dedicated GUI-subsystem launcher is not shipped.
 - Windows-only. `rvim --gui` on other platforms returns an error (the Linux

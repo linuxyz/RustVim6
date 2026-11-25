@@ -89,8 +89,9 @@ target\release\rvim.exe --gui file.txt
 
 Starting `rvim.exe` without a console also opens the GUI. It supports the
 existing TUI layouts, syntax colours, statusline, popups, keyboard input,
-mouse-wheel scrolling, window resizing and PerMonitorV2 DPI. See
-[docs/GUI.md](docs/GUI.md) for the rendering/input details and current
+mouse-wheel scrolling, window resizing, PerMonitorV2 DPI, Vim-style
+block/insert/replace cursors, and `guifont`/`guifontwide` with the native Font
+dialog. See [docs/GUI.md](docs/GUI.md) for the rendering/input details and current
 limitations (IME, native clipboard and mouse selection are not implemented
 yet).
 

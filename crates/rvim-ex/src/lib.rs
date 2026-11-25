@@ -10,6 +10,7 @@ pub mod autodispatch;
 pub mod cmd_table;
 pub mod errorformat;
 pub mod exec;
+pub mod gui_font;
 pub mod handlers_compat;
 pub mod handlers_diff;
 pub mod handlers_edit;

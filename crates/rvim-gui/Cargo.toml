@@ -13,12 +13,14 @@ unsafe_code = "allow"
 rvim-app = { path = "../rvim-app" }
 rvim-editor = { path = "../rvim-editor" }
 rvim-ex = { path = "../rvim-ex" }
+rvim-syntax = { path = "../rvim-syntax" }
 rvim-term = { path = "../rvim-term" }
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3.9", features = [
     "basetsd",
     "combaseapi",
+    "commdlg",
     "d2d1",
     "dcommon",
     "dwrite",

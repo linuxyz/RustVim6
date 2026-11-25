@@ -662,6 +662,12 @@ fn defs() -> Vec<OptDef> {
             default: OptValue::Str("".into()),
         },
         OptDef {
+            name: "guifontwide",
+            short: "gfw",
+            kind: OptKind::Str,
+            default: OptValue::Str("".into()),
+        },
+        OptDef {
             name: "sessionoptions",
             short: "ssop",
             kind: OptKind::Str,

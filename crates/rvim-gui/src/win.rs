@@ -7,11 +7,15 @@
 use std::collections::HashMap;
 use std::mem::zeroed;
 use std::ptr::{null, null_mut};
+use std::sync::atomic::{AtomicIsize, Ordering};
+use std::time::{Duration, Instant};
 use winapi::ctypes::c_void;
 
 use rvim_app::Session;
 use rvim_app::tui::Tui;
+use rvim_editor::Mode;
 use rvim_editor::maps::Key;
+use rvim_syntax::highlight::HlColor;
 use rvim_term::{Color, Style};
 
 use winapi::shared::basetsd::LONG_PTR;
@@ -21,6 +25,9 @@ use winapi::shared::minwindef::{LPARAM, LRESULT, UINT, WPARAM};
 use winapi::shared::windef::{HBRUSH, HWND};
 use winapi::shared::winerror::D2DERR_RECREATE_TARGET;
 use winapi::um::combaseapi::{CoInitializeEx, CoUninitialize};
+use winapi::um::commdlg::{
+    CF_EFFECTS, CF_INITTOLOGFONTSTRUCT, CF_SCREENFONTS, CHOOSEFONTW, ChooseFontW,
+};
 use winapi::um::d2d1::{
     D2D1_COLOR_F, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_FACTORY_TYPE_SINGLE_THREADED,
     D2D1_FEATURE_LEVEL_DEFAULT, D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_POINT_2F,
@@ -40,7 +47,10 @@ use winapi::um::dwrite::{
 use winapi::um::libloaderapi::GetModuleHandleW;
 use winapi::um::objbase::COINIT_APARTMENTTHREADED;
 use winapi::um::unknwnbase::IUnknown;
+use winapi::um::wingdi::{FW_NORMAL, LOGFONTW};
 use winapi::um::winuser::*;
+
+static DIALOG_OWNER: AtomicIsize = AtomicIsize::new(0);
 
 const IID_ID2D1_FACTORY: GUID = GUID {
     Data1: 0x0615_2247,
@@ -58,9 +68,8 @@ const IID_IDWRITE_FACTORY: GUID = GUID {
 
 const DEFAULT_FG: (u8, u8, u8) = (212, 212, 212);
 const DEFAULT_BG: (u8, u8, u8) = (30, 30, 30);
-const CURSOR_COLOR: (u8, u8, u8) = (63, 185, 80);
-const FONT_NAME: &str = "Consolas";
-const BASE_FONT_SIZE: f32 = 16.0;
+const BASE_FONT_POINTS: f32 = 12.0;
+const DEFAULT_FONT: &str = "Consolas";
 
 fn log(message: &str) {
     if let Ok(path) = std::env::var("RVIM_GUI_LOG") {
@@ -82,6 +91,9 @@ struct Gui {
     dwrite: *mut IDWriteFactory,
     rt: *mut ID2D1HwndRenderTarget,
     formats: Vec<*mut IDWriteTextFormat>,
+    wide_formats: Vec<*mut IDWriteTextFormat>,
+    font_spec: String,
+    wide_spec: String,
     brushes: HashMap<u32, *mut ID2D1SolidColorBrush>,
     scale: f32,
     cell_w: f32,
@@ -91,6 +103,9 @@ struct Gui {
     client_w: i32,
     client_h: i32,
     focused: bool,
+    blink_on: bool,
+    blink_initial: bool,
+    last_blink: Instant,
     com_initialized: bool,
 }
 
@@ -134,7 +149,7 @@ impl Gui {
         }
         let dwrite = unknown as *mut IDWriteFactory;
 
-        let formats = match make_formats(dwrite, 1.0) {
+        let formats = match make_formats(dwrite, 1.0, DEFAULT_FONT, BASE_FONT_POINTS) {
             Ok(formats) => formats,
             Err(error) => {
                 unsafe {
@@ -153,6 +168,9 @@ impl Gui {
             dwrite,
             rt: null_mut(),
             formats,
+            wide_formats: Vec::new(),
+            font_spec: String::new(),
+            wide_spec: String::new(),
             brushes: HashMap::new(),
             scale: 1.0,
             cell_w: 9.0,
@@ -162,6 +180,9 @@ impl Gui {
             client_w: 0,
             client_h: 0,
             focused: true,
+            blink_on: true,
+            blink_initial: true,
+            last_blink: Instant::now(),
             com_initialized: true,
         })
     }
@@ -172,6 +193,9 @@ impl Gui {
             release(self.rt);
             self.rt = null_mut();
             for format in self.formats.drain(..) {
+                release(format);
+            }
+            for format in self.wide_formats.drain(..) {
                 release(format);
             }
             release(self.dwrite);
@@ -210,15 +234,33 @@ impl Gui {
             unsafe { GetDpiForWindow(self.hwnd) }.max(96)
         };
         let scale = dpi as f32 / 96.0;
-        if (scale - self.scale).abs() > 0.01 {
-            if let Ok(formats) = make_formats(self.dwrite, scale) {
+        let font_spec = self.tui.session.editor.options.str_or("guifont", "");
+        let wide_spec = self.tui.session.editor.options.str_or("guifontwide", "");
+        if (scale - self.scale).abs() > 0.01
+            || font_spec != self.font_spec
+            || wide_spec != self.wide_spec
+        {
+            let (family, points) = parse_font(&font_spec);
+            if let Ok(formats) = make_formats(self.dwrite, scale, &family, points) {
+                let wide_formats = if wide_spec.is_empty() {
+                    Vec::new()
+                } else {
+                    let (wide_family, wide_points) = parse_font(&wide_spec);
+                    make_formats(self.dwrite, scale, &wide_family, wide_points).unwrap_or_default()
+                };
                 unsafe {
                     for format in self.formats.drain(..) {
                         release(format);
                     }
+                    for format in self.wide_formats.drain(..) {
+                        release(format);
+                    }
                 }
                 self.formats = formats;
+                self.wide_formats = wide_formats;
                 self.scale = scale;
+                self.font_spec = font_spec;
+                self.wide_spec = wide_spec;
             }
         }
 
@@ -313,11 +355,12 @@ impl Gui {
                 let style = cell.style;
                 let start = col;
                 let mut text = String::new();
+                let wide = is_wide_char(cell.ch);
                 while col < self.cols {
                     let Some(next) = grid.cell(row, col) else {
                         break;
                     };
-                    if next.style != style {
+                    if next.style != style || (!text.is_empty() && is_wide_char(next.ch) != wide) {
                         break;
                     }
                     text.push(next.ch);
@@ -357,10 +400,11 @@ impl Gui {
             }
         }
 
-        if self.focused {
+        if self.focused && self.blink_on {
             if let Some((row, col)) = grid.cursor() {
                 if row < self.rows && col < self.cols {
-                    self.draw_cursor(row, col);
+                    let cell = grid.cell(row, col).map(|cell| (cell.ch, cell.style));
+                    self.draw_cursor(row, col, cell);
                 }
             }
         }
@@ -378,7 +422,13 @@ impl Gui {
 
     fn draw_text(&mut self, text: &str, x: f32, y: f32, fg: (u8, u8, u8), style: Style) {
         let index = (style.bold as usize) | ((style.italic as usize) << 1);
-        let Some(format) = self.formats.get(index).copied() else {
+        let formats =
+            if text.chars().next().is_some_and(is_wide_char) && !self.wide_formats.is_empty() {
+                &self.wide_formats
+            } else {
+                &self.formats
+            };
+        let Some(format) = formats.get(index).copied() else {
             return;
         };
         if format.is_null() {
@@ -414,45 +464,85 @@ impl Gui {
         unsafe { release(layout) };
     }
 
-    fn draw_cursor(&mut self, row: usize, col: usize) {
+    fn draw_cursor(&mut self, row: usize, col: usize, cell: Option<(char, Style)>) {
+        let (fg, bg) = self.cursor_colors();
         let x = col as f32 * self.cell_w;
         let y = row as f32 * self.cell_h;
-        let brush = self.brush(CURSOR_COLOR);
-        if brush.is_null() {
-            return;
-        }
-        let thickness = 2.0;
-        let rects = [
-            D2D1_RECT_F {
-                left: x,
-                top: y,
-                right: x + self.cell_w,
-                bottom: y + thickness,
-            },
-            D2D1_RECT_F {
-                left: x,
-                top: y + self.cell_h - thickness,
-                right: x + self.cell_w,
-                bottom: y + self.cell_h,
-            },
-            D2D1_RECT_F {
-                left: x,
-                top: y,
-                right: x + thickness,
-                bottom: y + self.cell_h,
-            },
-            D2D1_RECT_F {
-                left: x + self.cell_w - thickness,
-                top: y,
-                right: x + self.cell_w,
-                bottom: y + self.cell_h,
-            },
-        ];
-        unsafe {
-            for rect in &rects {
-                (*self.rt).FillRectangle(rect, brush as *mut ID2D1Brush);
+        match cursor_shape(self.tui.session.editor.mode) {
+            CursorShape::Block => {
+                let rect = D2D1_RECT_F {
+                    left: x,
+                    top: y,
+                    right: x + self.cell_w,
+                    bottom: y + self.cell_h,
+                };
+                let brush = self.brush(bg);
+                if !brush.is_null() {
+                    unsafe { (*self.rt).FillRectangle(&rect, brush as *mut ID2D1Brush) };
+                }
+                if let Some((ch, style)) = cell {
+                    if ch != ' ' {
+                        let style = Style {
+                            underline: false,
+                            ..style
+                        };
+                        self.draw_text(&ch.to_string(), x, y, fg, style);
+                    }
+                }
+            }
+            CursorShape::Vertical => {
+                let width = (self.cell_w * 0.25).max(2.0);
+                let rect = D2D1_RECT_F {
+                    left: x,
+                    top: y,
+                    right: x + width,
+                    bottom: y + self.cell_h,
+                };
+                let brush = self.brush(bg);
+                if !brush.is_null() {
+                    unsafe { (*self.rt).FillRectangle(&rect, brush as *mut ID2D1Brush) };
+                }
+            }
+            CursorShape::Horizontal(percent) => {
+                let height = (self.cell_h * percent).max(2.0);
+                let rect = D2D1_RECT_F {
+                    left: x,
+                    top: y + self.cell_h - height,
+                    right: x + self.cell_w,
+                    bottom: y + self.cell_h,
+                };
+                let brush = self.brush(bg);
+                if !brush.is_null() {
+                    unsafe { (*self.rt).FillRectangle(&rect, brush as *mut ID2D1Brush) };
+                }
             }
         }
+        let _ = fg;
+    }
+
+    fn cursor_colors(&self) -> ((u8, u8, u8), (u8, u8, u8)) {
+        let normal = self.tui.session.editor.syntax_highlight("Normal");
+        let cursor = self.tui.session.editor.syntax_highlight("Cursor");
+        let normal_fg = normal
+            .and_then(|attr| attr.fg)
+            .map(hl_rgb)
+            .unwrap_or(DEFAULT_FG);
+        let normal_bg = normal
+            .and_then(|attr| attr.bg)
+            .map(hl_rgb)
+            .unwrap_or(DEFAULT_BG);
+        let (mut fg, mut bg) = if let Some(attr) = cursor {
+            (
+                attr.fg.map(hl_rgb).unwrap_or(normal_bg),
+                attr.bg.map(hl_rgb).unwrap_or(normal_fg),
+            )
+        } else {
+            (normal_bg, normal_fg)
+        };
+        if cursor.is_some_and(|attr| attr.reverse) {
+            std::mem::swap(&mut fg, &mut bg);
+        }
+        (fg, bg)
     }
 
     fn brush(&mut self, rgb: (u8, u8, u8)) -> *mut ID2D1SolidColorBrush {
@@ -474,6 +564,9 @@ impl Gui {
     }
 
     fn feed(&mut self, key: Key) {
+        self.blink_on = true;
+        self.blink_initial = true;
+        self.last_blink = Instant::now();
         let _ = self.tui.feed_key(key);
         if self.tui.quit {
             unsafe { PostMessageW(self.hwnd, WM_CLOSE, 0, 0) };
@@ -510,6 +603,18 @@ impl Gui {
     }
 
     fn on_timer(&mut self) {
+        let interval = if self.blink_initial {
+            700
+        } else if self.blink_on {
+            250
+        } else {
+            400
+        };
+        if self.last_blink.elapsed() >= Duration::from_millis(interval) {
+            self.blink_on = !self.blink_on;
+            self.blink_initial = false;
+            self.last_blink = Instant::now();
+        }
         rvim_ex::m7::pump(
             &mut self.tui.session.editor,
             &mut self.tui.session.viml.env,
@@ -525,6 +630,7 @@ impl Gui {
 
 pub fn run(session: Session) -> (Session, i32) {
     log("run start");
+    rvim_ex::gui_font::set_font_dialog_hook(Some(choose_font));
     let mut gui = match Gui::new(session) {
         Ok(gui) => Box::new(gui),
         Err((session, error)) => {
@@ -537,10 +643,13 @@ pub fn run(session: Session) -> (Session, i32) {
     log(&format!("hwnd={hwnd:?}"));
     if hwnd.is_null() {
         gui.cleanup();
+        rvim_ex::gui_font::set_font_dialog_hook(None);
+        DIALOG_OWNER.store(0, Ordering::Relaxed);
         let session = gui.tui.session;
         return (session, 1);
     }
     gui.hwnd = hwnd;
+    DIALOG_OWNER.store(hwnd as isize, Ordering::Relaxed);
     unsafe {
         let mut rect = zeroed();
         GetClientRect(hwnd, &mut rect);
@@ -563,6 +672,8 @@ pub fn run(session: Session) -> (Session, i32) {
     log("message loop end");
     let code = gui.tui.exit_code;
     gui.cleanup();
+    rvim_ex::gui_font::set_font_dialog_hook(None);
+    DIALOG_OWNER.store(0, Ordering::Relaxed);
     let session = gui.tui.session;
     (session, code)
 }
@@ -651,6 +762,9 @@ unsafe extern "system" fn wndproc(
         }
         WM_SETFOCUS => {
             (*gui).focused = true;
+            (*gui).blink_on = true;
+            (*gui).blink_initial = true;
+            (*gui).last_blink = Instant::now();
             InvalidateRect(hwnd, null(), 0);
             0
         }
@@ -698,10 +812,12 @@ unsafe extern "system" fn wndproc(
 fn make_formats(
     dwrite: *mut IDWriteFactory,
     scale: f32,
+    family: &str,
+    points: f32,
 ) -> Result<Vec<*mut IDWriteTextFormat>, String> {
-    let font = wide(FONT_NAME);
+    let font = wide(family);
     let locale = wide("en-us");
-    let size = BASE_FONT_SIZE * scale;
+    let size = points * (96.0 / 72.0) * scale;
     let mut formats = Vec::with_capacity(4);
     for (weight, style) in [
         (DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL),
@@ -754,6 +870,97 @@ fn measure_cell(dwrite: *mut IDWriteFactory, format: *mut IDWriteTextFormat) -> 
         release(layout);
     }
     (metrics.width.max(1.0), (metrics.height * 1.05).max(1.0))
+}
+
+#[derive(Clone, Copy)]
+enum CursorShape {
+    Block,
+    Vertical,
+    Horizontal(f32),
+}
+
+fn cursor_shape(mode: Mode) -> CursorShape {
+    match mode {
+        Mode::Insert => CursorShape::Vertical,
+        Mode::Replace => CursorShape::Horizontal(0.2),
+        Mode::MotionPending { .. } | Mode::OperatorPending | Mode::RegisterPending => {
+            CursorShape::Horizontal(0.5)
+        }
+        _ => CursorShape::Block,
+    }
+}
+
+fn hl_rgb(color: HlColor) -> (u8, u8, u8) {
+    match color {
+        HlColor::Rgb(r, g, b) => (r, g, b),
+        HlColor::Indexed(index) => ansi_rgb(index),
+    }
+}
+
+fn is_wide_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x1100..=0x115f
+            | 0x2e80..=0xa4cf
+            | 0xac00..=0xd7a3
+            | 0xf900..=0xfaff
+            | 0xfe10..=0xfe19
+            | 0xfe30..=0xfe6f
+            | 0xff00..=0xff60
+            | 0xffe0..=0xffe6
+            | 0x1f300..=0x1faff
+            | 0x20000..=0x3fffd
+    )
+}
+
+fn parse_font(spec: &str) -> (String, f32) {
+    let mut family = DEFAULT_FONT.to_string();
+    let mut points = BASE_FONT_POINTS;
+    for (index, part) in spec.split(':').enumerate() {
+        if index == 0 {
+            if !part.is_empty() && part != "*" {
+                family = part.to_string();
+            }
+        } else if let Some(height) = part.strip_prefix('h') {
+            if let Ok(value) = height.parse::<f32>() {
+                points = value.clamp(4.0, 200.0);
+            }
+        }
+    }
+    (family, points)
+}
+
+fn choose_font(current: &str, _wide: bool) -> Option<String> {
+    let (family, points) = parse_font(current);
+    let mut lf: LOGFONTW = unsafe { zeroed() };
+    lf.lfHeight = -((points * 96.0 / 72.0).round() as i32);
+    lf.lfWeight = FW_NORMAL;
+    let face: Vec<u16> = family.encode_utf16().take(31).collect();
+    for (slot, ch) in lf.lfFaceName.iter_mut().zip(face) {
+        *slot = ch;
+    }
+    let mut cf: CHOOSEFONTW = unsafe { zeroed() };
+    cf.lStructSize = std::mem::size_of::<CHOOSEFONTW>() as u32;
+    cf.hwndOwner = DIALOG_OWNER.load(Ordering::Relaxed) as HWND;
+    cf.lpLogFont = &mut lf;
+    cf.iPointSize = (points * 10.0) as i32;
+    cf.Flags = CF_SCREENFONTS | CF_INITTOLOGFONTSTRUCT | CF_EFFECTS;
+    if unsafe { ChooseFontW(&mut cf) } == 0 {
+        return None;
+    }
+    let face = String::from_utf16_lossy(
+        &lf.lfFaceName[..lf
+            .lfFaceName
+            .iter()
+            .position(|ch| *ch == 0)
+            .unwrap_or(lf.lfFaceName.len())],
+    );
+    let chosen_points = if cf.iPointSize > 0 {
+        cf.iPointSize as f32 / 10.0
+    } else {
+        points
+    };
+    Some(format!("{}:h{}", face, chosen_points.round() as i32))
 }
 
 fn colors(style: Style) -> ((u8, u8, u8), (u8, u8, u8)) {
@@ -923,5 +1130,36 @@ mod tests {
     #[test]
     fn default_colors_use_the_gui_palette() {
         assert_eq!(colors(Style::NORMAL), (DEFAULT_FG, DEFAULT_BG));
+    }
+
+    #[test]
+    fn cursor_shapes_follow_vim_modes() {
+        assert!(matches!(cursor_shape(Mode::Normal), CursorShape::Block));
+        assert!(matches!(cursor_shape(Mode::Insert), CursorShape::Vertical));
+        assert!(matches!(
+            cursor_shape(Mode::Replace),
+            CursorShape::Horizontal(0.2)
+        ));
+        assert!(matches!(
+            cursor_shape(Mode::OperatorPending),
+            CursorShape::Horizontal(0.5)
+        ));
+    }
+
+    #[test]
+    fn font_specs_parse_vim_height_suffixes() {
+        assert_eq!(parse_font(""), ("Consolas".to_string(), 12.0));
+        assert_eq!(
+            parse_font("Cascadia Mono:h18"),
+            ("Cascadia Mono".to_string(), 18.0)
+        );
+        assert_eq!(parse_font("Consolas:h4"), ("Consolas".to_string(), 4.0));
+    }
+
+    #[test]
+    fn wide_character_ranges_are_recognised() {
+        assert!(is_wide_char('漢'));
+        assert!(is_wide_char('한'));
+        assert!(!is_wide_char('A'));
     }
 }

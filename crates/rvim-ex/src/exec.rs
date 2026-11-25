@@ -2181,6 +2181,17 @@ fn cmd_set(ed: &mut Editor, args: &str, scope: SetScope) -> VimResult<()> {
         } else if let Some((name, op, value)) = split_set_compound(token) {
             apply_set_compound(ed, name, op, value, scope)?;
         } else if let Some((name, value)) = token.split_once('=') {
+            let canon = rvim_editor::Options::canonical(name)?;
+            if (canon == "guifont" || canon == "guifontwide") && (value == "*" || value.is_empty())
+            {
+                let current = ed.options.str_or(&canon, "");
+                if let Some(selected) =
+                    crate::gui_font::choose_font(&current, canon == "guifontwide")
+                {
+                    ed.set_option(&canon, rvim_editor::OptValue::Str(selected), scope)?;
+                }
+                continue;
+            }
             let resolved = if let Ok(n) = value.parse::<i64>() {
                 rvim_editor::OptValue::Num(n)
             } else {
@@ -2205,7 +2216,19 @@ fn cmd_set(ed: &mut Editor, args: &str, scope: SetScope) -> VimResult<()> {
         } else if let Some(name) = token.strip_prefix("no") {
             ed.set_option(name, rvim_editor::OptValue::Bool(false), scope)?;
         } else {
-            ed.set_option(token, rvim_editor::OptValue::Bool(true), scope)?;
+            let canon = rvim_editor::Options::canonical(token)?;
+            if canon == "guifont" || canon == "guifontwide" {
+                let current = ed.options.str_or(&canon, "");
+                if let Some(selected) =
+                    crate::gui_font::choose_font(&current, canon == "guifontwide")
+                {
+                    ed.set_option(&canon, rvim_editor::OptValue::Str(selected), scope)?;
+                } else if !crate::gui_font::has_hook() {
+                    ed.messages.info(render_option(ed, &canon)?);
+                }
+            } else {
+                ed.set_option(token, rvim_editor::OptValue::Bool(true), scope)?;
+            }
         }
     }
     Ok(())

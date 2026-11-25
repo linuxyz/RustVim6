@@ -85,6 +85,7 @@ dependencies = [
  "rvim-app",
  "rvim-editor",
  "rvim-ex",
+ "rvim-syntax",
  "rvim-term",
  "winapi",
 ]
