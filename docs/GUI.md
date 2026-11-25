@@ -53,16 +53,16 @@ set guifontwide=MS\ Gothic:h14
 set guifont?
 ```
 
-`hN` is the point size. If `guifontwide` specifies `hN`, that size also sets
-the normal `guifont` size. The wide format is then measured with the 20 Han
-characters `一二三人口手千千万万大大反方上海重启还在` (40 cells) and its
-point size is adjusted automatically so those glyphs fit exactly 40 normal
-cells; the fitted format is what gets used. If `guifontwide` omits `hN`, it
-inherits the `guifont` size.
+`hN` is the point size. `guifontwide` is independent of `guifont`:
+its size is not copied to the normal font and it is not auto-fitted to the
+grid. If `guifontwide` omits `hN`, it inherits the `guifont` point size.
 
-The normal font defines the cell width and height, using Vim's average-width
-measurement over the Latin alphabet; the fitted wide font does not widen Latin
-cells. Changing either size updates the layout on the next frame.
+Following Vim's GUI code, the normal font defines the cell width and height,
+using the average advance of the 52 Latin letters (Vim's
+`GetAverageFontSize()`). A double-width character is drawn with
+`guifontwide` when configured (otherwise the normal font plus DirectWrite
+fallback), and always advances two screen cells. Changing either size updates
+the layout on the next frame.
 
 In the GUI, a bare `:set guifont`, `:set guifontwide`, `:set guifont=*` or
 `:set guifont=` opens the native Windows **Font** dialog (ChooseFont); the
@@ -89,9 +89,10 @@ The GUI follows Vim's `guioptions` **e** flag for the tabline. The default is
 
 ## Emoji and ligatures
 
-- Emoji runs use **Segoe UI Emoji** with Direct2D's
-  `DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT`, so colour emoji are rendered instead
-  of missing-glyph boxes. Emoji occupy two grid cells.
+- Emoji use DirectWrite font fallback with Direct2D's
+  `DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT`; they occupy two grid cells and are
+  drawn through the same normal/wide font selection as other double-width
+  characters.
 - Text runs are shaped by DirectWrite as a unit. A font with programming
   ligatures (for example `Cascadia Code` or `Fira Code`) can be selected with
   `set guifont=Cascadia\ Code:h12`; standard ligatures such as `->` are
@@ -102,15 +103,15 @@ The GUI follows Vim's `guioptions` **e** flag for the tabline. The default is
 
 ### Which fonts are used
 
-The renderer uses up to four sources:
+The renderer uses three sources:
 
 1. `guifont` for ordinary cells (the cell width is the average Latin advance,
    matching Vim's `GetAverageFontSize()`; this is why choosing a CJK font does
    not double Latin cursor movement);
-2. `guifontwide` for double-width runs when configured;
-3. **Segoe UI Emoji** for emoji runs, with colour-glyph rendering;
-4. DirectWrite's system font fallback for characters missing from the selected
-   family (for example Latin in a CJK-only font or a rare CJK glyph).
+2. `guifontwide` for double-width characters when configured;
+3. DirectWrite's system font fallback for characters missing from the selected
+   family (Latin in a CJK-only font, a rare CJK glyph, or emoji when the normal
+   font is a Latin monospace).
 
 Cursor positions and the statusline ruler use character display width, not the
 font or UTF-8 byte offset: a Latin cell moves one column, a CJK/emoji cell moves

@@ -32,11 +32,11 @@ use winapi::um::commdlg::{
     CF_EFFECTS, CF_INITTOLOGFONTSTRUCT, CF_SCREENFONTS, CHOOSEFONTW, ChooseFontW,
 };
 use winapi::um::d2d1::{
-    D2D1_COLOR_F, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
-    D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_POINT_2F, D2D1_PRESENT_OPTIONS_NONE, D2D1_RECT_F,
-    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
-    D2D1_SIZE_U, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, D2D1CreateFactory, ID2D1Brush, ID2D1Factory,
+    D2D1_COLOR_F, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_FEATURE_LEVEL_DEFAULT, D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_POINT_2F,
+    D2D1_PRESENT_OPTIONS_NONE, D2D1_RECT_F, D2D1_RENDER_TARGET_PROPERTIES,
+    D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_SIZE_U,
+    D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, D2D1CreateFactory, ID2D1Brush, ID2D1Factory,
     ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
 };
 use winapi::um::dcommon::{D2D1_ALPHA_MODE_IGNORE, D2D1_PIXEL_FORMAT};
@@ -109,7 +109,6 @@ struct Gui {
     rt: *mut ID2D1HwndRenderTarget,
     formats: Vec<*mut IDWriteTextFormat>,
     wide_formats: Vec<*mut IDWriteTextFormat>,
-    emoji_formats: Vec<*mut IDWriteTextFormat>,
     font_spec: String,
     wide_spec: String,
     brushes: HashMap<u32, *mut ID2D1SolidColorBrush>,
@@ -172,8 +171,6 @@ impl Gui {
         }
         let dwrite = unknown as *mut IDWriteFactory;
 
-        let emoji_formats =
-            make_formats(dwrite, 1.0, "Segoe UI Emoji", BASE_FONT_POINTS).unwrap_or_default();
         let formats = match make_formats(dwrite, 1.0, DEFAULT_FONT, BASE_FONT_POINTS) {
             Ok(formats) => formats,
             Err(error) => {
@@ -193,7 +190,6 @@ impl Gui {
             dwrite,
             rt: null_mut(),
             formats,
-            emoji_formats,
             wide_formats: Vec::new(),
             font_spec: String::new(),
             wide_spec: String::new(),
@@ -227,9 +223,6 @@ impl Gui {
                 release(format);
             }
             for format in self.wide_formats.drain(..) {
-                release(format);
-            }
-            for format in self.emoji_formats.drain(..) {
                 release(format);
             }
             release(self.dwrite);
@@ -278,42 +271,17 @@ impl Gui {
             || font_spec != self.font_spec
             || wide_spec != self.wide_spec
         {
-            let (family, mut points) = parse_font(&font_spec);
-            // A wide font's explicit :hN is the master size: it also sets the
-            // normal font, then the wide font is fitted to the 40-cell sample.
-            if let Some(wide_height) = explicit_height(&wide_spec) {
-                points = wide_height;
-            }
+            let (family, points) = parse_font(&font_spec);
             if let Ok(formats) = make_formats(self.dwrite, scale, &family, points) {
-                let (cell_width, _) = formats
-                    .first()
-                    .copied()
-                    .map(|format| measure_cell(self.dwrite, format))
-                    .unwrap_or((9.0 * scale, 18.0 * scale));
+                // Vim keeps 'guifontwide' independent from 'guifont': it is
+                // selected per double-width character, not used to resize the
+                // normal grid.  Missing glyphs fall back through DirectWrite.
                 let wide_formats = if wide_spec.is_empty() {
                     Vec::new()
                 } else {
                     let (wide_family, wide_points) = parse_font_with_default(&wide_spec, points);
-                    let mut wide = make_formats(self.dwrite, scale, &wide_family, wide_points)
-                        .unwrap_or_default();
-                    if let Some(format) = wide.first().copied() {
-                        let fitted = fit_wide_points(self.dwrite, format, wide_points, cell_width);
-                        if (fitted - wide_points).abs() > 0.05 {
-                            if let Ok(next) = make_formats(self.dwrite, scale, &wide_family, fitted)
-                            {
-                                unsafe {
-                                    for old in wide.drain(..) {
-                                        release(old);
-                                    }
-                                }
-                                wide = next;
-                            }
-                        }
-                    }
-                    wide
+                    make_formats(self.dwrite, scale, &wide_family, wide_points).unwrap_or_default()
                 };
-                let emoji_formats =
-                    make_formats(self.dwrite, scale, "Segoe UI Emoji", points).unwrap_or_default();
                 unsafe {
                     for format in self.formats.drain(..) {
                         release(format);
@@ -321,13 +289,9 @@ impl Gui {
                     for format in self.wide_formats.drain(..) {
                         release(format);
                     }
-                    for format in self.emoji_formats.drain(..) {
-                        release(format);
-                    }
                 }
                 self.formats = formats;
                 self.wide_formats = wide_formats;
-                self.emoji_formats = emoji_formats;
                 self.scale = scale;
                 self.font_spec = font_spec;
                 self.wide_spec = wide_spec;
@@ -433,25 +397,29 @@ impl Gui {
                 let mut text = String::new();
                 let mut span = 0usize;
                 let wide = is_wide_char(cell.ch);
-                let emoji = is_emoji(cell.ch);
-                while col < self.cols {
-                    let Some(next) = grid.cell(row, col) else {
-                        break;
-                    };
-                    if next.continuation {
+                if wide {
+                    // Vim selects the wide font per double-width character and
+                    // advances exactly two screen cells.  Drawing one glyph at
+                    // a time keeps fallback CJK/emoji glyphs on the same grid.
+                    text.push(cell.ch);
+                    span = 2;
+                    col += 2;
+                } else {
+                    while col < self.cols {
+                        let Some(next) = grid.cell(row, col) else {
+                            break;
+                        };
+                        if next.continuation {
+                            col += 1;
+                            continue;
+                        }
+                        if next.style != style || is_wide_char(next.ch) {
+                            break;
+                        }
+                        text.push(next.ch);
+                        span += 1;
                         col += 1;
-                        continue;
                     }
-                    if next.style != style
-                        || (!text.is_empty()
-                            && (is_wide_char(next.ch) != wide || is_emoji(next.ch) != emoji))
-                    {
-                        break;
-                    }
-                    text.push(next.ch);
-                    let width = rvim_term::char_width(next.ch).max(1);
-                    span += width;
-                    col += width;
                 }
                 let (fg, bg) = colors(style);
                 let x = start as f32 * self.cell_w;
@@ -561,7 +529,7 @@ impl Gui {
                     D2D1_POINT_2F { x, y },
                     layout,
                     brush as *mut ID2D1Brush,
-                    D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
+                    D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
                 );
             }
         }
@@ -1188,16 +1156,6 @@ fn make_formats(
     Ok(formats)
 }
 
-const WIDE_FIT_SAMPLE: &str = "一二三人口手千千万万大大反方上海重启还在";
-
-fn explicit_height(spec: &str) -> Option<f32> {
-    spec.split(':').skip(1).find_map(|part| {
-        part.strip_prefix('h')
-            .and_then(|height| height.parse::<f32>().ok())
-            .map(|height| height.clamp(4.0, 200.0))
-    })
-}
-
 fn measure_text(
     dwrite: *mut IDWriteFactory,
     format: *mut IDWriteTextFormat,
@@ -1227,43 +1185,12 @@ fn measure_text(
     (metrics.width.max(0.0), (metrics.height * 1.05).max(1.0))
 }
 
-fn fitted_points(points: f32, target: f32, measured: f32) -> f32 {
-    if measured <= 0.0 || target <= 0.0 {
-        return points;
-    }
-    (points * target / measured).clamp(4.0, 200.0)
-}
-
-fn fit_wide_points(
-    dwrite: *mut IDWriteFactory,
-    format: *mut IDWriteTextFormat,
-    points: f32,
-    cell_width: f32,
-) -> f32 {
-    let target = 40.0 * cell_width;
-    let (measured, _) = measure_text(dwrite, format, WIDE_FIT_SAMPLE);
-    fitted_points(points, target, measured)
-}
-
 fn measure_cell(dwrite: *mut IDWriteFactory, format: *mut IDWriteTextFormat) -> (f32, f32) {
     const LATIN_SAMPLE: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    let sample = wide(LATIN_SAMPLE);
-    let mut layout: *mut IDWriteTextLayout = null_mut();
-    let count = LATIN_SAMPLE.chars().count() as u32;
-    let hr = unsafe {
-        (*dwrite).CreateTextLayout(sample.as_ptr(), count, format, 100_000.0, 64.0, &mut layout)
-    };
-    if hr < 0 || layout.is_null() {
-        return (9.0, 18.0);
-    }
-    let mut metrics: DWRITE_TEXT_METRICS = unsafe { zeroed() };
-    unsafe {
-        (*layout).GetMetrics(&mut metrics);
-        release(layout);
-    }
+    let (width, height) = measure_text(dwrite, format, LATIN_SAMPLE);
     (
-        (metrics.width / count as f32).max(1.0),
-        (metrics.height * 1.05).max(1.0),
+        (width / LATIN_SAMPLE.chars().count() as f32).max(1.0),
+        height,
     )
 }
 
@@ -1294,13 +1221,6 @@ fn hl_rgb(color: HlColor) -> (u8, u8, u8) {
 
 fn is_wide_char(ch: char) -> bool {
     rvim_term::char_width(ch) == 2
-}
-
-fn is_emoji(ch: char) -> bool {
-    matches!(
-        ch as u32,
-        0x1f000..=0x1faff | 0x2600..=0x27bf | 0x2300..=0x23ff | 0x2b00..=0x2bff | 0xfe00..=0xfe0f
-    )
 }
 
 fn parse_font(spec: &str) -> (String, f32) {
@@ -1619,39 +1539,10 @@ mod tests {
     }
 
     #[test]
-    fn wide_fit_sample_is_twenty_han_chars() {
-        assert_eq!(WIDE_FIT_SAMPLE.chars().count(), 20);
-        assert_eq!(
-            WIDE_FIT_SAMPLE
-                .chars()
-                .map(rvim_term::char_width)
-                .sum::<usize>(),
-            40
-        );
-    }
-
-    #[test]
-    fn wide_points_are_scaled_to_the_forty_cell_target() {
-        assert!((fitted_points(12.0, 400.0, 480.0) - 10.0).abs() < 0.001);
-        assert!((fitted_points(12.0, 400.0, 320.0) - 15.0).abs() < 0.001);
-        assert_eq!(fitted_points(12.0, 400.0, 0.0), 12.0);
-    }
-
-    #[test]
-    fn explicit_height_reads_only_height_suffixes() {
-        assert_eq!(explicit_height("Cascadia Code:h14"), Some(14.0));
-        assert_eq!(explicit_height("Cascadia Code"), None);
-        assert_eq!(explicit_height(":/h14"), None);
-    }
-
-    #[test]
     fn wide_character_ranges_are_recognised() {
         assert!(is_wide_char('漢'));
         assert!(is_wide_char('한'));
         assert!(!is_wide_char('A'));
-        assert!(is_emoji('😀'));
-        assert!(is_emoji('🚀'));
-        assert!(!is_emoji('A'));
         assert_eq!(rvim_term::char_width('😀'), 2);
     }
 }
