@@ -90,6 +90,15 @@ picks the native 16/20/24/32/40/48/64/96/128/256 px image for the current DPI.
 `default_runtimepath()` finds `runtime` next to the executable (or in
 `../runtime`), then falls back to `$RVIM_RUNTIME` and the development baseline.
 
+### Prebuilt binaries
+
+[`.github/workflows/build.yml`](.github/workflows/build.yml) builds release binaries on
+Windows x64 and Linux amd64 for every push/PR and uploads them as workflow
+artifacts. Pushing a `v*` tag also publishes both archives to a GitHub Release:
+
+- `rvim-<version>-windows-x64.zip` (`rvim.exe`, docs, merged `runtime/`)
+- `rvim-<version>-linux-x64.tar.gz` (`rvim`, docs, merged `runtime/`)
+
 ## Encryption (M8)
 
 ```vim
