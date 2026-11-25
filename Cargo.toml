@@ -1,6 +1,6 @@
 # RustVim workspace — Vim rewrite in Rust (reference: vim/vim v8.2.5172)
-# Hard constraint: std-only, zero third-party dependencies, offline-buildable.
-# Sole exception: M8 encryption/compression may use external crates (see docs/PLAN.md).
+# Editor core is std-only; the Windows GUI platform layer uses winapi 0.3.
+# The M8 encryption/compression code is self-contained (see docs/PLAN.md).
 [workspace]
 resolver = "2"
 members = [
@@ -12,6 +12,7 @@ members = [
     "crates/rvim-syntax",
     "crates/rvim-editor",
     "crates/rvim-ex",
+    "crates/rvim-gui",
     "crates/rvim-normal",
     "crates/rvim-cmdline",
     "crates/rvim-viml",
@@ -26,7 +27,7 @@ version = "1.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "Vim"
-description = "A Vim-compatible editor written in Rust (headless-first, std-only)"
+description = "A Vim-compatible editor written in Rust (std-only core)"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

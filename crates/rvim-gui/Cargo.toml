@@ -1,0 +1,38 @@
+[package]
+name = "rvim-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Windows Direct2D/DirectWrite GUI front-end for RustVim"
+
+[lints.rust]
+unsafe_code = "allow"
+
+[dependencies]
+rvim-app = { path = "../rvim-app" }
+rvim-editor = { path = "../rvim-editor" }
+rvim-ex = { path = "../rvim-ex" }
+rvim-term = { path = "../rvim-term" }
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3.9", features = [
+    "basetsd",
+    "combaseapi",
+    "d2d1",
+    "dcommon",
+    "dwrite",
+    "dxgiformat",
+    "dxgitype",
+    "guiddef",
+    "libloaderapi",
+    "minwindef",
+    "objbase",
+    "unknwnbase",
+    "wincon",
+    "windef",
+    "winerror",
+    "wingdi",
+    "winnt",
+    "winuser",
+] }

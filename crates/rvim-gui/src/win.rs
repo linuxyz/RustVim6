@@ -1,0 +1,927 @@
+//! Direct2D/DirectWrite window and input loop.
+//!
+//! The editor state and layout come from rvim-app's Tui; this module only owns
+//! the native window, maps Win32 input to Key values, and paints the Grid with
+//! Direct2D/DirectWrite.
+
+use std::collections::HashMap;
+use std::mem::zeroed;
+use std::ptr::{null, null_mut};
+use winapi::ctypes::c_void;
+
+use rvim_app::Session;
+use rvim_app::tui::Tui;
+use rvim_editor::maps::Key;
+use rvim_term::{Color, Style};
+
+use winapi::shared::basetsd::LONG_PTR;
+use winapi::shared::dxgiformat::DXGI_FORMAT_B8G8R8A8_UNORM;
+use winapi::shared::guiddef::GUID;
+use winapi::shared::minwindef::{LPARAM, LRESULT, UINT, WPARAM};
+use winapi::shared::windef::{HBRUSH, HWND};
+use winapi::shared::winerror::D2DERR_RECREATE_TARGET;
+use winapi::um::combaseapi::{CoInitializeEx, CoUninitialize};
+use winapi::um::d2d1::{
+    D2D1_COLOR_F, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_FEATURE_LEVEL_DEFAULT, D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_POINT_2F,
+    D2D1_PRESENT_OPTIONS_NONE, D2D1_RECT_F, D2D1_RENDER_TARGET_PROPERTIES,
+    D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_SIZE_U,
+    D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, D2D1CreateFactory, ID2D1Brush, ID2D1Factory,
+    ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
+};
+use winapi::um::dcommon::{D2D1_ALPHA_MODE_IGNORE, D2D1_PIXEL_FORMAT};
+use winapi::um::dwrite::{
+    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC,
+    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL,
+    DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_METRICS,
+    DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat,
+    IDWriteTextLayout,
+};
+use winapi::um::libloaderapi::GetModuleHandleW;
+use winapi::um::objbase::COINIT_APARTMENTTHREADED;
+use winapi::um::unknwnbase::IUnknown;
+use winapi::um::winuser::*;
+
+const IID_ID2D1_FACTORY: GUID = GUID {
+    Data1: 0x0615_2247,
+    Data2: 0x6f50,
+    Data3: 0x465a,
+    Data4: [0x92, 0x45, 0x11, 0x8b, 0xfd, 0x3b, 0x60, 0x07],
+};
+
+const IID_IDWRITE_FACTORY: GUID = GUID {
+    Data1: 0xb859_ee5a,
+    Data2: 0xd838,
+    Data3: 0x4b5b,
+    Data4: [0xa2, 0xe8, 0x1a, 0xdc, 0x7d, 0x93, 0xdb, 0x48],
+};
+
+const DEFAULT_FG: (u8, u8, u8) = (212, 212, 212);
+const DEFAULT_BG: (u8, u8, u8) = (30, 30, 30);
+const CURSOR_COLOR: (u8, u8, u8) = (63, 185, 80);
+const FONT_NAME: &str = "Consolas";
+const BASE_FONT_SIZE: f32 = 16.0;
+
+fn log(message: &str) {
+    if let Ok(path) = std::env::var("RVIM_GUI_LOG") {
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(file, "{message}");
+        }
+    }
+}
+
+struct Gui {
+    hwnd: HWND,
+    tui: Tui,
+    d2d: *mut ID2D1Factory,
+    dwrite: *mut IDWriteFactory,
+    rt: *mut ID2D1HwndRenderTarget,
+    formats: Vec<*mut IDWriteTextFormat>,
+    brushes: HashMap<u32, *mut ID2D1SolidColorBrush>,
+    scale: f32,
+    cell_w: f32,
+    cell_h: f32,
+    cols: usize,
+    rows: usize,
+    client_w: i32,
+    client_h: i32,
+    focused: bool,
+    com_initialized: bool,
+}
+
+impl Gui {
+    #[allow(clippy::result_large_err)]
+    fn new(session: Session) -> Result<Self, (Session, String)> {
+        unsafe {
+            if CoInitializeEx(null_mut(), COINIT_APARTMENTTHREADED) < 0 {
+                return Err((session, "cannot initialize COM".to_string()));
+            }
+        }
+
+        let mut d2d: *mut ID2D1Factory = null_mut();
+        let hr = unsafe {
+            D2D1CreateFactory(
+                D2D1_FACTORY_TYPE_SINGLE_THREADED,
+                &IID_ID2D1_FACTORY,
+                null(),
+                &mut d2d as *mut *mut ID2D1Factory as *mut *mut c_void,
+            )
+        };
+        if hr < 0 || d2d.is_null() {
+            unsafe { CoUninitialize() };
+            return Err((session, "cannot create Direct2D factory".to_string()));
+        }
+
+        let mut unknown: *mut IUnknown = null_mut();
+        let hr = unsafe {
+            DWriteCreateFactory(
+                DWRITE_FACTORY_TYPE_SHARED,
+                &IID_IDWRITE_FACTORY,
+                &mut unknown,
+            )
+        };
+        if hr < 0 || unknown.is_null() {
+            unsafe {
+                release(d2d);
+                CoUninitialize();
+            }
+            return Err((session, "cannot create DirectWrite factory".to_string()));
+        }
+        let dwrite = unknown as *mut IDWriteFactory;
+
+        let formats = match make_formats(dwrite, 1.0) {
+            Ok(formats) => formats,
+            Err(error) => {
+                unsafe {
+                    release(dwrite);
+                    release(d2d);
+                    CoUninitialize();
+                }
+                return Err((session, error));
+            }
+        };
+
+        Ok(Self {
+            hwnd: null_mut(),
+            tui: Tui::new(session),
+            d2d,
+            dwrite,
+            rt: null_mut(),
+            formats,
+            brushes: HashMap::new(),
+            scale: 1.0,
+            cell_w: 9.0,
+            cell_h: 18.0,
+            cols: 80,
+            rows: 24,
+            client_w: 0,
+            client_h: 0,
+            focused: true,
+            com_initialized: true,
+        })
+    }
+
+    fn cleanup(&mut self) {
+        unsafe {
+            self.clear_brushes();
+            release(self.rt);
+            self.rt = null_mut();
+            for format in self.formats.drain(..) {
+                release(format);
+            }
+            release(self.dwrite);
+            self.dwrite = null_mut();
+            release(self.d2d);
+            self.d2d = null_mut();
+            if self.com_initialized {
+                CoUninitialize();
+                self.com_initialized = false;
+            }
+        }
+    }
+
+    fn clear_brushes(&mut self) {
+        unsafe {
+            for (_, brush) in self.brushes.drain() {
+                release(brush);
+            }
+        }
+    }
+
+    fn on_size(&mut self, width: i32, height: i32) {
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        self.client_w = width;
+        self.client_h = height;
+        self.update_metrics();
+        self.resize_target();
+    }
+
+    fn update_metrics(&mut self) {
+        let dpi = if self.hwnd.is_null() {
+            96
+        } else {
+            unsafe { GetDpiForWindow(self.hwnd) }.max(96)
+        };
+        let scale = dpi as f32 / 96.0;
+        if (scale - self.scale).abs() > 0.01 {
+            if let Ok(formats) = make_formats(self.dwrite, scale) {
+                unsafe {
+                    for format in self.formats.drain(..) {
+                        release(format);
+                    }
+                }
+                self.formats = formats;
+                self.scale = scale;
+            }
+        }
+
+        let (cell_w, cell_h) = if let Some(format) = self.formats.first().copied() {
+            measure_cell(self.dwrite, format)
+        } else {
+            (9.0 * self.scale, 18.0 * self.scale)
+        };
+        self.cell_w = cell_w.max(1.0);
+        self.cell_h = cell_h.max(1.0);
+        self.cols = ((self.client_w as f32 / self.cell_w).floor() as usize).max(1);
+        self.rows = ((self.client_h as f32 / self.cell_h).floor() as usize).max(1);
+    }
+
+    fn resize_target(&mut self) {
+        if self.hwnd.is_null() || self.client_w <= 0 || self.client_h <= 0 {
+            return;
+        }
+        let size = D2D1_SIZE_U {
+            width: self.client_w as u32,
+            height: self.client_h as u32,
+        };
+        if self.rt.is_null() {
+            self.create_target(size);
+        } else {
+            unsafe {
+                (*self.rt).Resize(&size);
+            }
+        }
+    }
+
+    fn create_target(&mut self, size: D2D1_SIZE_U) {
+        unsafe {
+            if !self.rt.is_null() {
+                release(self.rt);
+                self.rt = null_mut();
+                self.clear_brushes();
+            }
+            let rt_props = D2D1_RENDER_TARGET_PROPERTIES {
+                _type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_IGNORE,
+                },
+                dpiX: 96.0,
+                dpiY: 96.0,
+                usage: D2D1_RENDER_TARGET_USAGE_NONE,
+                minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+            };
+            let hwnd_props = D2D1_HWND_RENDER_TARGET_PROPERTIES {
+                hwnd: self.hwnd,
+                pixelSize: size,
+                presentOptions: D2D1_PRESENT_OPTIONS_NONE,
+            };
+            let mut rt = null_mut();
+            let hr = (*self.d2d).CreateHwndRenderTarget(&rt_props, &hwnd_props, &mut rt);
+            if hr >= 0 && !rt.is_null() {
+                (*rt).SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
+                self.rt = rt;
+            }
+        }
+    }
+
+    fn paint(&mut self) {
+        if self.hwnd.is_null() || self.client_w <= 0 || self.client_h <= 0 {
+            return;
+        }
+        if self.rt.is_null() {
+            let size = D2D1_SIZE_U {
+                width: self.client_w as u32,
+                height: self.client_h as u32,
+            };
+            self.create_target(size);
+            if self.rt.is_null() {
+                return;
+            }
+        }
+        self.update_metrics();
+        let grid = self.tui.grid(self.cols, self.rows);
+        let bg = d2d_color(DEFAULT_BG);
+        unsafe {
+            (*self.rt).BeginDraw();
+            (*self.rt).Clear(&bg);
+        }
+
+        for row in 0..self.rows {
+            let mut col = 0usize;
+            while col < self.cols {
+                let Some(cell) = grid.cell(row, col) else {
+                    break;
+                };
+                let style = cell.style;
+                let start = col;
+                let mut text = String::new();
+                while col < self.cols {
+                    let Some(next) = grid.cell(row, col) else {
+                        break;
+                    };
+                    if next.style != style {
+                        break;
+                    }
+                    text.push(next.ch);
+                    col += 1;
+                }
+                let (fg, bg) = colors(style);
+                let x = start as f32 * self.cell_w;
+                let y = row as f32 * self.cell_h;
+                let width = (col - start) as f32 * self.cell_w;
+                if bg != DEFAULT_BG {
+                    let rect = D2D1_RECT_F {
+                        left: x,
+                        top: y,
+                        right: x + width,
+                        bottom: y + self.cell_h,
+                    };
+                    let brush = self.brush(bg);
+                    if !brush.is_null() {
+                        unsafe { (*self.rt).FillRectangle(&rect, brush as *mut ID2D1Brush) };
+                    }
+                }
+                if fg != bg && !text.chars().all(|ch| ch == ' ') {
+                    self.draw_text(&text, x, y, fg, style);
+                }
+                if style.underline {
+                    let rect = D2D1_RECT_F {
+                        left: x,
+                        top: y + self.cell_h - 2.0,
+                        right: x + width,
+                        bottom: y + self.cell_h - 1.0,
+                    };
+                    let brush = self.brush(fg);
+                    if !brush.is_null() {
+                        unsafe { (*self.rt).FillRectangle(&rect, brush as *mut ID2D1Brush) };
+                    }
+                }
+            }
+        }
+
+        if self.focused {
+            if let Some((row, col)) = grid.cursor() {
+                if row < self.rows && col < self.cols {
+                    self.draw_cursor(row, col);
+                }
+            }
+        }
+
+        unsafe {
+            let hr = (*self.rt).EndDraw(null_mut(), null_mut());
+            if hr == D2DERR_RECREATE_TARGET {
+                self.clear_brushes();
+                release(self.rt);
+                self.rt = null_mut();
+                InvalidateRect(self.hwnd, null(), 0);
+            }
+        }
+    }
+
+    fn draw_text(&mut self, text: &str, x: f32, y: f32, fg: (u8, u8, u8), style: Style) {
+        let index = (style.bold as usize) | ((style.italic as usize) << 1);
+        let Some(format) = self.formats.get(index).copied() else {
+            return;
+        };
+        if format.is_null() {
+            return;
+        }
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        let max_w = text.chars().count() as f32 * self.cell_w + 4.0;
+        let mut layout: *mut IDWriteTextLayout = null_mut();
+        let hr = unsafe {
+            (*self.dwrite).CreateTextLayout(
+                wide.as_ptr(),
+                wide.len() as u32,
+                format,
+                max_w,
+                self.cell_h * 1.5,
+                &mut layout,
+            )
+        };
+        if hr < 0 || layout.is_null() {
+            return;
+        }
+        let brush = self.brush(fg);
+        if !brush.is_null() {
+            unsafe {
+                (*self.rt).DrawTextLayout(
+                    D2D1_POINT_2F { x, y },
+                    layout,
+                    brush as *mut ID2D1Brush,
+                    D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                );
+            }
+        }
+        unsafe { release(layout) };
+    }
+
+    fn draw_cursor(&mut self, row: usize, col: usize) {
+        let x = col as f32 * self.cell_w;
+        let y = row as f32 * self.cell_h;
+        let brush = self.brush(CURSOR_COLOR);
+        if brush.is_null() {
+            return;
+        }
+        let thickness = 2.0;
+        let rects = [
+            D2D1_RECT_F {
+                left: x,
+                top: y,
+                right: x + self.cell_w,
+                bottom: y + thickness,
+            },
+            D2D1_RECT_F {
+                left: x,
+                top: y + self.cell_h - thickness,
+                right: x + self.cell_w,
+                bottom: y + self.cell_h,
+            },
+            D2D1_RECT_F {
+                left: x,
+                top: y,
+                right: x + thickness,
+                bottom: y + self.cell_h,
+            },
+            D2D1_RECT_F {
+                left: x + self.cell_w - thickness,
+                top: y,
+                right: x + self.cell_w,
+                bottom: y + self.cell_h,
+            },
+        ];
+        unsafe {
+            for rect in &rects {
+                (*self.rt).FillRectangle(rect, brush as *mut ID2D1Brush);
+            }
+        }
+    }
+
+    fn brush(&mut self, rgb: (u8, u8, u8)) -> *mut ID2D1SolidColorBrush {
+        let key = (u32::from(rgb.0) << 16) | (u32::from(rgb.1) << 8) | u32::from(rgb.2);
+        if let Some(brush) = self.brushes.get(&key) {
+            return *brush;
+        }
+        if self.rt.is_null() {
+            return null_mut();
+        }
+        let color = d2d_color(rgb);
+        let mut brush = null_mut();
+        let hr = unsafe { (*self.rt).CreateSolidColorBrush(&color, null(), &mut brush) };
+        if hr < 0 || brush.is_null() {
+            return null_mut();
+        }
+        self.brushes.insert(key, brush);
+        brush
+    }
+
+    fn feed(&mut self, key: Key) {
+        let _ = self.tui.feed_key(key);
+        if self.tui.quit {
+            unsafe { PostMessageW(self.hwnd, WM_CLOSE, 0, 0) };
+        } else {
+            unsafe { InvalidateRect(self.hwnd, null(), 0) };
+        }
+    }
+
+    fn on_key(&mut self, vk: u32) {
+        if let Some(key) = translate_vkey(vk) {
+            self.feed(key);
+        }
+    }
+
+    fn on_char(&mut self, code: u32) {
+        let ctrl = unsafe { GetKeyState(VK_CONTROL) as u16 & 0x8000 != 0 };
+        let alt = unsafe { GetKeyState(VK_MENU) as u16 & 0x8000 != 0 };
+        if ctrl || alt {
+            return;
+        }
+        if let Some(ch) = char::from_u32(code) {
+            if ch >= ' ' && ch != '\u{7f}' {
+                self.feed(Key::Char(ch));
+            }
+        }
+    }
+
+    fn on_wheel(&mut self, delta: i16) {
+        let key = if delta > 0 { "C-Y" } else { "C-E" };
+        let count = (delta.unsigned_abs() / 120).clamp(1, 5);
+        for _ in 0..count {
+            self.feed(Key::Special(key.to_string()));
+        }
+    }
+
+    fn on_timer(&mut self) {
+        rvim_ex::m7::pump(
+            &mut self.tui.session.editor,
+            &mut self.tui.session.viml.env,
+            &mut self.tui.session.viml.state,
+        );
+        if self.tui.quit {
+            unsafe { PostMessageW(self.hwnd, WM_CLOSE, 0, 0) };
+        } else {
+            unsafe { InvalidateRect(self.hwnd, null(), 0) };
+        }
+    }
+}
+
+pub fn run(session: Session) -> (Session, i32) {
+    log("run start");
+    let mut gui = match Gui::new(session) {
+        Ok(gui) => Box::new(gui),
+        Err((session, error)) => {
+            log(&format!("Gui::new error: {error}"));
+            show_error(&error);
+            return (session, 1);
+        }
+    };
+    let hwnd = unsafe { create_window(&mut *gui) };
+    log(&format!("hwnd={hwnd:?}"));
+    if hwnd.is_null() {
+        gui.cleanup();
+        let session = gui.tui.session;
+        return (session, 1);
+    }
+    gui.hwnd = hwnd;
+    unsafe {
+        let mut rect = zeroed();
+        GetClientRect(hwnd, &mut rect);
+        gui.on_size(rect.right - rect.left, rect.bottom - rect.top);
+        ShowWindow(hwnd, SW_SHOW);
+        UpdateWindow(hwnd);
+        SetTimer(hwnd, 1, 100, None);
+        if let Ok(value) = std::env::var("RVIM_GUI_AUTOCLOSE_MS") {
+            if let Ok(ms) = value.parse::<u32>() {
+                SetTimer(hwnd, 2, ms, None);
+            }
+        }
+        let mut msg: MSG = zeroed();
+        log("message loop");
+        while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    log("message loop end");
+    let code = gui.tui.exit_code;
+    gui.cleanup();
+    let session = gui.tui.session;
+    (session, code)
+}
+
+#[allow(clippy::manual_dangling_ptr)]
+unsafe fn create_window(gui: *mut Gui) -> HWND {
+    let instance = GetModuleHandleW(null());
+    let class = Box::leak(wide("RustVimGui").into_boxed_slice());
+    let title = Box::leak(wide("RustVim").into_boxed_slice());
+    let mut wc: WNDCLASSW = zeroed();
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = Some(wndproc);
+    wc.hInstance = instance;
+    wc.hIcon = LoadIconW(instance, 1 as *const u16);
+    wc.hCursor = LoadCursorW(null_mut(), IDC_IBEAM);
+    wc.hbrBackground = null_mut::<c_void>() as HBRUSH;
+    wc.lpszMenuName = null();
+    wc.lpszClassName = class.as_ptr();
+    RegisterClassW(&wc);
+    CreateWindowExW(
+        0,
+        class.as_ptr(),
+        title.as_ptr(),
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        1100,
+        720,
+        null_mut(),
+        null_mut(),
+        instance,
+        gui as *mut c_void,
+    )
+}
+
+unsafe extern "system" fn wndproc(
+    hwnd: HWND,
+    msg: UINT,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if msg == WM_NCCREATE {
+        let create = &*(lparam as *const CREATESTRUCTW);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, create.lpCreateParams as LONG_PTR);
+        return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
+    let gui = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Gui;
+    if gui.is_null() {
+        return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
+    match msg {
+        WM_SIZE => {
+            let width = (lparam as usize & 0xffff) as i32;
+            let height = ((lparam as usize >> 16) & 0xffff) as i32;
+            (*gui).on_size(width, height);
+            0
+        }
+        WM_PAINT => {
+            let mut paint: PAINTSTRUCT = zeroed();
+            BeginPaint(hwnd, &mut paint);
+            (*gui).paint();
+            EndPaint(hwnd, &paint);
+            0
+        }
+        WM_ERASEBKGND => 1,
+        WM_KEYDOWN | WM_SYSKEYDOWN => {
+            (*gui).on_key(wparam as u32);
+            0
+        }
+        WM_CHAR => {
+            (*gui).on_char(wparam as u32);
+            0
+        }
+        WM_MOUSEWHEEL => {
+            let delta = ((wparam >> 16) & 0xffff) as u16 as i16;
+            (*gui).on_wheel(delta);
+            0
+        }
+        WM_TIMER => {
+            if wparam == 2 {
+                PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            } else {
+                (*gui).on_timer();
+            }
+            0
+        }
+        WM_SETFOCUS => {
+            (*gui).focused = true;
+            InvalidateRect(hwnd, null(), 0);
+            0
+        }
+        WM_KILLFOCUS => {
+            (*gui).focused = false;
+            InvalidateRect(hwnd, null(), 0);
+            0
+        }
+        WM_DPICHANGED => {
+            let suggested = &*(lparam as *const winapi::shared::windef::RECT);
+            SetWindowPos(
+                hwnd,
+                null_mut(),
+                suggested.left,
+                suggested.top,
+                suggested.right - suggested.left,
+                suggested.bottom - suggested.top,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            0
+        }
+        WM_CLOSE => {
+            if (*gui).tui.quit || !(*gui).tui.session.editor.current_buffer().is_changed() {
+                DestroyWindow(hwnd);
+            } else {
+                (*gui).tui.message =
+                    "E37: No write since last change (add ! to override)".to_string();
+                InvalidateRect(hwnd, null(), 0);
+            }
+            0
+        }
+        WM_DESTROY => {
+            KillTimer(hwnd, 1);
+            PostQuitMessage(0);
+            0
+        }
+        WM_NCDESTROY => {
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+fn make_formats(
+    dwrite: *mut IDWriteFactory,
+    scale: f32,
+) -> Result<Vec<*mut IDWriteTextFormat>, String> {
+    let font = wide(FONT_NAME);
+    let locale = wide("en-us");
+    let size = BASE_FONT_SIZE * scale;
+    let mut formats = Vec::with_capacity(4);
+    for (weight, style) in [
+        (DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL),
+        (DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL),
+        (DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_ITALIC),
+        (DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_ITALIC),
+    ] {
+        let mut format = null_mut();
+        let hr = unsafe {
+            (*dwrite).CreateTextFormat(
+                font.as_ptr(),
+                null_mut(),
+                weight,
+                style,
+                DWRITE_FONT_STRETCH_NORMAL,
+                size,
+                locale.as_ptr(),
+                &mut format,
+            )
+        };
+        if hr < 0 || format.is_null() {
+            unsafe {
+                for item in formats {
+                    release(item);
+                }
+            }
+            return Err("cannot create DirectWrite text format".to_string());
+        }
+        unsafe {
+            (*format).SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            (*format).SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            (*format).SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        }
+        formats.push(format);
+    }
+    Ok(formats)
+}
+
+fn measure_cell(dwrite: *mut IDWriteFactory, format: *mut IDWriteTextFormat) -> (f32, f32) {
+    let sample = wide("M");
+    let mut layout: *mut IDWriteTextLayout = null_mut();
+    let hr =
+        unsafe { (*dwrite).CreateTextLayout(sample.as_ptr(), 1, format, 64.0, 64.0, &mut layout) };
+    if hr < 0 || layout.is_null() {
+        return (9.0, 18.0);
+    }
+    let mut metrics: DWRITE_TEXT_METRICS = unsafe { zeroed() };
+    unsafe {
+        (*layout).GetMetrics(&mut metrics);
+        release(layout);
+    }
+    (metrics.width.max(1.0), (metrics.height * 1.05).max(1.0))
+}
+
+fn colors(style: Style) -> ((u8, u8, u8), (u8, u8, u8)) {
+    let mut fg = color_rgb(style.fg, DEFAULT_FG);
+    let mut bg = color_rgb(style.bg, DEFAULT_BG);
+    if style.reverse {
+        std::mem::swap(&mut fg, &mut bg);
+    }
+    (fg, bg)
+}
+
+fn color_rgb(color: Color, default: (u8, u8, u8)) -> (u8, u8, u8) {
+    match color {
+        Color::Default => default,
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Ansi(index) => ansi_rgb(index),
+    }
+}
+
+fn ansi_rgb(index: u8) -> (u8, u8, u8) {
+    const BASE: [(u8, u8, u8); 16] = [
+        (0, 0, 0),
+        (197, 15, 31),
+        (19, 161, 14),
+        (193, 156, 0),
+        (0, 55, 218),
+        (136, 23, 152),
+        (58, 150, 221),
+        (204, 204, 204),
+        (118, 118, 118),
+        (231, 72, 86),
+        (22, 198, 12),
+        (249, 241, 165),
+        (59, 120, 255),
+        (180, 0, 158),
+        (97, 214, 214),
+        (242, 242, 242),
+    ];
+    if index < 16 {
+        return BASE[index as usize];
+    }
+    if index < 232 {
+        const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+        let value = index - 16;
+        let r = LEVELS[(value / 36) as usize];
+        let g = LEVELS[((value % 36) / 6) as usize];
+        let b = LEVELS[(value % 6) as usize];
+        return (r, g, b);
+    }
+    let gray = 8 + (index - 232) * 10;
+    (gray, gray, gray)
+}
+
+fn d2d_color(rgb: (u8, u8, u8)) -> D2D1_COLOR_F {
+    D2D1_COLOR_F {
+        r: rgb.0 as f32 / 255.0,
+        g: rgb.1 as f32 / 255.0,
+        b: rgb.2 as f32 / 255.0,
+        a: 1.0,
+    }
+}
+
+fn translate_vkey(vk: u32) -> Option<Key> {
+    let vk = vk as i32;
+    let ctrl = unsafe { GetKeyState(VK_CONTROL) as u16 & 0x8000 != 0 };
+    let shift = unsafe { GetKeyState(VK_SHIFT) as u16 & 0x8000 != 0 };
+    if ctrl {
+        if (0x41..=0x5A).contains(&vk) {
+            let ch = char::from_u32(vk as u32)?;
+            return Some(Key::Special(format!("C-{ch}")));
+        }
+        let name = match vk {
+            VK_LEFT => "LEFT",
+            VK_RIGHT => "RIGHT",
+            VK_UP => "UP",
+            VK_DOWN => "DOWN",
+            VK_HOME => "HOME",
+            VK_END => "END",
+            VK_PRIOR => "PAGEUP",
+            VK_NEXT => "PAGEDOWN",
+            VK_SPACE => "SPACE",
+            _ => return None,
+        };
+        return Some(Key::Special(format!("C-{name}")));
+    }
+    let prefix = if shift { "S-" } else { "" };
+    let name = match vk {
+        VK_BACK => "BS",
+        VK_RETURN => "CR",
+        VK_ESCAPE => "ESC",
+        VK_TAB => "TAB",
+        VK_LEFT => "LEFT",
+        VK_RIGHT => "RIGHT",
+        VK_UP => "UP",
+        VK_DOWN => "DOWN",
+        VK_HOME => "HOME",
+        VK_END => "END",
+        VK_DELETE => "DEL",
+        VK_INSERT => "INSERT",
+        VK_PRIOR => "PAGEUP",
+        VK_NEXT => "PAGEDOWN",
+        VK_F1 => "F1",
+        VK_F2 => "F2",
+        VK_F3 => "F3",
+        VK_F4 => "F4",
+        VK_F5 => "F5",
+        VK_F6 => "F6",
+        VK_F7 => "F7",
+        VK_F8 => "F8",
+        VK_F9 => "F9",
+        VK_F10 => "F10",
+        VK_F11 => "F11",
+        VK_F12 => "F12",
+        _ => return None,
+    };
+    Some(Key::Special(format!("{prefix}{name}")))
+}
+
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn show_error(message: &str) {
+    let text = wide(message);
+    let title = wide("RustVim GUI");
+    unsafe {
+        MessageBoxW(
+            null_mut(),
+            text.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
+unsafe fn release<T>(pointer: *mut T) {
+    if !pointer.is_null() {
+        (*(pointer as *mut IUnknown)).Release();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ansi_palette_covers_cube_and_greyscale() {
+        assert_eq!(ansi_rgb(0), (0, 0, 0));
+        assert_eq!(ansi_rgb(9), (231, 72, 86));
+        assert_eq!(ansi_rgb(16), (0, 0, 0));
+        assert_eq!(ansi_rgb(196), (255, 0, 0));
+        assert_eq!(ansi_rgb(232), (8, 8, 8));
+        assert_eq!(ansi_rgb(255), (238, 238, 238));
+    }
+
+    #[test]
+    fn reverse_swaps_foreground_and_background() {
+        let style = Style {
+            fg: Color::Rgb(1, 2, 3),
+            bg: Color::Rgb(4, 5, 6),
+            reverse: true,
+            ..Style::NORMAL
+        };
+        assert_eq!(colors(style), ((4, 5, 6), (1, 2, 3)));
+    }
+
+    #[test]
+    fn default_colors_use_the_gui_palette() {
+        assert_eq!(colors(Style::NORMAL), (DEFAULT_FG, DEFAULT_BG));
+    }
+}

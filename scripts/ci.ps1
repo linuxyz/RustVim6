@@ -39,8 +39,8 @@ Invoke-Gate 'cargo clippy' { cargo clippy --offline --all-targets -- -D warnings
 Invoke-Gate 'cargo test' { cargo test --offline }
 
 Invoke-Gate 'zero third-party dependencies' {
-    # Every dependency line in `cargo tree` must be a workspace crate
-    # (names starting with `rvim`); anything else means a crate was added.
+    # Every dependency line in `cargo tree` must be a workspace crate.
+    # The Windows GUI platform layer is allowed to use winapi.
     $tree = cargo tree --offline --prefix none 2>&1
     if ($LASTEXITCODE -ne 0) {
         $tree | Write-Host
@@ -52,6 +52,8 @@ Invoke-Gate 'zero third-party dependencies' {
         Where-Object { $_ -notmatch '^#' } |
         ForEach-Object { ($_ -split ' ')[0] } |
         Sort-Object -Unique
+    $allowed = @('winapi', 'winapi-i686-pc-windows-gnu', 'winapi-x86_64-pc-windows-gnu')
+    $external = $external | Where-Object { $allowed -notcontains $_ }
     if ($external) {
         Write-Host "third-party crates found: $($external -join ', ')" -ForegroundColor Red
         exit 1

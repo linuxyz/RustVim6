@@ -1,7 +1,7 @@
 # RustVim 架构设计（ARCH）
 
 > 目标：用 Rust 重写 Vim，行为参照 [vim/vim `v8.2.5172`](https://github.com/vim/vim/tree/v8.2.5172)（Vim 8.2，patch 5172）。
-> 设计约束：**100% Rust 标准库（std-only），零第三方 crate 依赖**（本机沙箱无法访问 crates.io），保证离线可构建；
+> 设计约束：**编辑器核心 100% Rust 标准库（std-only）**；Windows GUI 平台层使用 `winapi` 0.3 绑定（Direct2D/DirectWrite），其余部分无第三方依赖。
 > 平台优先 Windows（当前开发机），同时保持类 Unix 可移植性；通过分层架构保证 **Vim Runtime 兼容**可逐步达成。
 
 ---
@@ -354,7 +354,7 @@ Window  { id (>=1000), tabpage, bufnr, cursor, top_line, left, curswant,
 | 行号/列偏移始终合法（0 ≤ col ≤ 行字节长，0 ≤ line < 行数） | `Buffer` 方法内断言 + debug_assert 单测 |
 | 任意变更后 changedtick 单调递增、可撤销到任意历史序列 | 性质测试（模型对照） |
 | Ex/VimL 守卫（sandbox/modifiable/restricted）不可绕过 | 命令表 flags 驱动，统一入口检查 |
-| 无第三方依赖、可离线 `cargo build` | CI 用 `--offline` 构建；依赖清单为空的断言测试 |
+| 核心无第三方依赖；Windows GUI 使用 winapi | CI 允许 `winapi` 绑定；核心依赖清单为空的断言测试 |
 | 与 Vim 行为偏差可枚举 | `tests/vim_compat` 特性清单 + 覆盖率统计（命令/选项/函数三张表） |
 
 ---

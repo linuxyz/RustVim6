@@ -66,6 +66,8 @@ struct Cli {
     /// Screen geometry for the scripted driver (default 80x24).
     cols: usize,
     rows: usize,
+    /// --gui: use the Direct2D/DirectWrite window (Windows only).
+    gui: bool,
 }
 
 fn parse_args(argv: &[String]) -> Result<Cli, String> {
@@ -87,6 +89,7 @@ fn parse_args(argv: &[String]) -> Result<Cli, String> {
         keys: None,
         cols: 80,
         rows: 24,
+        gui: false,
     };
     let mut i = 0;
     while i < argv.len() {
@@ -130,6 +133,7 @@ fn parse_args(argv: &[String]) -> Result<Cli, String> {
                 cli.clean = true;
                 cli.user_vimrc = None;
             }
+            "--gui" | "-g" => cli.gui = true,
             "--cmd" => {
                 i += 1;
                 let value = argv.get(i).ok_or("--cmd requires an argument")?;
@@ -223,6 +227,7 @@ fn print_help() {
          --script <f>   replay key notation from <f> and dump the screen\n  \
          --keys <text>  replay key notation given inline\n  \
          --cols/--rows  screen size for --script (default 80x24)\n  \
+         --gui, -g      use the Windows Direct2D GUI (Windows only)\n  \
          -u <vimrc>     source a vimrc (-u NONE: skip)\n  \
          --clean        skip vimrc/plugin loading\n  \
          --version      show version and Vim baseline\n  \
@@ -403,6 +408,25 @@ fn run() -> ExitCode {
             final_exit_code(&tui.session.report)
         };
         return ExitCode::from(code);
+    }
+
+    // Windows GUI front-end (Direct2D/DirectWrite). With no console attached
+    // (for example, launched from Explorer) default to the GUI as well.
+    #[cfg(windows)]
+    let launch_gui = cli.gui || !Terminal::is_available() || rvim_gui::console_is_private();
+    #[cfg(not(windows))]
+    let launch_gui = cli.gui;
+    if launch_gui && !quit && !cli.silent_ex && !cli.exmode {
+        rvim_gui::detach_console();
+        let (mut session, code) = rvim_gui::run(session);
+        save_viminfo(&session, &cli.viminfo);
+        session.sync_errors();
+        let exit = if code != 0 {
+            code as u8
+        } else {
+            final_exit_code(&session.report)
+        };
+        return ExitCode::from(exit);
     }
 
     // Interactive TUI (M4) whenever a console is attached and Ex batch mode was

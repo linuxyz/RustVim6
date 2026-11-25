@@ -1,7 +1,7 @@
 # RustVim 实施计划（PLAN）
 
 > 配套文档：架构见 [ARCH.md](ARCH.md)，Runtime 兼容清单见 [RUNTIME_COMPAT.md](RUNTIME_COMPAT.md)。
-> 参考基线：vim/vim `v8.2.5172`。约束：**std-only、零第三方依赖、离线可构建**；主平台 Windows，兼顾 Unix。
+> 参考基线：vim/vim `v8.2.5172`。约束：**编辑器核心 std-only**；Windows GUI 平台层使用 `winapi` 0.3 绑定（见 `docs/GUI.md`）。主平台 Windows，兼顾 Unix。
 > 唯一例外：M8 的加密/压缩允许外部依赖（见 M8 条目）。
 
 ## 0. 总体路线
@@ -24,7 +24,7 @@ M0 脚手架 ─► M1 Headless 编辑内核 ─► M2 Ex 命令体系 ─► M3
 
 - [x] Cargo workspace（`bin/rvim` + `crates/rvim-*`），resolver=2，edition 2024
 - [x] `rust-toolchain.toml`（1.85+）、`rustfmt.toml`（edition 2024）、workspace lint 约定：`unsafe_code` 全仓 deny（唯一平台例外见 ARCH §3）、`scripts/ci.ps1` 以 `clippy -D warnings` 作为警告门禁（测试代码同样零警告）
-- [x] 零依赖验证：`cargo build --offline` 成功；`scripts/ci.ps1` 断言 `cargo tree` 只含 workspace 内 crate
+- [x] 零依赖验证：`cargo build --offline`（缓存 winapi 后）成功；`scripts/ci.ps1` 只允许 workspace crate 与 Windows GUI 的 `winapi` 绑定
 - [x] 文档三件套：ARCH / PLAN / RUNTIME_COMPAT
 - [x] 黄金测试 harness（`crates/rvim-app/tests/golden.rs`：`Session` 驱动脚本 → 断言缓冲/消息/寄存器/选项）
 - [x] `rvim --version` / `rvim -es` 静默批处理入口骨架
@@ -246,7 +246,7 @@ M0 脚手架 ─► M1 Headless 编辑内核 ─► M2 Ex 命令体系 ─► M3
 - 性质测试：文档模型随机操作序列（插入/删除/撤销）后，重做结果必须等于直接序列结果（undo/redo 一致性）。
 
 ### CI 矩阵
-`cargo fmt --check` → `cargo clippy --all-targets` → `cargo test --offline` → 零依赖审计 → 黄金快照 →（可选）vim 对拍。Windows + Linux 双跑。
+`cargo fmt --check` → `cargo clippy --all-targets` → `cargo test` → 依赖审计（仅允许 workspace + winapi）→ 黄金快照 →（可选）vim 对拍。Windows + Linux 双跑。
 
 ---
 

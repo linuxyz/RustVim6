@@ -17,7 +17,9 @@ fn main() {
 
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
     let icon = manifest.join("../../assets/icon/rvim.ico");
+    let manifest_file = manifest.join("../../assets/rvim.manifest");
     println!("cargo:rerun-if-changed={}", icon.display());
+    println!("cargo:rerun-if-changed={}", manifest_file.display());
     let Ok(icon) = icon.canonicalize() else {
         println!(
             "cargo:warning=icon {} missing; building without an application icon",
@@ -30,7 +32,11 @@ fn main() {
     let rc_path = out.join("rvim.rc");
     // RC uses backslash escapes inside quoted strings; forward slashes are safe.
     let icon_text = icon.display().to_string().replace('\\', "/");
-    if let Err(error) = fs::write(&rc_path, format!("1 ICON \"{icon_text}\"\n")) {
+    let manifest_text = manifest_file.display().to_string().replace('\\', "/");
+    if let Err(error) = fs::write(
+        &rc_path,
+        format!("1 ICON \"{icon_text}\"\n1 24 \"{manifest_text}\"\n"),
+    ) {
         println!("cargo:warning=cannot write icon resource: {error}");
         return;
     }

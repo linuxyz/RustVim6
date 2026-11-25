@@ -17,5 +17,6 @@ path = "src/main.rs"
 rvim-app = { path = "../../crates/rvim-app" }
 rvim-editor = { path = "../../crates/rvim-editor" }
 rvim-ex = { path = "../../crates/rvim-ex" }
+rvim-gui = { path = "../../crates/rvim-gui" }
 rvim-term = { path = "../../crates/rvim-term" }
 rvim-termio = { path = "../../crates/rvim-termio" }
