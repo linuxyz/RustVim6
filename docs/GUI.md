@@ -72,9 +72,11 @@ option unchanged.
 
 ## IME and clipboard
 
-- IME uses IMM32. `WM_IME_STARTCOMPOSITION` positions the composition window at
-  the cursor, `WM_IME_COMPOSITION` collects `GCS_COMPSTR`/`GCS_RESULTSTR`, and the
-  composition string is drawn inline at the cursor until it is committed.
+- IME uses IMM32 with the native IME composition and candidate windows.
+  `WM_IME_STARTCOMPOSITION` positions both windows at the caret with
+  `ImmSetCompositionWindow` and `ImmSetCandidateWindow`;
+  `WM_IME_COMPOSITION` commits `GCS_RESULTSTR` into the editor. The native
+  candidate list remains visible so Pinyin/CJK IME selection works.
 - Register `*` is synchronised with the Windows clipboard (CF_UNICODETEXT),
   converting between LF and CRLF. Yanking to `*` updates the clipboard; an
   external clipboard change is loaded into `*` before the next key.

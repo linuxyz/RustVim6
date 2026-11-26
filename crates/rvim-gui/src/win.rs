@@ -25,7 +25,7 @@ use winapi::shared::dxgiformat::DXGI_FORMAT_B8G8R8A8_UNORM;
 use winapi::shared::guiddef::GUID;
 use winapi::shared::minwindef::{BOOL, DWORD, HGLOBAL, LPARAM, LRESULT, UINT, WPARAM};
 use winapi::shared::ntdef::HANDLE;
-use winapi::shared::windef::{HBRUSH, HWND, POINT};
+use winapi::shared::windef::{HBRUSH, HWND, POINT, RECT};
 use winapi::shared::winerror::D2DERR_RECREATE_TARGET;
 use winapi::um::combaseapi::{CoInitializeEx, CoUninitialize};
 use winapi::um::commdlg::{
@@ -48,7 +48,8 @@ use winapi::um::dwrite::{
     IDWriteFontFace, IDWriteFontFamily, IDWriteTextFormat, IDWriteTextLayout,
 };
 use winapi::um::imm::{
-    CFS_POINT, COMPOSITIONFORM, HIMC, ImmGetContext, ImmReleaseContext, ImmSetCompositionWindow,
+    CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM, HIMC, ImmGetContext, ImmReleaseContext,
+    ImmSetCompositionWindow,
 };
 use winapi::um::libloaderapi::GetModuleHandleW;
 use winapi::um::objbase::COINIT_APARTMENTTHREADED;
@@ -59,14 +60,20 @@ use winapi::um::winuser::*;
 
 static DIALOG_OWNER: AtomicIsize = AtomicIsize::new(0);
 
-const GCS_COMPSTR: DWORD = 0x0008;
 const GCS_RESULTSTR: DWORD = 0x0800;
-const ISC_SHOWUICOMPOSITIONWINDOW: isize = 0x8000_0000u32 as isize;
+#[repr(C)]
+struct CandidateForm {
+    dw_index: DWORD,
+    dw_style: DWORD,
+    pt_current_pos: POINT,
+    rc_area: RECT,
+}
 
 #[link(name = "imm32")]
 unsafe extern "system" {
     fn ImmGetCompositionStringW(himc: HIMC, index: DWORD, buf: *mut c_void, len: DWORD) -> i32;
     fn ImmSetCompositionFontW(himc: HIMC, lf: *const LOGFONTW) -> BOOL;
+    fn ImmSetCandidateWindow(himc: HIMC, form: *const CandidateForm) -> BOOL;
 }
 
 const IID_ID2D1_FACTORY: GUID = GUID {
@@ -123,8 +130,6 @@ struct Gui {
     client_w: i32,
     client_h: i32,
     focused: bool,
-    ime_text: String,
-    ime_active: bool,
     cursor_px: (f32, f32),
     last_clipboard_seq: u32,
     last_clipboard_text: String,
@@ -208,8 +213,6 @@ impl Gui {
             client_w: 0,
             client_h: 0,
             focused: true,
-            ime_text: String::new(),
-            ime_active: false,
             cursor_px: (0.0, 0.0),
             last_clipboard_seq: 0,
             last_clipboard_text: String::new(),
@@ -491,27 +494,6 @@ impl Gui {
                 self.draw_cursor(row, col, cell);
             }
         }
-        if self.ime_active && !self.ime_text.is_empty() {
-            let style = Style {
-                underline: true,
-                ..Style::NORMAL
-            };
-            let text = self.ime_text.clone();
-            let font = text
-                .chars()
-                .next()
-                .map(|ch| self.font_index(ch))
-                .unwrap_or(0);
-            self.draw_text(
-                &text,
-                self.cursor_px.0,
-                self.cursor_px.1,
-                (255, 210, 80),
-                style,
-                font,
-            );
-        }
-
         unsafe {
             let hr = (*self.rt).EndDraw(null_mut(), null_mut());
             if hr == D2DERR_RECREATE_TARGET {
@@ -750,6 +732,19 @@ impl Gui {
                 y: self.cursor_px.1 as i32,
             };
             ImmSetCompositionWindow(himc, &mut form);
+            // Keep the IME candidate list visible and near the caret.  Without
+            // an explicit candidate form some IMEs open it at the desktop
+            // origin or behind the main window.
+            for index in 0..4 {
+                let mut candidate: CandidateForm = zeroed();
+                candidate.dw_index = index;
+                candidate.dw_style = CFS_CANDIDATEPOS;
+                candidate.pt_current_pos = POINT {
+                    x: self.cursor_px.0 as i32,
+                    y: self.cursor_px.1 as i32 + self.cell_h as i32,
+                };
+                ImmSetCandidateWindow(himc, &candidate);
+            }
             let font = self.ime_logfont();
             ImmSetCompositionFontW(himc, &font);
             ImmReleaseContext(self.hwnd, himc);
@@ -768,8 +763,6 @@ impl Gui {
     }
 
     fn on_ime_start(&mut self) {
-        self.ime_active = true;
-        self.ime_text.clear();
         self.update_ime_window();
         unsafe { InvalidateRect(self.hwnd, null(), 0) };
     }
@@ -788,11 +781,6 @@ impl Gui {
                 for ch in text.chars() {
                     self.feed(Key::Char(ch));
                 }
-                self.ime_text.clear();
-                self.ime_active = false;
-            }
-            if flags & GCS_COMPSTR != 0 {
-                self.ime_text = Self::composition_string(himc, GCS_COMPSTR);
             }
             ImmReleaseContext(self.hwnd, himc);
         }
@@ -800,8 +788,6 @@ impl Gui {
     }
 
     fn on_ime_end(&mut self) {
-        self.ime_active = false;
-        self.ime_text.clear();
         unsafe { InvalidateRect(self.hwnd, null(), 0) };
     }
 
@@ -1095,13 +1081,7 @@ unsafe extern "system" fn wndproc(
             (*gui).on_char(wparam as u32);
             0
         }
-        WM_IME_SETCONTEXT => {
-            let mut context = lparam;
-            if wparam != 0 {
-                context &= !ISC_SHOWUICOMPOSITIONWINDOW;
-            }
-            DefWindowProcW(hwnd, msg, wparam, context)
-        }
+        WM_IME_SETCONTEXT => DefWindowProcW(hwnd, msg, wparam, lparam),
         WM_IME_STARTCOMPOSITION => {
             (*gui).on_ime_start();
             0
