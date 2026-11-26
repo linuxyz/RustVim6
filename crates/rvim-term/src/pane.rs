@@ -215,7 +215,7 @@ pub fn render_layout(model: &ScreenLayout, cols: usize, rows: usize, theme: &The
                 };
                 let text = format!("{item}  ");
                 grid.put(status_row, col, &text, style);
-                col += text.chars().count();
+                col += expand_cells(&text, model.tabstop).len();
                 if col >= cols {
                     break;
                 }
@@ -226,9 +226,19 @@ pub fn render_layout(model: &ScreenLayout, cols: usize, rows: usize, theme: &The
     match &model.cmdline {
         Some(cmdline) => {
             grid.fill_row(bottom, ' ', theme.cmdline);
+            let byte = cmdline
+                .text
+                .char_indices()
+                .nth(cmdline.cursor)
+                .map(|(byte, _)| byte)
+                .unwrap_or(cmdline.text.len());
             let text = format!("{}{}", cmdline.prompt, cmdline.text);
+            let prefix = format!("{}{}", cmdline.prompt, &cmdline.text[..byte]);
+            // The command-line cursor is a character index, but the grid is in
+            // display cells; a CJK character advances two cells even though it
+            // is one stored scalar.
+            let cursor_display = expand_cells(&prefix, model.tabstop).len();
             grid.put(bottom, 0, &text, theme.cmdline);
-            let cursor_display = cmdline.cursor + 1;
             grid.set_cursor(Some((bottom, cursor_display.min(cols.saturating_sub(1)))));
         }
         None => {
@@ -499,6 +509,23 @@ mod tests {
         assert_eq!(grid.row_text(3), "file.txt");
         assert_eq!(grid.row_text(4), "hi");
         assert_eq!(grid.cursor(), Some((0, 0)));
+    }
+
+    #[test]
+    fn command_line_cursor_uses_display_width() {
+        let model = ScreenLayout {
+            panes: vec![text_pane(0, 4, 10)],
+            cmdline: Some(CmdlineText {
+                prompt: ':',
+                text: "漢字".to_string(),
+                cursor: 1,
+            }),
+            tabstop: 8,
+            ..Default::default()
+        };
+        let grid = render_layout(&model, 10, 5, &Theme::default());
+        assert_eq!(grid.row_text(4), ":漢字");
+        assert_eq!(grid.cursor(), Some((4, 3)));
     }
 
     #[test]

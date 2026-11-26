@@ -44,8 +44,8 @@ use winapi::um::dwrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC,
     DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL,
     DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_METRICS,
-    DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat,
-    IDWriteTextLayout,
+    DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection,
+    IDWriteFontFace, IDWriteFontFamily, IDWriteTextFormat, IDWriteTextLayout,
 };
 use winapi::um::imm::{
     CFS_POINT, COMPOSITIONFORM, HIMC, ImmGetContext, ImmReleaseContext, ImmSetCompositionWindow,
@@ -108,7 +108,10 @@ struct Gui {
     dwrite: *mut IDWriteFactory,
     rt: *mut ID2D1HwndRenderTarget,
     formats: Vec<*mut IDWriteTextFormat>,
-    wide_formats: Vec<*mut IDWriteTextFormat>,
+    fallback_formats: Vec<*mut IDWriteTextFormat>,
+    primary_face: *mut IDWriteFontFace,
+    fallback_face: *mut IDWriteFontFace,
+    glyph_cache: HashMap<(u8, char), bool>,
     font_spec: String,
     wide_spec: String,
     brushes: HashMap<u32, *mut ID2D1SolidColorBrush>,
@@ -190,7 +193,10 @@ impl Gui {
             dwrite,
             rt: null_mut(),
             formats,
-            wide_formats: Vec::new(),
+            fallback_formats: Vec::new(),
+            primary_face: null_mut(),
+            fallback_face: null_mut(),
+            glyph_cache: HashMap::new(),
             font_spec: String::new(),
             wide_spec: String::new(),
             brushes: HashMap::new(),
@@ -222,9 +228,13 @@ impl Gui {
             for format in self.formats.drain(..) {
                 release(format);
             }
-            for format in self.wide_formats.drain(..) {
+            for format in self.fallback_formats.drain(..) {
                 release(format);
             }
+            release(self.primary_face);
+            self.primary_face = null_mut();
+            release(self.fallback_face);
+            self.fallback_face = null_mut();
             release(self.dwrite);
             self.dwrite = null_mut();
             release(self.d2d);
@@ -273,25 +283,40 @@ impl Gui {
         {
             let (family, points) = parse_font(&font_spec);
             if let Ok(formats) = make_formats(self.dwrite, scale, &family, points) {
-                // Vim keeps 'guifontwide' independent from 'guifont': it is
-                // selected per double-width character, not used to resize the
-                // normal grid.  Missing glyphs fall back through DirectWrite.
-                let wide_formats = if wide_spec.is_empty() {
+                // guifont and guifontwide are just two entries in one font
+                // stack.  Selection is by glyph coverage, not by character
+                // width; a wide glyph only needs two cells in the grid.
+                let fallback_formats = if wide_spec.is_empty() {
                     Vec::new()
                 } else {
                     let (wide_family, wide_points) = parse_font_with_default(&wide_spec, points);
                     make_formats(self.dwrite, scale, &wide_family, wide_points).unwrap_or_default()
                 };
+                let primary_face = formats
+                    .first()
+                    .copied()
+                    .map(font_face_from_format)
+                    .unwrap_or(null_mut());
+                let fallback_face = fallback_formats
+                    .first()
+                    .copied()
+                    .map(font_face_from_format)
+                    .unwrap_or(null_mut());
                 unsafe {
                     for format in self.formats.drain(..) {
                         release(format);
                     }
-                    for format in self.wide_formats.drain(..) {
+                    for format in self.fallback_formats.drain(..) {
                         release(format);
                     }
+                    release(self.primary_face);
+                    release(self.fallback_face);
                 }
                 self.formats = formats;
-                self.wide_formats = wide_formats;
+                self.fallback_formats = fallback_formats;
+                self.primary_face = primary_face;
+                self.fallback_face = fallback_face;
+                self.glyph_cache.clear();
                 self.scale = scale;
                 self.font_spec = font_spec;
                 self.wide_spec = wide_spec;
@@ -393,6 +418,7 @@ impl Gui {
                     continue;
                 }
                 let style = cell.style;
+                let font = self.font_index(cell.ch);
                 let start = col;
                 let mut text = String::new();
                 let mut span = 0usize;
@@ -413,7 +439,10 @@ impl Gui {
                             col += 1;
                             continue;
                         }
-                        if next.style != style || is_wide_char(next.ch) {
+                        if next.style != style
+                            || is_wide_char(next.ch)
+                            || self.font_index(next.ch) != font
+                        {
                             break;
                         }
                         text.push(next.ch);
@@ -438,7 +467,7 @@ impl Gui {
                     }
                 }
                 if fg != bg && !text.chars().all(|ch| ch == ' ') {
-                    self.draw_text(&text, x, y, fg, style);
+                    self.draw_text(&text, x, y, fg, style, font);
                 }
                 if style.underline {
                     let rect = D2D1_RECT_F {
@@ -468,12 +497,18 @@ impl Gui {
                 ..Style::NORMAL
             };
             let text = self.ime_text.clone();
+            let font = text
+                .chars()
+                .next()
+                .map(|ch| self.font_index(ch))
+                .unwrap_or(0);
             self.draw_text(
                 &text,
                 self.cursor_px.0,
                 self.cursor_px.1,
                 (255, 210, 80),
                 style,
+                font,
             );
         }
 
@@ -488,14 +523,53 @@ impl Gui {
         }
     }
 
-    fn draw_text(&mut self, text: &str, x: f32, y: f32, fg: (u8, u8, u8), style: Style) {
+    fn has_glyph(&mut self, fallback: bool, ch: char) -> bool {
+        let face = if fallback {
+            self.fallback_face
+        } else {
+            self.primary_face
+        };
+        if face.is_null() {
+            return false;
+        }
+        let key = (u8::from(fallback), ch);
+        if let Some(value) = self.glyph_cache.get(&key) {
+            return *value;
+        }
+        let value = font_has_glyph(face, ch);
+        self.glyph_cache.insert(key, value);
+        value
+    }
+
+    /// Pick the primary font when it covers the character, otherwise the
+    /// configured fallback font. This is coverage based, not width based:
+    /// Latin, CJK and emoji all go through the same font stack.
+    fn font_index(&mut self, ch: char) -> usize {
+        if self.primary_face.is_null() {
+            return usize::from(!self.fallback_face.is_null());
+        }
+        if !self.has_glyph(false, ch) && self.has_glyph(true, ch) {
+            1
+        } else {
+            0
+        }
+    }
+
+    fn draw_text(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        fg: (u8, u8, u8),
+        style: Style,
+        font: usize,
+    ) {
         let index = (style.bold as usize) | ((style.italic as usize) << 1);
-        let formats =
-            if text.chars().next().is_some_and(is_wide_char) && !self.wide_formats.is_empty() {
-                &self.wide_formats
-            } else {
-                &self.formats
-            };
+        let formats = if font == 1 && !self.fallback_formats.is_empty() {
+            &self.fallback_formats
+        } else {
+            &self.formats
+        };
         let Some(format) = formats.get(index).copied() else {
             return;
         };
@@ -562,7 +636,8 @@ impl Gui {
                             underline: false,
                             ..style
                         };
-                        self.draw_text(&ch.to_string(), x, y, fg, style);
+                        let font = self.font_index(ch);
+                        self.draw_text(&ch.to_string(), x, y, fg, style, font);
                     }
                 }
             }
@@ -1154,6 +1229,63 @@ fn make_formats(
         formats.push(format);
     }
     Ok(formats)
+}
+
+fn font_face_from_format(format: *mut IDWriteTextFormat) -> *mut IDWriteFontFace {
+    unsafe {
+        let mut collection: *mut IDWriteFontCollection = null_mut();
+        if (*format).GetFontCollection(&mut collection) < 0 || collection.is_null() {
+            return null_mut();
+        }
+        let name_len = (*format).GetFontFamilyNameLength();
+        if name_len == 0 {
+            release(collection);
+            return null_mut();
+        }
+        let mut name = vec![0u16; name_len as usize + 1];
+        if (*format).GetFontFamilyName(name.as_mut_ptr(), name_len + 1) < 0 {
+            release(collection);
+            return null_mut();
+        }
+        let mut index = 0u32;
+        let mut exists = 0i32;
+        if (*collection).FindFamilyName(name.as_ptr(), &mut index, &mut exists) < 0 || exists == 0 {
+            release(collection);
+            return null_mut();
+        }
+        let mut family: *mut IDWriteFontFamily = null_mut();
+        if (*collection).GetFontFamily(index, &mut family) < 0 || family.is_null() {
+            release(collection);
+            return null_mut();
+        }
+        let mut font: *mut winapi::um::dwrite::IDWriteFont = null_mut();
+        let hr = (*family).GetFirstMatchingFont(
+            DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL,
+            &mut font,
+        );
+        release(family);
+        if hr < 0 || font.is_null() {
+            release(collection);
+            return null_mut();
+        }
+        let mut face: *mut IDWriteFontFace = null_mut();
+        let hr = (*font).CreateFontFace(&mut face);
+        release(font);
+        release(collection);
+        if hr < 0 { null_mut() } else { face }
+    }
+}
+
+fn font_has_glyph(face: *mut IDWriteFontFace, ch: char) -> bool {
+    if face.is_null() {
+        return false;
+    }
+    let code = ch as u32;
+    let mut glyph = 0u16;
+    let hr = unsafe { (*face).GetGlyphIndices(&code, 1, &mut glyph) };
+    hr >= 0 && glyph != 0
 }
 
 fn measure_text(

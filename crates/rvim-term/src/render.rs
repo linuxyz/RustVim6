@@ -238,7 +238,16 @@ pub fn render(model: &ScreenModel, cols: usize, rows: usize, theme: &Theme) -> G
             text.push_str(cmdline.text);
             grid.put(bottom, 0, &text, theme.cmdline);
             // Keep the cursor visible: scroll the text when it overflows.
-            let cursor_display = cmdline.cursor + 1;
+            // The command-line cursor is a character index; convert the
+            // prefix through Unicode display width (CJK is two cells).
+            let byte = cmdline
+                .text
+                .char_indices()
+                .nth(cmdline.cursor)
+                .map(|(byte, _)| byte)
+                .unwrap_or(cmdline.text.len());
+            let prefix = format!("{}{}", cmdline.prompt, &cmdline.text[..byte]);
+            let cursor_display = expand_cells(&prefix, model.tabstop).len();
             let cursor_col = if cursor_display >= cols {
                 cols - 1
             } else {
@@ -317,7 +326,7 @@ fn draw_wildmenu(grid: &mut Grid, row: usize, cols: usize, menu: &WildmenuView, 
         };
         let text = format!("{item}  ");
         grid.put(row, col, &text, style);
-        col += text.chars().count();
+        col += text.chars().map(char_width).sum::<usize>();
         if col >= cols {
             break;
         }
@@ -387,6 +396,15 @@ mod tests {
         let grid = render(&m, 20, 3, &Theme::default());
         assert_eq!(grid.row_text(2), ":set nu");
         assert_eq!(grid.cursor(), Some((2, 5)), "prompt shifts the cursor");
+
+        m.cmdline = Some(CmdlineView {
+            prompt: ':',
+            text: "漢字",
+            cursor: 1,
+        });
+        let grid = render(&m, 20, 3, &Theme::default());
+        assert_eq!(grid.row_text(2), ":漢字");
+        assert_eq!(grid.cursor(), Some((2, 3)), "CJK counts display cells");
     }
 
     #[test]
