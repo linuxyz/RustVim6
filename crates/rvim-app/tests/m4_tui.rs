@@ -1162,3 +1162,62 @@ fn scrolloff_keeps_the_cursor_away_from_the_edges() {
     assert_eq!(rows[3], "row7");
     assert_eq!(rows[5], "row9");
 }
+
+// These paths are shared by the GUI: assert the actual grid cursor as well as
+// the buffer byte position so byte/display-column confusion cannot regress.
+#[test]
+fn normal_vertical_motion_preserves_display_column_across_cjk_and_latin() {
+    let mut tui = Tui::new(open(&["甲乙丙丁", "abcdefghij", "中文测试"]));
+    screen(&mut tui, "l", 40, 8);
+    assert_eq!(tui.grid(40, 8).cursor(), Some((0, 2)));
+    screen(&mut tui, "j", 40, 8);
+    assert_eq!(tui.session.editor.cursor(), rvim_core::Pos::new(1, 2));
+    assert_eq!(tui.grid(40, 8).cursor(), Some((1, 2)));
+    screen(&mut tui, "<Down>", 40, 8);
+    assert_eq!(tui.session.editor.cursor(), rvim_core::Pos::new(2, 3));
+    assert_eq!(tui.grid(40, 8).cursor(), Some((2, 2)));
+    screen(&mut tui, "<Up>k", 40, 8);
+    assert_eq!(tui.grid(40, 8).cursor(), Some((0, 2)));
+}
+
+#[test]
+fn normal_vertical_motion_retains_goal_across_short_empty_and_wide_lines() {
+    let mut tui = Tui::new(open(&["abcdefghi", "中", "", "甲乙丙丁戊", "abcdefghi"]));
+    screen(&mut tui, "5ljjj", 40, 9);
+    // Desired column 5 falls inside a wide glyph: rest on its first cell (4).
+    assert_eq!(tui.grid(40, 9).cursor(), Some((3, 4)));
+    screen(&mut tui, "j", 40, 9);
+    assert_eq!(tui.grid(40, 9).cursor(), Some((4, 5)));
+    screen(&mut tui, "4k", 40, 9);
+    assert_eq!(tui.grid(40, 9).cursor(), Some((0, 5)));
+    screen(&mut tui, "jlj", 40, 9);
+    screen(&mut tui, "2j", 40, 9);
+    assert_eq!(
+        tui.grid(40, 9).cursor(),
+        Some((4, 0)),
+        "horizontal motion resets the goal"
+    );
+}
+
+#[test]
+fn normal_vertical_motion_uses_tabstop_and_remembers_column_inside_a_tab() {
+    let mut tui = Tui::new(open(&["abcdXefghij", "中\t文末", "abcdefghijk"]));
+    screen(&mut tui, "4lj", 40, 8);
+    assert_eq!(tui.grid(40, 8).cursor(), Some((1, 2)));
+    screen(&mut tui, "j", 40, 8);
+    assert_eq!(tui.grid(40, 8).cursor(), Some((2, 4)));
+    screen(&mut tui, ":set ts=4<CR>kkj", 40, 8);
+    assert_eq!(tui.grid(40, 8).cursor(), Some((1, 4)));
+    assert_eq!(tui.session.editor.cursor().col, 4);
+}
+
+#[test]
+fn normal_horizontal_motion_stays_on_cjk_character_boundaries() {
+    let mut tui = Tui::new(open(&["中文测试", "中文测试"]));
+    screen(&mut tui, "20l", 40, 8);
+    assert_eq!(tui.session.editor.cursor().col, 9);
+    screen(&mut tui, "j", 40, 8);
+    assert_eq!(tui.grid(40, 8).cursor(), Some((1, 6)));
+    screen(&mut tui, "hk", 40, 8);
+    assert_eq!(tui.grid(40, 8).cursor(), Some((0, 4)));
+}

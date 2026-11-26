@@ -63,6 +63,7 @@ dependencies = [
  "rvim-diff",
  "rvim-syntax",
  "rvim-undo",
+ "unicode-width",
 ]
 
 [[package]]
@@ -116,7 +117,6 @@ dependencies = [
  "rvim-core",
  "rvim-editor",
  "rvim-termio",
- "unicode-width",
 ]
 
 [[package]]

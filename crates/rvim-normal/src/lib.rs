@@ -156,8 +156,12 @@ impl NormalEngine {
         let reg = self.take_register();
         match key {
             'h' | 'j' | 'k' | 'l' | ' ' => {
+                let desired = ed.windows.current().curswant;
                 let pos = motions::move_cursor(ed, key, count)?;
                 ed.set_cursor(pos);
+                if matches!(key, 'j' | 'k') {
+                    ed.windows.current_mut().curswant = desired;
+                }
             }
             '0' => ed.set_cursor(Pos::new(ed.cursor().line, 0)),
             '$' => {

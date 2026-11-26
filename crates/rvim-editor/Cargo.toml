@@ -10,6 +10,7 @@ description.workspace = true
 workspace = true
 
 [dependencies]
+unicode-width = "0.2"
 rvim-core = { path = "../rvim-core" }
 rvim-buffer = { path = "../rvim-buffer" }
 rvim-undo = { path = "../rvim-undo" }

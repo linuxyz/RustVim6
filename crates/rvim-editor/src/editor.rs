@@ -382,10 +382,15 @@ impl Editor {
         self.index_of(bufnr)?;
         let remembered = self.buffer(bufnr)?.last_cursor;
         let clamped = self.buffer(bufnr)?.clamp_pos(remembered);
+        let desired = crate::display::display_col(
+            self.buffer(bufnr)?.line_str(clamped.line)?,
+            clamped.col,
+            self.options.num_or("tabstop", 8).max(1) as usize,
+        );
         let win = self.windows.current_mut();
         win.bufnr = bufnr;
         win.cursor = clamped;
-        win.curswant = clamped.col;
+        win.curswant = desired;
         // The viewport follows the cursor of the buffer being shown (M5 keeps no
         // per-buffer window position yet; see compat_deviations §9).
         win.top_line = clamped.line;
@@ -961,9 +966,14 @@ impl Editor {
     pub fn set_cursor(&mut self, pos: Pos) {
         let bufnr = self.current_bufnr();
         let clamped = self.current_buffer().clamp_pos(pos);
+        let desired = crate::display::display_col(
+            self.current_buffer().line_str(clamped.line).unwrap_or(""),
+            clamped.col,
+            self.options.num_or("tabstop", 8).max(1) as usize,
+        );
         let win = self.windows.current_mut();
         win.cursor = clamped;
-        win.curswant = clamped.col;
+        win.curswant = desired;
         if let Ok(buf) = self.buffer_mut(bufnr) {
             buf.last_cursor = clamped;
         }

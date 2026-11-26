@@ -39,7 +39,7 @@ use winapi::um::d2d1::{
     D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, D2D1CreateFactory, ID2D1Brush, ID2D1Factory,
     ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
 };
-use winapi::um::dcommon::{D2D1_ALPHA_MODE_IGNORE, D2D1_PIXEL_FORMAT};
+use winapi::um::dcommon::{D2D1_ALPHA_MODE_IGNORE, D2D1_MATRIX_3X2_F, D2D1_PIXEL_FORMAT};
 use winapi::um::dwrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC,
     DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL,
@@ -55,7 +55,7 @@ use winapi::um::libloaderapi::GetModuleHandleW;
 use winapi::um::objbase::COINIT_APARTMENTTHREADED;
 use winapi::um::unknwnbase::IUnknown;
 use winapi::um::winbase::{GMEM_MOVEABLE, GlobalAlloc, GlobalFree, GlobalLock, GlobalUnlock};
-use winapi::um::wingdi::{FW_NORMAL, LOGFONTW};
+use winapi::um::wingdi::LOGFONTW;
 use winapi::um::winuser::*;
 
 static DIALOG_OWNER: AtomicIsize = AtomicIsize::new(0);
@@ -179,7 +179,7 @@ impl Gui {
         }
         let dwrite = unknown as *mut IDWriteFactory;
 
-        let formats = match make_formats(dwrite, 1.0, DEFAULT_FONT, BASE_FONT_POINTS) {
+        let formats = match make_formats(dwrite, 1.0, &parse_font("")) {
             Ok(formats) => formats,
             Err(error) => {
                 unsafe {
@@ -284,38 +284,14 @@ impl Gui {
             || font_spec != self.font_spec
             || wide_spec != self.wide_spec
         {
-            let (family, points) = parse_font(&font_spec);
-            if let Ok(formats) = make_formats(self.dwrite, scale, &family, points) {
-                // guifont and guifontwide are just two entries in one font
-                // stack.  Selection is by glyph coverage, not by character
-                // width; a wide glyph only needs two cells in the grid.
+            let font = parse_font(&font_spec);
+            if let Ok(formats) = make_formats(self.dwrite, scale, &font) {
+                // Explicit wide-font sizes must survive a primary-font change.
                 let fallback_formats = if wide_spec.is_empty() {
                     Vec::new()
                 } else {
-                    let (wide_family, wide_points) = parse_font_with_default(&wide_spec, points);
-                    let mut formats = make_formats(self.dwrite, scale, &wide_family, wide_points)
-                        .unwrap_or_default();
-                    if let Some(format) = formats.first().copied() {
-                        let (cell_width, _) = self
-                            .formats
-                            .first()
-                            .copied()
-                            .map(|format| measure_cell(self.dwrite, format))
-                            .unwrap_or((9.0 * scale, 18.0 * scale));
-                        let fitted = fit_wide_points(self.dwrite, format, wide_points, cell_width);
-                        if (fitted - wide_points).abs() > 0.05 {
-                            if let Ok(next) = make_formats(self.dwrite, scale, &wide_family, fitted)
-                            {
-                                unsafe {
-                                    for old in formats.drain(..) {
-                                        release(old);
-                                    }
-                                }
-                                formats = next;
-                            }
-                        }
-                    }
-                    formats
+                    let wide_font = parse_font_with_default(&wide_spec, font.points);
+                    make_formats(self.dwrite, scale, &wide_font).unwrap_or_default()
                 };
                 let primary_face = formats
                     .first()
@@ -354,7 +330,13 @@ impl Gui {
             (9.0 * self.scale, 18.0 * self.scale)
         };
         self.cell_w = cell_w.max(1.0);
-        self.cell_h = cell_h.max(1.0);
+        let wide_height = self
+            .fallback_formats
+            .first()
+            .copied()
+            .map(|format| measure_text(self.dwrite, format, "漢").1)
+            .unwrap_or(0.0);
+        self.cell_h = cell_h.max(wide_height).max(1.0);
         self.cols = ((self.client_w as f32 / self.cell_w).floor() as usize).max(1);
         self.rows = ((self.client_h as f32 / self.cell_h).floor() as usize).max(1);
     }
@@ -545,10 +527,11 @@ impl Gui {
         value
     }
 
-    /// Pick the primary font when it covers the character, otherwise the
-    /// configured fallback font. This is coverage based, not width based:
-    /// Latin, CJK and emoji all go through the same font stack.
+    /// Double-width characters prefer guifontwide even if guifont covers them.
     fn font_index(&mut self, ch: char) -> usize {
+        if is_wide_char(ch) && !self.fallback_formats.is_empty() {
+            return 1;
+        }
         if self.primary_face.is_null() {
             return usize::from(!self.fallback_face.is_null());
         }
@@ -600,15 +583,34 @@ impl Gui {
         if hr < 0 || layout.is_null() {
             return;
         }
+        // CJK/emoji layouts contain one double-width character. Keep its
+        // requested height, centre it in two cells, and compress only when its
+        // natural advance would overlap the next character.
+        let mut metrics: DWRITE_TEXT_METRICS = unsafe { zeroed() };
+        unsafe { (*layout).GetMetrics(&mut metrics) };
+        let single_wide = text.chars().count() == 1 && text.chars().any(is_wide_char);
+        let (x_scale, x_offset) = if single_wide {
+            wide_placement(metrics.width, display_width as f32 * self.cell_w)
+        } else {
+            (1.0, 0.0)
+        };
+        let y = y + ((self.cell_h - metrics.height) * 0.5).max(0.0);
         let brush = self.brush(fg);
         if !brush.is_null() {
             unsafe {
+                let mut previous: D2D1_MATRIX_3X2_F = zeroed();
+                (*self.rt).GetTransform(&mut previous);
+                let transform = D2D1_MATRIX_3X2_F {
+                    matrix: [[x_scale, 0.0], [0.0, 1.0], [x + x_offset, y]],
+                };
+                (*self.rt).SetTransform(&transform);
                 (*self.rt).DrawTextLayout(
-                    D2D1_POINT_2F { x, y },
+                    D2D1_POINT_2F { x: 0.0, y: 0.0 },
                     layout,
                     brush as *mut ID2D1Brush,
                     D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
                 );
+                (*self.rt).SetTransform(&previous);
             }
         }
         unsafe { release(layout) };
@@ -774,11 +776,16 @@ impl Gui {
     }
 
     fn ime_logfont(&self) -> LOGFONTW {
-        let (family, points) = parse_font(&self.font_spec);
+        let font = parse_font(&self.font_spec);
         let mut lf: LOGFONTW = unsafe { zeroed() };
-        lf.lfHeight = -((points * (96.0 / 72.0) * self.scale).round() as i32);
-        lf.lfWeight = FW_NORMAL;
-        for (slot, ch) in lf.lfFaceName.iter_mut().zip(family.encode_utf16().take(31)) {
+        lf.lfHeight = -((font.points * (96.0 / 72.0) * self.scale).round() as i32);
+        lf.lfWeight = font.weight as i32;
+        lf.lfItalic = u8::from(font.italic);
+        for (slot, ch) in lf
+            .lfFaceName
+            .iter_mut()
+            .zip(font.family.encode_utf16().take(31))
+        {
             *slot = ch;
         }
         lf
@@ -1189,18 +1196,23 @@ unsafe extern "system" fn wndproc(
 fn make_formats(
     dwrite: *mut IDWriteFactory,
     scale: f32,
-    family: &str,
-    points: f32,
+    spec: &FontSpec,
 ) -> Result<Vec<*mut IDWriteTextFormat>, String> {
-    let font = wide(family);
+    let font = wide(&spec.family);
     let locale = wide("en-us");
-    let size = points * (96.0 / 72.0) * scale;
+    let size = spec.points * (96.0 / 72.0) * scale;
+    let base_style = if spec.italic {
+        DWRITE_FONT_STYLE_ITALIC
+    } else {
+        DWRITE_FONT_STYLE_NORMAL
+    };
+    let bold_weight = spec.weight.max(DWRITE_FONT_WEIGHT_BOLD);
     let mut formats = Vec::with_capacity(4);
     for (weight, style) in [
-        (DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL),
-        (DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL),
-        (DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_ITALIC),
-        (DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_ITALIC),
+        (spec.weight, base_style),
+        (bold_weight, base_style),
+        (spec.weight, DWRITE_FONT_STYLE_ITALIC),
+        (bold_weight, DWRITE_FONT_STYLE_ITALIC),
     ] {
         let mut format = null_mut();
         let hr = unsafe {
@@ -1262,9 +1274,9 @@ fn font_face_from_format(format: *mut IDWriteTextFormat) -> *mut IDWriteFontFace
         }
         let mut font: *mut winapi::um::dwrite::IDWriteFont = null_mut();
         let hr = (*family).GetFirstMatchingFont(
-            DWRITE_FONT_WEIGHT_NORMAL,
-            DWRITE_FONT_STRETCH_NORMAL,
-            DWRITE_FONT_STYLE_NORMAL,
+            (*format).GetFontWeight(),
+            (*format).GetFontStretch(),
+            (*format).GetFontStyle(),
             &mut font,
         );
         release(family);
@@ -1290,24 +1302,12 @@ fn font_has_glyph(face: *mut IDWriteFontFace, ch: char) -> bool {
     hr >= 0 && glyph != 0
 }
 
-const WIDE_FIT_SAMPLE: &str = "一二三人口手千千万万大大反方上海重启还在";
-
-fn fitted_points(points: f32, target: f32, measured: f32) -> f32 {
-    if measured <= 0.0 || target <= 0.0 {
-        return points;
+fn wide_placement(measured: f32, available: f32) -> (f32, f32) {
+    if measured <= 0.0 || available <= 0.0 {
+        return (1.0, 0.0);
     }
-    (points * target / measured).clamp(4.0, 200.0)
-}
-
-fn fit_wide_points(
-    dwrite: *mut IDWriteFactory,
-    format: *mut IDWriteTextFormat,
-    points: f32,
-    cell_width: f32,
-) -> f32 {
-    let target = 40.0 * cell_width;
-    let (measured, _) = measure_text(dwrite, format, WIDE_FIT_SAMPLE);
-    fitted_points(points, target, measured)
+    let scale = (available / measured).min(1.0);
+    (scale, (available - measured * scale) * 0.5)
 }
 
 fn measure_text(
@@ -1317,7 +1317,7 @@ fn measure_text(
 ) -> (f32, f32) {
     let sample = wide(text);
     let mut layout: *mut IDWriteTextLayout = null_mut();
-    let count = text.chars().count().max(1) as u32;
+    let count = text.encode_utf16().count() as u32;
     let hr = unsafe {
         (*dwrite).CreateTextLayout(
             sample.as_ptr(),
@@ -1377,33 +1377,68 @@ fn is_wide_char(ch: char) -> bool {
     rvim_term::char_width(ch) == 2
 }
 
-fn parse_font(spec: &str) -> (String, f32) {
+#[derive(Debug, PartialEq)]
+struct FontSpec {
+    family: String,
+    points: f32,
+    weight: u32,
+    italic: bool,
+}
+
+fn parse_font(spec: &str) -> FontSpec {
     parse_font_with_default(spec, BASE_FONT_POINTS)
 }
 
-fn parse_font_with_default(spec: &str, default_points: f32) -> (String, f32) {
-    let mut family = DEFAULT_FONT.to_string();
-    let mut points = default_points;
+fn parse_font_with_default(spec: &str, default_points: f32) -> FontSpec {
+    let mut font = FontSpec {
+        family: DEFAULT_FONT.to_string(),
+        points: default_points,
+        weight: DWRITE_FONT_WEIGHT_NORMAL,
+        italic: false,
+    };
     for (index, part) in spec.split(':').enumerate() {
         if index == 0 {
             if !part.is_empty() && part != "*" {
-                family = part.to_string();
+                font.family = part.replace('_', " ");
             }
         } else if let Some(height) = part.strip_prefix('h') {
             if let Ok(value) = height.parse::<f32>() {
-                points = value.clamp(4.0, 200.0);
+                if value.is_finite() {
+                    font.points = value.clamp(4.0, 200.0);
+                }
+            }
+        } else if part == "b" {
+            font.weight = DWRITE_FONT_WEIGHT_BOLD;
+        } else if part == "i" {
+            font.italic = true;
+        } else if let Some(weight) = part.strip_prefix('W') {
+            if let Ok(value) = weight.parse::<u32>() {
+                font.weight = value.clamp(1, 999);
             }
         }
     }
-    (family, points)
+    font
+}
+
+fn font_string(family: &str, points: f32, weight: i32, italic: bool) -> String {
+    let mut spec = format!("{}:h{}", family.replace(' ', "_"), points);
+    if weight != DWRITE_FONT_WEIGHT_NORMAL as i32 {
+        spec.push_str(&format!(":W{}", weight.clamp(1, 999)));
+    }
+    if italic {
+        spec.push_str(":i");
+    }
+    spec
 }
 
 fn choose_font(current: &str, _wide: bool) -> Option<String> {
-    let (family, points) = parse_font(current);
+    let font = parse_font(current);
+    let points = font.points;
     let mut lf: LOGFONTW = unsafe { zeroed() };
     lf.lfHeight = -((points * 96.0 / 72.0).round() as i32);
-    lf.lfWeight = FW_NORMAL;
-    let face: Vec<u16> = family.encode_utf16().take(31).collect();
+    lf.lfWeight = font.weight as i32;
+    lf.lfItalic = u8::from(font.italic);
+    let face: Vec<u16> = font.family.encode_utf16().take(31).collect();
     for (slot, ch) in lf.lfFaceName.iter_mut().zip(face) {
         *slot = ch;
     }
@@ -1428,7 +1463,12 @@ fn choose_font(current: &str, _wide: bool) -> Option<String> {
     } else {
         points
     };
-    Some(format!("{}:h{}", face, chosen_points.round() as i32))
+    Some(font_string(
+        &face,
+        chosen_points,
+        lf.lfWeight,
+        lf.lfItalic != 0,
+    ))
 }
 
 fn normalize_newlines(text: &str) -> String {
@@ -1679,36 +1719,88 @@ mod tests {
     }
 
     #[test]
-    fn font_specs_parse_vim_height_suffixes() {
-        assert_eq!(parse_font(""), ("Consolas".to_string(), 12.0));
+    fn font_specs_preserve_size_and_style() {
+        assert_eq!(parse_font("").family, "Consolas");
+        assert_eq!(parse_font("").points, 12.0);
+        let font = parse_font("Cascadia_Mono:h18.5:W600:i");
+        assert_eq!(font.family, "Cascadia Mono");
+        assert_eq!(font.points, 18.5);
+        assert_eq!(font.weight, 600);
+        assert!(font.italic);
+        assert_eq!(parse_font("Consolas:h4:b").weight, 700);
+        assert_eq!(parse_font_with_default("MSGothic", 20.0).points, 20.0);
+        assert_eq!(parse_font("Consolas:hNaN").points, 12.0);
+    }
+
+    #[test]
+    fn dialog_font_spec_roundtrips_fractional_size_and_weight() {
+        let spec = font_string("Microsoft YaHei", 14.5, 600, true);
+        assert_eq!(spec, "Microsoft_YaHei:h14.5:W600:i");
         assert_eq!(
-            parse_font("Cascadia Mono:h18"),
-            ("Cascadia Mono".to_string(), 18.0)
-        );
-        assert_eq!(parse_font("Consolas:h4"), ("Consolas".to_string(), 4.0));
-        assert_eq!(
-            parse_font_with_default("MSGothic", 20.0),
-            ("MSGothic".to_string(), 20.0)
+            parse_font(&spec),
+            parse_font("Microsoft YaHei:h14.5:W600:i")
         );
     }
 
     #[test]
-    fn wide_fit_sample_is_twenty_han_chars() {
-        assert_eq!(WIDE_FIT_SAMPLE.chars().count(), 20);
-        assert_eq!(
-            WIDE_FIT_SAMPLE
-                .chars()
-                .map(rvim_term::char_width)
-                .sum::<usize>(),
-            40
-        );
+    fn live_font_options_rebuild_directwrite_formats_and_grid() {
+        let mut session = Session::new();
+        session.ex("set guifont=Consolas:h12:W500").unwrap();
+        session.ex("set guifontwide=Consolas:h18:W600:i").unwrap();
+        let mut gui = match Gui::new(session) {
+            Ok(gui) => gui,
+            Err((_, message)) => panic!("{message}"),
+        };
+        gui.update_metrics_at(96);
+        assert_eq!(gui.font_index('A'), 0);
+        assert_eq!(gui.font_index('漢'), 1);
+        assert_eq!(gui.font_index('😀'), 1);
+        let first_width = gui.cell_w;
+        unsafe {
+            assert_eq!((*gui.formats[0]).GetFontSize(), 16.0);
+            assert_eq!((*gui.formats[0]).GetFontWeight(), 500);
+            assert_eq!((*gui.fallback_formats[0]).GetFontSize(), 24.0);
+            assert_eq!((*gui.fallback_formats[0]).GetFontWeight(), 600);
+            assert_eq!(
+                (*gui.fallback_formats[0]).GetFontStyle(),
+                DWRITE_FONT_STYLE_ITALIC
+            );
+        }
+        let first_height = gui.cell_h;
+        gui.tui
+            .session
+            .ex("set guifontwide=Consolas:h30:W800")
+            .unwrap();
+        gui.update_metrics_at(96);
+        assert!(gui.cell_h > first_height);
+        assert_eq!(gui.cell_w, first_width);
+        unsafe {
+            assert_eq!((*gui.fallback_formats[0]).GetFontSize(), 40.0);
+            assert_eq!((*gui.fallback_formats[0]).GetFontWeight(), 800);
+        }
+        gui.tui.session.ex("set guifont=Consolas:h16:b").unwrap();
+        gui.update_metrics_at(144);
+        assert!(gui.cell_w > first_width);
+        unsafe {
+            assert_eq!((*gui.formats[0]).GetFontSize(), 32.0);
+            assert_eq!((*gui.formats[0]).GetFontWeight(), 700);
+            // Explicit wide point size survives primary font and DPI changes.
+            assert_eq!((*gui.fallback_formats[0]).GetFontSize(), 60.0);
+        }
+        gui.tui.session.ex("set guifontwide=Consolas").unwrap();
+        gui.update_metrics_at(96);
+        unsafe {
+            assert!(((*gui.fallback_formats[0]).GetFontSize() - 16.0 * 96.0 / 72.0).abs() < 0.001);
+        }
+        gui.cleanup();
     }
 
     #[test]
-    fn wide_points_are_scaled_to_the_forty_cell_target() {
-        assert!((fitted_points(13.0, 400.0, 480.0) - 10.8333).abs() < 0.001);
-        assert!((fitted_points(13.0, 400.0, 320.0) - 16.25).abs() < 0.001);
-        assert_eq!(fitted_points(13.0, 400.0, 0.0), 13.0);
+    fn wide_glyphs_fit_two_cells_without_changing_height() {
+        assert_eq!(wide_placement(16.0, 20.0), (1.0, 2.0));
+        assert_eq!(wide_placement(40.0, 20.0), (0.5, 0.0));
+        assert_eq!(wide_placement(20.0, 20.0), (1.0, 0.0));
+        assert_eq!(wide_placement(0.0, 20.0), (1.0, 0.0));
     }
 
     #[test]

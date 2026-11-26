@@ -21,8 +21,8 @@ GUI. The console/TUI remains the default when a terminal is attached.
   `ID2D1SolidColorBrush`, text is drawn with `DrawTextLayout`, and the cursor
   uses the Vim block/vertical/horizontal shapes described below.
 - East Asian wide glyphs occupy two grid cells (the second is a continuation
-  cell skipped by both the terminal renderer and Direct2D). Font choice is by
-  Unicode glyph coverage, not by character width.
+  cell skipped by both the terminal renderer and Direct2D). Wide characters
+  prefer `guifontwide`; other characters prefer `guifont`.
 - 256-colour ANSI values and 24-bit RGB values are both mapped to Direct2D
   colours. The default font is Consolas at 12 pt (16 DIPs at 96 DPI), scaled by
   the window DPI and configurable with `guifont` / `guifontwide`.
@@ -45,6 +45,11 @@ The block is filled with the `Cursor` highlight group (or the inverse of
 the cursor foreground. Blinking follows Vim's default timings (700 ms wait,
 400 ms off, 250 ms on) and resets to visible on every key press.
 
+Normal-mode `j`/`k` and Up/Down preserve the desired display-cell column
+across Latin, CJK and tab-indented lines. Short or empty lines do not reset the
+goal. If the target falls inside a wide character or tab, the cursor rests on
+that character's first cell and keeps the original goal for subsequent moves.
+
 ## Fonts
 
 ```vim
@@ -53,25 +58,32 @@ set guifontwide=MS\ Gothic:h14
 set guifont?
 ```
 
-`hN` is the point size. `guifontwide` is independent of `guifont`: its
-nominal size is not copied to the normal font. Its fallback formats are
-fitted to 40 normal cells using the 20-character sample
-`一二三人口手千千万万大大反方上海重启还在`, so a wide/fallback glyph does not
-overrun or leave a gap in the two-cell grid. If `guifontwide` omits `hN`, it
-inherits the `guifont` point size.
+`hN` is the point size (fractional sizes such as `h12.5` are supported).
+Use `:b` for bold, `:W600` for a numeric Windows weight (400 normal, 700 bold),
+and `:i` for italic. Font-family spaces can be escaped or written as underscores:
 
-The normal font defines the cell width and height, using the average advance
-of the 52 Latin letters (Vim's `GetAverageFontSize()`). `guifont` and
-`guifontwide` form one coverage-based font stack: a character uses the first
-configured font whose font face has a glyph for it, independently of whether
-the character is Latin, CJK or emoji. The grid cell count comes from Unicode
-display width (`unicode-width`), not from the font. DirectWrite's system
-fallback handles characters neither configured font covers.
+```vim
+set guifont=Consolas:h12:W400
+set guifontwide=Microsoft_YaHei:h14:W600
+```
+
+`guifontwide` is independent of `guifont`: an explicit wide point size is
+preserved. If `guifontwide` omits `hN`, it inherits the `guifont` point size.
+The primary font defines cell width using the average advance of the 52 Latin
+letters. Row height accommodates both configured fonts; text is vertically
+centred. A wide glyph is centred in two cells and compressed horizontally only
+if its natural advance exceeds those cells, preserving its requested height.
+
+Double-width characters (CJK, full-width punctuation, emoji) prefer
+`guifontwide` whenever it is configured, even when `guifont` also covers them.
+Other characters use `guifont`, with coverage fallback to `guifontwide`.
+DirectWrite's system fallback handles glyphs missing from the selected font.
+The grid cell count comes from Unicode display width (`unicode-width`).
 
 In the GUI, a bare `:set guifont`, `:set guifontwide`, `:set guifont=*` or
-`:set guifont=` opens the native Windows **Font** dialog (ChooseFont); the
-selection is written back as `Family:hN`. Cancelling the dialog leaves the
-option unchanged.
+`:set guifont=` opens the native Windows **Font** dialog (ChooseFont). The
+selection preserves fractional point size, weight and italic style in the
+option string. Cancelling the dialog leaves the option unchanged.
 
 ## IME and clipboard
 
@@ -97,8 +109,7 @@ The GUI follows Vim's `guioptions` **e** flag for the tabline. The default is
 
 - Emoji use DirectWrite font fallback with Direct2D's
   `DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT`; they occupy two Unicode display cells
-  and go through the same coverage-based font selection as every other
-  character.
+  and prefer `guifontwide` when configured.
 - Text runs are shaped by DirectWrite as a unit. A font with programming
   ligatures (for example `Cascadia Code` or `Fira Code`) can be selected with
   `set guifont=Cascadia\ Code:h12`; standard ligatures such as `->` are
@@ -111,15 +122,14 @@ The GUI follows Vim's `guioptions` **e** flag for the tabline. The default is
 
 The renderer uses three sources:
 
-1. `guifont` is the primary font and defines the cell width/height (the
-   average Latin advance, matching Vim's `GetAverageFontSize()`);
-2. `guifontwide` is the coverage fallback when the primary face has no glyph;
-3. DirectWrite's system font fallback handles characters neither configured
-   font covers (rare CJK, emoji, ...).
+1. `guifont` is the primary font and defines cell width (average Latin advance);
+2. `guifontwide` is preferred for double-width characters and supplies coverage
+   fallback for other characters missing from the primary font;
+3. DirectWrite's system font fallback handles glyphs missing from the selected
+   font (rare CJK, emoji, ...).
 
-Font choice is by Unicode scalar coverage. It is deliberately **not** based on
-UTF-8 byte length or on "CJK vs Latin" ranges. A wide character still occupies
-two Unicode display cells, and a Latin character one.
+Font choice uses Unicode display width and glyph coverage, independent of
+UTF-8 byte length. A wide character occupies two cells, and a Latin character one.
 
 Cursor positions and the statusline ruler use character display width, not the
 font or UTF-8 byte offset: a Latin cell moves one column, a CJK/emoji cell moves

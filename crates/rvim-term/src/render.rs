@@ -173,12 +173,7 @@ pub fn expand_cells(text: &str, tabstop: usize) -> Vec<char> {
 /// Tabs and control characters occupy more than one cell, so this expands the
 /// prefix exactly like [`expand_cells`] does.
 pub fn display_col(text: &str, byte_col: usize, tabstop: usize) -> usize {
-    let prefix: String = text
-        .char_indices()
-        .take_while(|(i, _)| *i < byte_col)
-        .map(|(_, c)| c)
-        .collect();
-    expand_cells(&prefix, tabstop).len()
+    rvim_editor::display::display_col(text, byte_col, tabstop)
 }
 
 /// Render one frame.

@@ -9,6 +9,7 @@
 pub mod abbrev;
 pub mod autocmd;
 pub mod diff;
+pub mod display;
 pub mod editor;
 pub mod fold;
 pub mod indent;

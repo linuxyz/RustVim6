@@ -280,7 +280,7 @@ pub struct Window {
     pub top_line: usize,
     /// Horizontal scroll in display cells (`w_leftcol`).
     pub left: usize,
-    /// Desired column for `j`/`k` (`w_curswant`), a byte column.
+    /// Desired display-cell column for `j`/`k` (`w_curswant`), zero-based.
     pub curswant: usize,
     /// Window-local option values; absent means "use the global value".
     pub local: HashMap<String, OptValue>,

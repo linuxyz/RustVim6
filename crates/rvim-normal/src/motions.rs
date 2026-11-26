@@ -27,13 +27,20 @@ pub fn move_cursor(ed: &Editor, key: char, count: u64) -> VimResult<Pos> {
             _ => {}
         }
     }
+    if matches!(key, 'j' | 'k') && !ed.mode.is_visual() {
+        next.col = rvim_editor::display::byte_col(
+            buf.line_str(next.line)?,
+            ed.windows.current().curswant,
+            ed.options.num_or("tabstop", 8).max(1) as usize,
+        );
+    }
     let mut clamped = buf.clamp_pos(next);
     // In Normal mode the cursor rests *on* a character: `l`/` ` stop at the last
     // character instead of moving one past the end of the line (vim clamps
     // unless 'virtualedit' allows otherwise). `h` uses the same bound so it can
     // step back from the end-of-line position that `$` produces.
     if matches!(key, 'l' | ' ' | 'h') && !line_text.is_empty() {
-        let last = line_text.len() - 1;
+        let last = rvim_core::text::last_char_offset(line_text);
         clamped.col = clamped.col.min(last);
     }
     Ok(clamped)

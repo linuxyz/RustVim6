@@ -62,7 +62,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build release
-        run: cargo build --release --locked --offline
+        # Hosted runners may have an empty Cargo registry; allow locked dependencies to download.
+        run: cargo build --release --locked
 
       - name: Fetch Vim runtime
         shell: pwsh
