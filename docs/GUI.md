@@ -53,9 +53,12 @@ set guifontwide=MS\ Gothic:h14
 set guifont?
 ```
 
-`hN` is the point size. `guifontwide` is independent of `guifont`:
-its size is not copied to the normal font and it is not auto-fitted to the
-grid. If `guifontwide` omits `hN`, it inherits the `guifont` point size.
+`hN` is the point size. `guifontwide` is independent of `guifont`: its
+nominal size is not copied to the normal font. Its fallback formats are
+fitted to 40 normal cells using the 20-character sample
+`一二三人口手千千万万大大反方上海重启还在`, so a wide/fallback glyph does not
+overrun or leave a gap in the two-cell grid. If `guifontwide` omits `hN`, it
+inherits the `guifont` point size.
 
 The normal font defines the cell width and height, using the average advance
 of the 52 Latin letters (Vim's `GetAverageFontSize()`). `guifont` and

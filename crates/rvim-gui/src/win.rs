@@ -293,7 +293,29 @@ impl Gui {
                     Vec::new()
                 } else {
                     let (wide_family, wide_points) = parse_font_with_default(&wide_spec, points);
-                    make_formats(self.dwrite, scale, &wide_family, wide_points).unwrap_or_default()
+                    let mut formats = make_formats(self.dwrite, scale, &wide_family, wide_points)
+                        .unwrap_or_default();
+                    if let Some(format) = formats.first().copied() {
+                        let (cell_width, _) = self
+                            .formats
+                            .first()
+                            .copied()
+                            .map(|format| measure_cell(self.dwrite, format))
+                            .unwrap_or((9.0 * scale, 18.0 * scale));
+                        let fitted = fit_wide_points(self.dwrite, format, wide_points, cell_width);
+                        if (fitted - wide_points).abs() > 0.05 {
+                            if let Ok(next) = make_formats(self.dwrite, scale, &wide_family, fitted)
+                            {
+                                unsafe {
+                                    for old in formats.drain(..) {
+                                        release(old);
+                                    }
+                                }
+                                formats = next;
+                            }
+                        }
+                    }
+                    formats
                 };
                 let primary_face = formats
                     .first()
@@ -1268,6 +1290,26 @@ fn font_has_glyph(face: *mut IDWriteFontFace, ch: char) -> bool {
     hr >= 0 && glyph != 0
 }
 
+const WIDE_FIT_SAMPLE: &str = "一二三人口手千千万万大大反方上海重启还在";
+
+fn fitted_points(points: f32, target: f32, measured: f32) -> f32 {
+    if measured <= 0.0 || target <= 0.0 {
+        return points;
+    }
+    (points * target / measured).clamp(4.0, 200.0)
+}
+
+fn fit_wide_points(
+    dwrite: *mut IDWriteFactory,
+    format: *mut IDWriteTextFormat,
+    points: f32,
+    cell_width: f32,
+) -> f32 {
+    let target = 40.0 * cell_width;
+    let (measured, _) = measure_text(dwrite, format, WIDE_FIT_SAMPLE);
+    fitted_points(points, target, measured)
+}
+
 fn measure_text(
     dwrite: *mut IDWriteFactory,
     format: *mut IDWriteTextFormat,
@@ -1648,6 +1690,25 @@ mod tests {
             parse_font_with_default("MSGothic", 20.0),
             ("MSGothic".to_string(), 20.0)
         );
+    }
+
+    #[test]
+    fn wide_fit_sample_is_twenty_han_chars() {
+        assert_eq!(WIDE_FIT_SAMPLE.chars().count(), 20);
+        assert_eq!(
+            WIDE_FIT_SAMPLE
+                .chars()
+                .map(rvim_term::char_width)
+                .sum::<usize>(),
+            40
+        );
+    }
+
+    #[test]
+    fn wide_points_are_scaled_to_the_forty_cell_target() {
+        assert!((fitted_points(13.0, 400.0, 480.0) - 10.8333).abs() < 0.001);
+        assert!((fitted_points(13.0, 400.0, 320.0) - 16.25).abs() < 0.001);
+        assert_eq!(fitted_points(13.0, 400.0, 0.0), 13.0);
     }
 
     #[test]
