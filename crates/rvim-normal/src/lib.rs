@@ -310,13 +310,22 @@ impl NormalEngine {
         // vim turns cw/cW into ce/cE when the cursor is on a non-blank and no
         // count was given (normal.c, the "cw" special case), so "cw" does not
         // eat the space after the word while "2cw" still changes two words.
-        let motion =
-            if op == 'c' && matches!(key, 'w' | 'W') && count == 1 && cursor_on_nonblank(ed) {
-                if key == 'w' { 'e' } else { 'E' }
-            } else {
-                key
-            };
-        let range = if motion == op {
+        let change_word =
+            op == 'c' && matches!(key, 'w' | 'W') && count == 1 && cursor_on_nonblank(ed);
+        let motion = if change_word {
+            if key == 'w' { 'e' } else { 'E' }
+        } else {
+            key
+        };
+        let range = if change_word {
+            let end = motions::change_word_end(ed, motion)?;
+            let text = ed.current_buffer().line_str(end.line)?;
+            operators::OpRange {
+                start: ed.cursor(),
+                end: Pos::new(end.line, rvim_core::text::move_chars(text, end.col, 1)),
+                linewise: false,
+            }
+        } else if motion == op {
             operators::line_range(
                 ed.cursor().line,
                 ed.cursor().line + count as usize - 1,
@@ -331,7 +340,13 @@ impl NormalEngine {
         self.apply_operator(ed, op, range, reg)?;
         ed.last_change = Some(RepeatChange::Operator {
             op,
-            motion: if motion == op { op } else { motion },
+            motion: if change_word {
+                key
+            } else if motion == op {
+                op
+            } else {
+                motion
+            },
             count,
         });
         Ok(true)

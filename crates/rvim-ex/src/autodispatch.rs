@@ -88,6 +88,7 @@ fn fire_impl(
     ed.autocmds.remove_indices(&fire_once);
 
     for (command, nested) in jobs {
+        let outer_match = std::mem::replace(&mut state.amatch, pattern.to_string());
         let outer_busy = ed.autocmd_busy;
         let outer_nested = ed.autocmd_nested;
         ed.autocmd_busy = true;
@@ -102,6 +103,7 @@ fn fire_impl(
         ed.autocmd_depth -= 1;
         ed.autocmd_busy = outer_busy;
         ed.autocmd_nested = outer_nested;
+        state.amatch = outer_match;
     }
 }
 

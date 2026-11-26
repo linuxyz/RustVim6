@@ -1,12 +1,57 @@
 //! Character classification with Vim semantics (reference: charset.c).
 //!
-//! M1 covers ASCII word/whitespace/keyword rules plus UTF-8 Unicode helpers.
-//! The `iskeyword` option is threaded through at call sites later; the defaults
-//! here match Vim's default `@,48-57,_,192-255`.
+//! Default keyword rules and Unicode motion classes from the Vim baseline.
+//! These helpers use `@,48-57,_,192-255`; custom `iskeyword` values are not
+//! consulted here.
 
-/// Vim `iskeyword` default for ASCII letters: [A-Za-z_].
+/// Whether a character belongs to a default keyword/script class.
 pub fn is_word_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || ch == '_' || (ch as u32) >= 192
+    word_class(ch) >= 2
+}
+
+/// Vim's default word-motion class: whitespace, punctuation, or a script class.
+/// CJK text and Latin text are separate runs; punctuation is never whitespace.
+pub fn word_class(ch: char) -> u32 {
+    let code = ch as u32;
+    if code < 0x100 {
+        return if matches!(ch, '\0' | ' ' | '\t' | '\u{a0}') {
+            0
+        } else if ch.is_ascii_alphanumeric() || ch == '_' || code >= 192 {
+            2
+        } else {
+            1
+        };
+    }
+    use crate::unicode_wordclass::{CLASSES, EMOJI};
+    if EMOJI
+        .binary_search_by(|&(first, last)| {
+            if code < first {
+                std::cmp::Ordering::Greater
+            } else if code > last {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
+    {
+        return 3;
+    }
+    // Use the baseline's inclusive search bounds, including its historical
+    // overlapping symbol/superscript intervals.
+    let (mut low, mut high) = (0isize, CLASSES.len() as isize - 1);
+    while low <= high {
+        let mid = (low + high) / 2;
+        let (first, last, class) = CLASSES[mid as usize];
+        if code < first {
+            high = mid - 1;
+        } else if code > last {
+            low = mid + 1;
+        } else {
+            return class;
+        }
+    }
+    2
 }
 
 pub fn is_blank(ch: char) -> bool {

@@ -414,3 +414,63 @@ fn official_vim9_expression_subset_runs() {
         assert_eq!(errors, "[]", "{name} produced assertion failures: {errors}");
     }
 }
+
+#[test]
+fn vim9_try_catches_legacy_errors_and_always_runs_finally() {
+    let dir = temp_dir("legacy_error");
+    let path = write(
+        &dir,
+        "legacy_error.vim",
+        r#"vim9script
+func LegacyFail()
+  call MissingFunctionForVim9TryTest()
+  let g:continued_after_error = 1
+endfunc
+try
+  LegacyFail()
+catch /E117/
+  g:caught = true
+finally
+  g:cleaned_up = true
+endtry
+g:after = true
+"#,
+    );
+    let mut s = Session::new();
+    s.source(&path).unwrap();
+    for name in ["caught", "cleaned_up", "after"] {
+        assert_eq!(global(&s, name), Some(rvim_viml::Value::Bool(true)));
+    }
+    assert!(global(&s, "continued_after_error").is_none());
+    assert_eq!(s.viml.env.try_depth, 0);
+    assert_eq!(s.viml.env.call_depth, 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn legacy_calls_use_vim9_varargs_and_lambda_argument_checks() {
+    let dir = temp_dir("legacy_args");
+    let path = write(
+        &dir,
+        "legacy_args.vim",
+        r#"vim9script
+def g:Collect(first: number = 7, ...rest: list<number>): list<number>
+  return [first] + rest
+enddef
+g:Vim9Lambda = (n: number): number => n + 1
+"#,
+    );
+    let mut s = Session::new();
+    s.source(&path).unwrap();
+    s.ex("let g:empty = g:Collect()").unwrap();
+    s.ex("let g:many = g:Collect(1, 2, 3)").unwrap();
+    assert_eq!(global(&s, "empty").unwrap().to_string_value(), "[7]");
+    assert_eq!(global(&s, "many").unwrap().to_string_value(), "[1, 2, 3]");
+    assert_eq!(s.ex("call g:Collect(1, 'bad')").unwrap_err().code, "E1013");
+    assert_eq!(s.ex("call g:Vim9Lambda()").unwrap_err().code, "E119");
+    assert_eq!(s.ex("call g:Vim9Lambda(1, 2)").unwrap_err().code, "E118");
+    s.ex("let g:valid = g:Vim9Lambda(41)").unwrap();
+    assert_eq!(number(&s, "valid"), 42);
+    assert!(s.viml.env.frames.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}

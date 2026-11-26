@@ -35,7 +35,10 @@ enum Pending {
     /// `g`: waiting for `g` (`gg`, `3gg`).
     G,
     /// `<C-w>`: waiting for the window command key.
-    WindowCmd,
+    WindowCmd {
+        before: Option<u64>,
+        after: Option<u64>,
+    },
     /// An operator waiting for a text object character (`diw`, `ca("`).
     TextObject(char, bool),
     /// `z`: waiting for the fold command key.
@@ -173,6 +176,8 @@ pub struct Tui {
     pending_since: Option<std::time::Instant>,
     /// Wildmenu candidates while completing.
     pub wildmenu: Option<(Vec<String>, usize, String)>,
+    /// Byte range replaced by each candidate in the original command line.
+    wildmenu_range: std::ops::Range<usize>,
     /// `:` / `/` history shared by every command line (cmdhist.c).
     pub history: rvim_cmdline::CmdHistory,
     /// The line being edited before the first `<Up>` (`<Down>` restores it).
@@ -183,6 +188,8 @@ pub struct Tui {
     pub screen_size: (usize, usize),
     /// Whether the tabline row is part of the grid (GUI guioptions e).
     show_tabline: bool,
+    /// Pointer scrolling may leave the cursor outside the viewport until input.
+    gui_scroll_anchors: std::collections::HashMap<WindowId, (i32, Pos)>,
     last_frame: Option<Grid>,
 }
 
@@ -202,11 +209,13 @@ impl Tui {
             visual_pending: None,
             pending_since: None,
             wildmenu: None,
+            wildmenu_range: 0..0,
             history: rvim_cmdline::CmdHistory::new(50),
             history_saved: None,
             seen_messages: 0,
             screen_size: (80, 24),
             show_tabline: true,
+            gui_scroll_anchors: std::collections::HashMap::new(),
             last_frame: None,
         };
         tui.seen_messages = tui.session.message_history().len();
@@ -221,6 +230,8 @@ impl Tui {
 
     /// Process one decoded key.
     pub fn feed_key(&mut self, key: Key) -> VimResult<()> {
+        self.gui_scroll_anchors
+            .remove(&self.session.editor.windows.current_id());
         if self.quit {
             return Ok(());
         }
@@ -258,6 +269,11 @@ impl Tui {
                 self.session.editor.mode = Mode::Normal;
             }
             return Ok(());
+        }
+        // Once Ctrl-W has been recognised, its suffix (and optional count)
+        // is read literally, like Vim's no_mapping window-command prefix.
+        if matches!(self.pending_op, Some(Pending::WindowCmd { .. })) {
+            return self.dispatch_key(key);
         }
         // Mapping expansion: buffer keys until we know whether a map applies.
         self.pending_keys.push(key);
@@ -515,7 +531,12 @@ impl Tui {
                 }
                 // <C-w> starts a window command; the next key selects it.
                 "C-W" => {
-                    self.pending_op = Some(Pending::WindowCmd);
+                    let before = engine.pending_count();
+                    engine.take_pending_count();
+                    self.pending_op = Some(Pending::WindowCmd {
+                        before,
+                        after: None,
+                    });
                     Ok(true)
                 }
                 // <C-v> starts a blockwise selection.
@@ -547,14 +568,40 @@ impl Tui {
     /// Complete a two-key command whose first key is buffered.
     fn finish_pending_command(&mut self, pending: Pending, key: Key) -> VimResult<()> {
         match pending {
-            Pending::WindowCmd => {
-                let Some(ch) = motion_key(&key) else {
+            Pending::WindowCmd { before, after } => {
+                if let Key::Char(ch) = key {
+                    if ch.is_ascii_digit() && (ch != '0' || after.is_some()) {
+                        let after = after
+                            .unwrap_or(0)
+                            .saturating_mul(10)
+                            .saturating_add(ch.to_digit(10).unwrap() as u64)
+                            .min(999_999_999);
+                        self.pending_op = Some(Pending::WindowCmd {
+                            before,
+                            after: Some(after),
+                        });
+                        return Ok(());
+                    }
+                }
+                let Some(ch) = window_command_key(&key) else {
                     return Ok(());
                 };
-                let mut engine = std::mem::replace(&mut self.session.normal, NormalEngine::new());
-                let count = engine.take_pending_count();
-                self.session.normal = engine;
-                self.session.editor.wincmd(ch, count)?;
+                let count = match (before, after) {
+                    (Some(a), Some(b)) => Some(a.saturating_mul(b).min(999_999_999)),
+                    (a, b) => a.or(b),
+                };
+                if ch == 'q'
+                    && self.session.editor.window_count() == 1
+                    && self.session.editor.tabpage_count() == 1
+                {
+                    let outcome = self.session.ex("quit")?;
+                    if let rvim_ex::ExOutcome::Quit { exit_code, .. } = outcome {
+                        self.quit = true;
+                        self.exit_code = exit_code;
+                    }
+                } else {
+                    self.session.editor.wincmd_counted(ch, count)?;
+                }
                 Ok(())
             }
             Pending::TextObject(op, around) => {
@@ -786,21 +833,25 @@ impl Tui {
                     self.wildmenu = None;
                 }
                 "LEFT" => {
+                    self.wildmenu = None;
                     if let Some(cmdline) = self.cmdline.as_mut() {
                         cmdline.cursor = cmdline.cursor.saturating_sub(1);
                     }
                 }
                 "RIGHT" => {
+                    self.wildmenu = None;
                     if let Some(cmdline) = self.cmdline.as_mut() {
                         cmdline.cursor = (cmdline.cursor + 1).min(cmdline.char_len());
                     }
                 }
                 "HOME" => {
+                    self.wildmenu = None;
                     if let Some(cmdline) = self.cmdline.as_mut() {
                         cmdline.cursor = 0;
                     }
                 }
                 "END" => {
+                    self.wildmenu = None;
                     if let Some(cmdline) = self.cmdline.as_mut() {
                         cmdline.cursor = cmdline.char_len();
                     }
@@ -808,6 +859,7 @@ impl Tui {
                 // <C-n>/<C-p> complete while the wildmenu is open and recall
                 // history otherwise (ex_getln.c c_CTRL_N/c_CTRL_P).
                 "TAB" => self.complete_cmdline(true)?,
+                "S-TAB" => self.complete_cmdline(false)?,
                 "C-N" if self.wildmenu.is_some() => self.complete_cmdline(true)?,
                 "C-P" if self.wildmenu.is_some() => self.complete_cmdline(false)?,
                 "C-N" => self.recall_history(false),
@@ -841,36 +893,48 @@ impl Tui {
             return Ok(());
         };
         if self.wildmenu.is_none() {
-            let user: Vec<String> = Vec::new();
-            let matches = if cmdline.prompt == ':' {
-                rvim_cmdline::complete_command(&cmdline.text, &user, 50)
+            if cmdline.prompt != ':' {
+                return Ok(());
+            }
+            let end = cmdline.byte_at(cmdline.cursor);
+            let before = &cmdline.text[..end];
+            let (start, matches) = if let Some(completion) =
+                rvim_cmdline::complete_set(before, &self.session.editor, usize::MAX)
+            {
+                (completion.start, completion.matches)
+            } else if let Some(completion) =
+                rvim_cmdline::complete_help(before, &self.session.editor, 100)
+            {
+                completion
+            } else if let Some(completion) =
+                rvim_cmdline::complete_colorscheme(before, &self.session.editor, 100)
+            {
+                completion
             } else {
-                Vec::new()
+                (0, rvim_cmdline::complete_command(before, &[], 50))
             };
             if matches.is_empty() {
                 return Ok(());
             }
-            let original = cmdline.text.clone();
-            let first = matches[0].clone();
-            self.wildmenu = Some((matches, 0, original));
-            cmdline.text = first;
-            cmdline.cursor = cmdline.char_len();
-            return Ok(());
+            let selected = if forward { 0 } else { matches.len() - 1 };
+            self.wildmenu_range = start..end;
+            self.wildmenu = Some((matches, selected, cmdline.text.clone()));
+        } else if let Some((matches, selected, _)) = self.wildmenu.as_mut() {
+            let len = matches.len();
+            *selected = if forward {
+                (*selected + 1) % len
+            } else {
+                (*selected + len - 1) % len
+            };
         }
-        let Some((matches, selected, original)) = self.wildmenu.as_mut() else {
-            return Ok(());
-        };
-        let len = matches.len();
-        if forward {
-            *selected = (*selected + 1) % len;
-        } else {
-            *selected = (*selected + len - 1) % len;
-        }
-        let chosen = matches[*selected].clone();
-        // Undo any previously inserted completion before applying the next one.
-        if let Some(cmdline) = self.cmdline.as_mut() {
-            cmdline.text = format!("{original}{chosen}");
-            cmdline.cursor = cmdline.char_len();
+        if let Some((matches, selected, original)) = &self.wildmenu {
+            let chosen = &matches[*selected];
+            let mut text = original.clone();
+            text.replace_range(self.wildmenu_range.clone(), chosen);
+            cmdline.cursor = text[..self.wildmenu_range.start + chosen.len()]
+                .chars()
+                .count();
+            cmdline.text = text;
         }
         Ok(())
     }
@@ -1071,6 +1135,12 @@ impl Tui {
             let text_cols = rect.cols.saturating_sub(gutter).max(1);
             let cursor = win.cursor;
             let bufnr = win.bufnr;
+            if self.gui_scroll_anchors.get(&id) == Some(&(bufnr, cursor)) {
+                let top = win.top_line;
+                self.gui_scroll_to(id, top);
+                continue;
+            }
+            self.gui_scroll_anchors.remove(&id);
             // 'scrolloff' keeps the cursor that many rows away from the window
             // edges (move.c update_topline / scroll_cursor_top).
             let so = self
@@ -1207,7 +1277,15 @@ impl Tui {
                 out.push(if *around { 'a' } else { 'i' });
             }
             Some(Pending::G) => out.push('g'),
-            Some(Pending::WindowCmd) => out.push_str("^W"),
+            Some(Pending::WindowCmd { before, after }) => {
+                if let Some(count) = before {
+                    out.push_str(&count.to_string());
+                }
+                out.push_str("^W");
+                if let Some(count) = after {
+                    out.push_str(&count.to_string());
+                }
+            }
             Some(Pending::Fold) => out.push('z'),
             Some(Pending::Bracket(forward)) => out.push(if *forward { ']' } else { '[' }),
             None => {}
@@ -1390,12 +1468,27 @@ impl Tui {
 
     /// `rvim_term` style of a highlight group (`:hi` + vim's default links).
     fn hl_style(&self, group: &str) -> Style {
-        let Some(attr) = self.session.editor.syntax_highlight(group) else {
-            return Style::NORMAL;
-        };
+        let attr = self
+            .session
+            .editor
+            .syntax_highlight(group)
+            .unwrap_or_default();
+        let normal = self
+            .session
+            .editor
+            .syntax_highlight("Normal")
+            .unwrap_or_default();
         Style {
-            fg: attr.fg.map(hl_color).unwrap_or(Color::Default),
-            bg: attr.bg.map(hl_color).unwrap_or(Color::Default),
+            fg: attr
+                .fg
+                .or(normal.fg)
+                .map(hl_color)
+                .unwrap_or(Color::Default),
+            bg: attr
+                .bg
+                .or(normal.bg)
+                .map(hl_color)
+                .unwrap_or(Color::Default),
             bold: attr.bold,
             italic: attr.italic,
             underline: attr.underline,
@@ -1612,7 +1705,54 @@ impl Tui {
         self.show_tabline = show;
     }
 
+    /// Scroll one GUI pane without moving the edit cursor or changing focus.
+    pub fn gui_scroll_to(&mut self, id: WindowId, top: usize) -> bool {
+        let Some(win) = self.session.editor.windows.get(id) else {
+            return false;
+        };
+        let total = self
+            .session
+            .editor
+            .buffer(win.bufnr)
+            .map(|buf| buf.line_count())
+            .unwrap_or(1);
+        let mut top = top.min(total.saturating_sub(win.rect.text_rows().max(1)));
+        if self.session.editor.wopt_for_bool(id, "foldenable", true) {
+            let minimum = self
+                .session
+                .editor
+                .wopt_for_num(id, "foldminlines", 1)
+                .max(0) as usize;
+            if let Some(fold) = self.session.editor.folds_for(id).iter().find(|fold| {
+                fold.closed
+                    && fold.start < top
+                    && top <= fold.end
+                    && fold.end - fold.start + 1 > minimum
+            }) {
+                top = fold.start;
+            }
+        }
+        let anchor = (win.bufnr, win.cursor);
+        let changed = top != win.top_line;
+        if let Some(win) = self.session.editor.windows.get_mut(id) {
+            win.top_line = top;
+        }
+        self.gui_scroll_anchors.insert(id, anchor);
+        changed
+    }
+
+    /// Build a GUI frame, applying guioptions on every redraw. The current GUI
+    /// uses e to control its grid tabline until native tab controls are added.
+    pub fn gui_grid(&mut self, cols: usize, rows: usize) -> Grid {
+        self.gui_scroll_anchors
+            .retain(|id, _| self.session.editor.windows.get(*id).is_some());
+        let flags = self.session.editor.options.str_or("guioptions", "");
+        self.set_show_tabline(flags.contains('e'));
+        self.grid(cols, rows)
+    }
+
     pub fn grid(&mut self, cols: usize, rows: usize) -> Grid {
+        self.refresh_theme();
         let cols = cols.max(1);
         let rows = rows.max(1);
         let tabpages = self.session.editor.tabpage_count();
@@ -1688,6 +1828,39 @@ impl Tui {
             showcmd: self.showcmd_text(),
         };
         render_layout(&model, cols, rows, &self.theme)
+    }
+
+    fn refresh_theme(&mut self) {
+        let normal = self.hl_style("Normal");
+        let style = |group: &str, mut fallback: Style| {
+            if self.session.editor.syntax_highlight(group).is_some() {
+                self.hl_style(group)
+            } else {
+                if fallback.fg == Color::Default {
+                    fallback.fg = normal.fg;
+                }
+                if fallback.bg == Color::Default {
+                    fallback.bg = normal.bg;
+                }
+                fallback
+            }
+        };
+        let defaults = Theme::default();
+        self.theme = Theme {
+            text: normal,
+            cmdline: normal,
+            message: normal,
+            status: style("StatusLine", defaults.status),
+            status_nc: style("StatusLineNC", defaults.status_nc),
+            separator: style("VertSplit", defaults.separator),
+            eob: style("EndOfBuffer", style("NonText", defaults.eob)),
+            wildmenu: style("StatusLine", defaults.wildmenu),
+            wildmenu_selected: style("WildMenu", defaults.wildmenu_selected),
+            fold: style("Folded", defaults.fold),
+            filler: style("DiffDelete", defaults.filler),
+            selection: style("Visual", defaults.selection),
+            popup: style("Pmenu", defaults.popup),
+        };
     }
 
     /// Screen as plain text - used by the `--script` driver and the tests.
@@ -1901,6 +2074,32 @@ enum Expand {
 ///
 /// The special keys are the motions vim binds them to (normal.c nv_left etc.),
 /// so `d<Right>` is `dl` and `d<End>` is `d$`.
+fn window_command_key(key: &Key) -> Option<char> {
+    match key {
+        Key::Char(ch) => Some(*ch),
+        Key::Special(name) => match name.as_str() {
+            "C-W" => Some('w'),
+            "C-S" => Some('s'),
+            "C-V" => Some('v'),
+            "C-N" => Some('n'),
+            "C-H" | "BS" | "LEFT" => Some('h'),
+            "C-J" | "NL" | "DOWN" => Some('j'),
+            "C-K" | "UP" => Some('k'),
+            "C-L" | "RIGHT" => Some('l'),
+            "C-T" => Some('t'),
+            "C-B" => Some('b'),
+            "C-P" => Some('p'),
+            "C-O" => Some('o'),
+            "C-Q" => Some('q'),
+            "C-R" => Some('r'),
+            "C-X" => Some('x'),
+            "C-_" => Some('_'),
+            _ => None,
+        },
+        Key::Nop => None,
+    }
+}
+
 fn motion_key(key: &Key) -> Option<char> {
     match key {
         Key::Char(ch) => Some(*ch),

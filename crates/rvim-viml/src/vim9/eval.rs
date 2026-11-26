@@ -509,43 +509,42 @@ fn exec_try(
     env: &mut Env,
     host: &mut dyn Host,
 ) -> VimResult<Flow> {
-    let mut pending_throw: Option<Value> = None;
-    let mut pending_error: Option<VimError> = None;
-    let mut result: Option<Flow> = None;
-    match exec_stmts(body, ctx, env, host) {
-        Ok(Flow::Next) => {}
-        Ok(flow @ (Flow::Return(_) | Flow::Break | Flow::Continue)) => {
-            result = Some(flow);
-        }
-        Ok(Flow::Throw(value)) => pending_throw = Some(value),
-        Err(error) => {
-            pending_throw = Some(exception_value(&error, env));
-            pending_error = Some(error);
-        }
-    }
-    if let Some(value) = pending_throw.clone() {
-        env.vvars.insert("exception".to_string(), value.clone());
-        let text = value.to_string_value();
-        let mut handled = false;
-        for clause in catches {
-            if catch_matches(clause.pattern.as_deref(), &text) {
-                handled = true;
-                result = Some(exec_stmts(&clause.body, ctx, env, host)?);
-                break;
+    let saved_exception = env.vvars.get("exception").cloned();
+    env.try_depth += 1;
+    let result = {
+        let mut pending = exec_stmts(body, ctx, env, host);
+        let exception = match &pending {
+            Ok(Flow::Throw(value)) => Some(value.clone()),
+            Err(error) => Some(exception_value(error, env)),
+            _ => None,
+        };
+        if let Some(value) = exception {
+            env.vvars.insert("exception".to_string(), value.clone());
+            let text = value.to_string_value();
+            if let Some(clause) = catches
+                .iter()
+                .find(|clause| catch_matches(clause.pattern.as_deref(), &text))
+            {
+                // Replace the pending error even if the catch itself fails.
+                // Finally must run for both successful and failing catches.
+                pending = exec_stmts(&clause.body, ctx, env, host);
+            } else if pending.as_ref().is_err_and(|error| error.code == "E605") {
+                // Preserve the original throw value across function boundaries.
+                pending = Ok(Flow::Throw(value));
             }
         }
-        if !handled && pending_error.is_none() {
-            result = Some(Flow::Throw(value));
+        match exec_stmts(finally, ctx, env, host) {
+            Ok(Flow::Next) => pending,
+            overriding => overriding,
         }
+    };
+    env.try_depth -= 1;
+    if let Some(value) = saved_exception {
+        env.vvars.insert("exception".to_string(), value);
+    } else {
+        env.vvars.remove("exception");
     }
-    let finally_flow = exec_stmts(finally, ctx, env, host)?;
-    if !matches!(finally_flow, Flow::Next) {
-        return Ok(finally_flow);
-    }
-    if let Some(error) = pending_error {
-        return Err(error);
-    }
-    Ok(result.unwrap_or(Flow::Next))
+    result
 }
 
 fn exception_value(error: &VimError, env: &mut Env) -> Value {
@@ -1704,6 +1703,74 @@ fn new_object(
     Ok(object)
 }
 
+/// Bind both def and lambda arguments in the active callee frame. Defaults
+/// can refer to earlier arguments and execute under the call-depth guard.
+fn bind_arguments(
+    params: &[Param],
+    anonymous_varargs: bool,
+    args: &[Value],
+    name: &str,
+    ctx: &mut Ctx,
+    env: &mut Env,
+    host: &mut dyn Host,
+) -> VimResult<()> {
+    let variadic = anonymous_varargs || params.iter().any(|param| param.varargs);
+    if !variadic && args.len() > params.len() {
+        return Err(VimError::new(
+            "E118",
+            format!("Too many arguments for function: {name}"),
+        ));
+    }
+    if params
+        .iter()
+        .enumerate()
+        .any(|(index, param)| !param.varargs && param.default.is_none() && index >= args.len())
+    {
+        return Err(VimError::new(
+            "E119",
+            format!("Not enough arguments for function: {name}"),
+        ));
+    }
+    for (index, param) in params.iter().enumerate() {
+        let value = if param.varargs {
+            Value::list(args.get(index..).unwrap_or_default().to_vec())
+        } else if let Some(value) = args.get(index) {
+            value.clone()
+        } else if let Some(default) = &param.default {
+            eval_expr(default, ctx, env, host)?
+        } else {
+            unreachable!("required arguments checked above");
+        };
+        if !value_is(&param.ty, &value) {
+            return Err(VimError::new(
+                "E1013",
+                format!(
+                    "Argument {} ({}): expected {} but got {}",
+                    index + 1,
+                    param.name,
+                    param.ty.name(),
+                    value.type_name()
+                ),
+            ));
+        }
+        let frame = env.frames.last_mut().expect("active callee frame");
+        frame.locals.insert(param.name.clone(), value.clone());
+        frame.args.insert(param.name.clone(), value);
+        ctx.types.insert(param.name.clone(), param.ty.clone());
+    }
+    if anonymous_varargs && !params.iter().any(|param| param.varargs) {
+        let rest = args.get(params.len()..).unwrap_or_default();
+        let frame = env.frames.last_mut().expect("active callee frame");
+        frame
+            .args
+            .insert("000".to_string(), Value::list(rest.to_vec()));
+        frame
+            .args
+            .insert("0".to_string(), Value::Number(rest.len() as i64));
+    }
+    Ok(())
+}
+
 fn call_vim9_full(
     func: &Rc<Vim9Func>,
     args: Vec<Value>,
@@ -1723,76 +1790,8 @@ fn call_vim9_full(
         locals: HashMap::new(),
         sid: func.sid,
     };
-    let mut types = HashMap::new();
-    let mut index = 0usize;
-    for param in &func.params {
-        let value = if param.varargs {
-            Value::list(args[index..].to_vec())
-        } else if let Some(value) = args.get(index) {
-            value.clone()
-        } else if let Some(default) = &param.default {
-            // Defaults may refer to earlier parameters: build a temporary ctx.
-            let mut temp = Ctx::new(func.sid, "", "", false);
-            temp.types = types.clone();
-            temp.script_types = env
-                .vim9
-                .script_types
-                .get(&func.sid)
-                .cloned()
-                .unwrap_or_default();
-            env.frames.push(frame.clone());
-            let result = eval_expr(default, &mut temp, env, host);
-            env.frames.pop();
-            result?
-        } else {
-            return Err(VimError::new(
-                "E119",
-                format!(
-                    "Not enough arguments for function {}: expected {}",
-                    func.name,
-                    func.params.len()
-                ),
-            ));
-        };
-        if !value_is(&param.ty, &value) {
-            return Err(VimError::new(
-                "E1013",
-                format!(
-                    "Argument {} ({}): expected {} but got {}",
-                    index + 1,
-                    param.name,
-                    param.ty.name(),
-                    value.type_name()
-                ),
-            ));
-        }
-        frame.locals.insert(param.name.clone(), value.clone());
-        // Named parameters are reachable with a: too (legacy interop).
-        frame.args.insert(param.name.clone(), value);
-        types.insert(param.name.clone(), param.ty.clone());
-        index += 1;
-    }
-    if !func.varargs && args.len() > func.params.len() {
-        return Err(VimError::new(
-            "E118",
-            format!(
-                "Too many arguments for function {}: expected {}",
-                func.name,
-                func.params.len()
-            ),
-        ));
-    }
     if let Some(object) = &this {
         frame.locals.insert("this".to_string(), object.clone());
-    }
-    if func.varargs {
-        frame
-            .args
-            .insert("000".to_string(), Value::list(args[index..].to_vec()));
-        frame.args.insert(
-            "0".to_string(),
-            Value::Number(args.len().saturating_sub(index) as i64),
-        );
     }
     env.call_depth += 1;
     env.frames.push(frame);
@@ -1805,7 +1804,6 @@ fn call_vim9_full(
         .get(&func.sid)
         .cloned()
         .unwrap_or_default();
-    ctx.types = types;
     ctx.script_types = env
         .vim9
         .script_types
@@ -1814,7 +1812,17 @@ fn call_vim9_full(
         .unwrap_or_default();
     ctx.return_type = func.ret.clone();
     ctx.current_class = current_class;
-    let result = exec_stmts(&func.body, &mut ctx, env, host).map_err(|error| VimError {
+    let result = bind_arguments(
+        &func.params,
+        func.varargs,
+        &args,
+        &func.name,
+        &mut ctx,
+        env,
+        host,
+    )
+    .and_then(|()| exec_stmts(&func.body, &mut ctx, env, host))
+    .map_err(|error| VimError {
         code: error.code,
         message: format!("{} (in {})", error.message, func.name),
         abort: error.abort,
@@ -1853,35 +1861,11 @@ pub fn call_vim9_lambda(
             "Function call depth is higher than 'maxfuncdepth'".to_string(),
         ));
     }
-    let mut frame = Frame {
+    let frame = Frame {
         args: HashMap::new(),
         locals: lambda.captured.clone(),
         sid: lambda.sid,
     };
-    let mut types = HashMap::new();
-    for (i, param) in lambda.def.params.iter().enumerate() {
-        let value = args.get(i).cloned().unwrap_or(Value::Null);
-        if !value_is(&param.ty, &value) {
-            return Err(VimError::new(
-                "E1013",
-                format!(
-                    "Argument {} ({}): expected {} but got {}",
-                    i + 1,
-                    param.name,
-                    param.ty.name(),
-                    value.type_name()
-                ),
-            ));
-        }
-        frame.locals.insert(param.name.clone(), value);
-        types.insert(param.name.clone(), param.ty.clone());
-    }
-    if lambda.def.params.is_empty() && !args.is_empty() {
-        return Err(VimError::new(
-            "E118",
-            "Too many arguments for <lambda>".to_string(),
-        ));
-    }
     env.call_depth += 1;
     env.frames.push(frame);
     let saved_sid = env.current_sid;
@@ -1893,22 +1877,51 @@ pub fn call_vim9_lambda(
         .get(&lambda.sid)
         .cloned()
         .unwrap_or_default();
-    ctx.types = types;
     ctx.script_types = env
         .vim9
         .script_types
         .get(&lambda.sid)
         .cloned()
         .unwrap_or_default();
-    let result = if let Some(expr) = &lambda.def.expr_body {
-        eval_expr(expr, &mut ctx, env, host)
-    } else {
-        match exec_stmts(&lambda.def.body, &mut ctx, env, host) {
-            Ok(Flow::Return(value)) | Ok(Flow::Throw(value)) => Ok(value),
-            Ok(_) => Ok(Value::Null),
-            Err(error) => Err(error),
+    ctx.return_type = lambda.def.ret.clone();
+    let result = (|| {
+        bind_arguments(
+            &lambda.def.params,
+            false,
+            &args,
+            "<lambda>",
+            &mut ctx,
+            env,
+            host,
+        )?;
+        let value = if let Some(expr) = &lambda.def.expr_body {
+            eval_expr(expr, &mut ctx, env, host)?
+        } else {
+            match exec_stmts(&lambda.def.body, &mut ctx, env, host)? {
+                Flow::Return(value) => value,
+                Flow::Throw(value) => {
+                    env.pending_throw = Some(value.clone());
+                    return Err(VimError::aborting(
+                        "E605",
+                        format!("Exception not caught: {}", value.to_string_value()),
+                    ));
+                }
+                Flow::Next => Value::Null,
+                Flow::Break | Flow::Continue => {
+                    return Err(VimError::new(
+                        "E587",
+                        ":break/:continue outside a loop in <lambda>",
+                    ));
+                }
+            }
+        };
+        if !matches!(lambda.def.ret, Vim9Type::Any | Vim9Type::Void)
+            && !value_is(&lambda.def.ret, &value)
+        {
+            return Err(type_mismatch(&lambda.def.ret, &value, 0));
         }
-    };
+        Ok(value)
+    })();
     env.current_sid = saved_sid;
     env.frames.pop();
     env.call_depth -= 1;
@@ -2069,7 +2082,11 @@ fn integer(value: &Value, line: usize) -> Result<i64, VimError> {
 
 fn compare_values(left: &Value, right: &Value) -> Result<i64, VimError> {
     match (left, right) {
-        (Value::Number(a), Value::Number(b)) => Ok((a - b).signum()),
+        (Value::Number(a), Value::Number(b)) => Ok(match a.cmp(b) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        }),
         (Value::Float(a), Value::Float(b)) => Ok(if a < b {
             -1
         } else if a > b {
@@ -2642,3 +2659,7 @@ pub fn imported_names(env: &Env, sid: usize) -> HashSet<String> {
         .map(|m| m.keys().cloned().collect())
         .unwrap_or_default()
 }
+
+#[cfg(test)]
+#[path = "eval_tests.rs"]
+mod tests;

@@ -42,6 +42,7 @@ impl HlAttr {
 #[derive(Clone, Debug, Default)]
 pub struct HighlightTable {
     attrs: HashMap<String, HlAttr>,
+    cterm_attrs: HashMap<String, HlAttr>,
     links: HashMap<String, String>,
 }
 
@@ -253,6 +254,22 @@ impl HighlightTable {
         self.attrs.insert(group.to_string(), attr);
     }
 
+    pub fn set_cterm(&mut self, group: &str, attr: HlAttr) {
+        self.cterm_attrs.insert(group.to_string(), attr);
+    }
+
+    /// Direct attributes, without inheriting a link or the other color mode.
+    pub fn attributes(&self, group: &str, gui: bool) -> Option<HlAttr> {
+        if gui { &self.attrs } else { &self.cterm_attrs }
+            .get(group)
+            .copied()
+    }
+
+    pub fn force_link(&mut self, from: &str, to: &str) {
+        self.clear(Some(from));
+        self.link(from, to);
+    }
+
     pub fn link(&mut self, from: &str, to: &str) {
         self.links.insert(from.to_string(), to.to_string());
     }
@@ -262,10 +279,12 @@ impl HighlightTable {
         match group {
             Some(g) => {
                 self.attrs.remove(g);
+                self.cterm_attrs.remove(g);
                 self.links.remove(g);
             }
             None => {
                 self.attrs.clear();
+                self.cterm_attrs.clear();
                 self.links.clear();
             }
         }
@@ -273,15 +292,24 @@ impl HighlightTable {
 
     /// True when the group exists (defined or linked).
     pub fn exists(&self, group: &str) -> bool {
-        self.attrs.contains_key(group) || self.links.contains_key(group)
+        self.attrs.contains_key(group)
+            || self.cterm_attrs.contains_key(group)
+            || self.links.contains_key(group)
     }
 
     /// Resolve a group through up to 10 `:hi link` hops.
     pub fn resolve(&self, group: &str) -> Option<HlAttr> {
+        self.resolve_for(group, true)
+    }
+
+    pub fn resolve_for(&self, group: &str, gui: bool) -> Option<HlAttr> {
         let mut name = group;
         for _ in 0..10 {
-            if let Some(attr) = self.attrs.get(name) {
-                return Some(*attr);
+            if let Some(attr) = self
+                .attributes(name, gui)
+                .or_else(|| self.attributes(name, !gui))
+            {
+                return Some(attr);
             }
             name = self.links.get(name)?;
         }
@@ -296,7 +324,10 @@ impl HighlightTable {
     /// All defined group names, sorted (tests and `:hi` listing).
     pub fn groups(&self) -> Vec<&str> {
         let mut out: Vec<&str> = self.attrs.keys().map(String::as_str).collect();
+        out.extend(self.cterm_attrs.keys().map(String::as_str));
+        out.extend(self.links.keys().map(String::as_str));
         out.sort_unstable();
+        out.dedup();
         out
     }
 }
@@ -304,6 +335,28 @@ impl HighlightTable {
 /// Parse `#RRGGBB` / `#RGB` / a decimal cterm index.
 pub fn parse_color(text: &str) -> Option<HlColor> {
     let text = text.trim();
+    let named = match text.to_ascii_lowercase().as_str() {
+        "black" => Some(0),
+        "darkred" => Some(1),
+        "darkgreen" => Some(2),
+        "brown" | "darkyellow" => Some(3),
+        "darkblue" => Some(4),
+        "darkmagenta" => Some(5),
+        "darkcyan" => Some(6),
+        "gray" | "grey" | "lightgray" | "lightgrey" => Some(7),
+        "darkgray" | "darkgrey" => Some(8),
+        "red" | "lightred" => Some(9),
+        "green" | "lightgreen" => Some(10),
+        "yellow" | "lightyellow" => Some(11),
+        "blue" | "lightblue" => Some(12),
+        "magenta" | "lightmagenta" => Some(13),
+        "cyan" | "lightcyan" => Some(14),
+        "white" => Some(15),
+        _ => None,
+    };
+    if let Some(index) = named {
+        return Some(HlColor::Indexed(index));
+    }
     if let Some(hex) = text.strip_prefix('#') {
         let digits: Vec<u8> = hex
             .chars()

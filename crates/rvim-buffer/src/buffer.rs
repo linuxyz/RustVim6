@@ -69,6 +69,7 @@ pub struct Buffer {
     /// (bufwrite.c:1637 `if (buf->b_ml.ml_flags & ML_EMPTY) start = end + 1`).
     ml_empty: bool,
     readonly: bool,
+    help: bool,
     /// Last cursor position remembered for this buffer.
     pub last_cursor: Pos,
 }
@@ -88,6 +89,7 @@ impl Buffer {
             bomb: false,
             ml_empty: true,
             readonly: false,
+            help: false,
             last_cursor: Pos::new(0, 0),
         }
     }
@@ -208,6 +210,14 @@ impl Buffer {
 
     pub fn set_empty_buffer(&mut self, empty: bool) {
         self.ml_empty = empty;
+    }
+
+    /// Help identity belongs to the buffer, so split/tag navigation retains it.
+    pub fn is_help(&self) -> bool {
+        self.help
+    }
+    pub fn set_help(&mut self, help: bool) {
+        self.help = help;
     }
 
     pub fn is_readonly(&self) -> bool {

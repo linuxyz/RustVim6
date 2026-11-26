@@ -888,6 +888,10 @@ pub fn is_window_local(name: &str) -> bool {
     }
 }
 
+/// Recognised Vim GUI flags, including the platform-specific L/P/R flags.
+/// Recognition does not imply that every native GUI component is implemented.
+pub const GUIOPTION_FLAGS: &str = "!aAbcdefFghilmMLPprRtTvk";
+
 /// Enforce Vim's per-option value constraints, keeping the old value on error.
 ///
 /// * `tabstop` must be positive (option.c:3730 `b_p_ts <= 0` → E487).
@@ -905,6 +909,19 @@ fn validate(canon: &str, value: OptValue) -> VimResult<OptValue> {
             rvim_buffer::FileFormat::parse(s)
                 .map_err(|_| VimError::invalid_option_argument(&format!("fileformat={s}")))?;
             Ok(value)
+        }
+        ("guioptions", OptValue::Str(s)) => {
+            if let Some(ch) = s.chars().find(|ch| !GUIOPTION_FLAGS.contains(*ch)) {
+                return Err(VimError::new("E539", format!("Illegal character <{ch}>")));
+            }
+            // Vim's P_FLAGLIST removes earlier duplicates, keeping the last.
+            let mut unique = String::new();
+            for ch in s.chars().rev() {
+                if !unique.contains(ch) {
+                    unique.push(ch);
+                }
+            }
+            Ok(OptValue::Str(unique.chars().rev().collect()))
         }
         ("cryptmethod", OptValue::Str(s)) => {
             rvim_buffer::crypt::CryptMethod::from_name(s)?;
@@ -962,6 +979,20 @@ impl Options {
         defs()
             .into_iter()
             .find(|d| d.name == lower || d.short == lower)
+    }
+
+    /// Canonical option names matching either a full-name or short-name prefix.
+    pub fn completion_names(prefix: &str, boolean_only: bool) -> Vec<String> {
+        let prefix = prefix.to_ascii_lowercase();
+        let mut names: Vec<String> = defs()
+            .into_iter()
+            .filter(|def| !boolean_only || def.kind == OptKind::Bool)
+            .filter(|def| def.name.starts_with(&prefix) || def.short.starts_with(&prefix))
+            .map(|def| def.name.to_string())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// Normalise a user-typed name (long or short) to the canonical long name.

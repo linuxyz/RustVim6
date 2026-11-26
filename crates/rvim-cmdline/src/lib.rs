@@ -9,7 +9,11 @@
 //!   plus user-defined commands.
 //! * [`complete_filename`] — file-name completion using the same wildcard
 //!   matcher as `:runtime` (`*`, `?`, `[...]`).
+//! * [`complete_set`] — registered option names, boolean prefixes and option values.
 //! * [`WildMenu`] — the cycling completion list behind 'wildmenu'.
+
+mod set_completion;
+pub use set_completion::{SetCompletion, complete_set};
 
 use std::path::{Path, PathBuf};
 
@@ -227,11 +231,54 @@ pub fn completion_kind(line: &str) -> CompletionKind {
         CompletionKind::File
     } else if cmd.name.starts_with("buffer") || cmd.name == "bdelete" {
         CompletionKind::Buffer
-    } else if cmd.name.starts_with("set") {
+    } else if matches!(cmd.name, "set" | "setlocal" | "setglobal") {
         CompletionKind::Option
     } else {
         CompletionKind::Word
     }
+}
+
+/// Color scheme completion from runtime and package colors directories.
+pub fn complete_colorscheme(
+    line: &str,
+    editor: &rvim_editor::Editor,
+    max: usize,
+) -> Option<(usize, Vec<String>)> {
+    let body = line.trim_start_matches(':').trim_start();
+    let end = body.find(char::is_whitespace)?;
+    if lookup(&body[..end])?.name != "colorscheme" {
+        return None;
+    }
+    let start = line.len() - body[end..].trim_start().len();
+    if line[start..].chars().any(char::is_whitespace) {
+        return None;
+    }
+    Some((
+        start,
+        rvim_ex::handlers_colors::complete_schemes(editor, &line[start..], max),
+    ))
+}
+
+/// Help-topic completion, using the same runtime tag index as :help.
+pub fn complete_help(
+    line: &str,
+    editor: &rvim_editor::Editor,
+    max: usize,
+) -> Option<(usize, Vec<String>)> {
+    let body = line.trim_start_matches(':').trim_start();
+    let end = body.find(char::is_whitespace)?;
+    if lookup(&body[..end])?.name != "help" {
+        return None;
+    }
+    let start = line
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| ch.is_whitespace())
+        .map(|(index, ch)| index + ch.len_utf8())?;
+    Some((
+        start,
+        rvim_ex::handlers_help::complete_topics(editor, &line[start..], max),
+    ))
 }
 
 /// Complete a file name against the filesystem.

@@ -123,6 +123,12 @@ pub fn command_index(name: &str) -> Option<usize> {
 /// reproduces Vim's abbreviation behaviour, including its famous quirks,
 /// because the table order is curated on the shortest working abbreviation.
 pub fn lookup(word: &str) -> Option<&'static Cmd> {
+    // Accept the common spelling while preserving Vim's canonical command table.
+    let word = if word == "colorschema" {
+        "colorscheme"
+    } else {
+        word
+    };
     // Vim's one_letter_cmd(): ":k" may be followed directly by the mark name
     // without whitespace (":ka" == ":k a"), before the command table is
     // consulted (ex_docmd.c:3513-3535, 3799-3802). Restrict to a two-character

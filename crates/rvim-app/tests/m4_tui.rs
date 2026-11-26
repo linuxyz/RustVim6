@@ -1221,3 +1221,87 @@ fn normal_horizontal_motion_stays_on_cjk_character_boundaries() {
     screen(&mut tui, "hk", 40, 8);
     assert_eq!(tui.grid(40, 8).cursor(), Some((0, 4)));
 }
+
+#[test]
+fn set_tab_completion_sets_boolean_and_enum_options() {
+    let mut tui = Tui::new(open(&["x"]));
+    screen(&mut tui, ":set nu<Tab><CR>", 60, 6);
+    assert!(tui.session.editor.options.bool_or("number", false));
+    screen(&mut tui, ":set nonu<Tab><CR>", 60, 6);
+    assert!(!tui.session.editor.options.bool_or("number", true));
+    screen(&mut tui, ":set invnu<Tab><CR>", 60, 6);
+    assert!(tui.session.editor.options.bool_or("number", false));
+    screen(&mut tui, ":set ff=u<Tab><CR>", 60, 6);
+    assert_eq!(tui.session.editor.options.str_or("ff", ""), "unix");
+    assert_eq!(tui.session.report.error_count, 0);
+}
+
+#[test]
+fn set_completion_preserves_previous_settings_and_cycles_values() {
+    let mut tui = Tui::new(open(&["x"]));
+    screen(&mut tui, ":set number background=<Tab>", 70, 6);
+    assert_eq!(
+        tui.cmdline.as_ref().unwrap().text,
+        "set number background=dark"
+    );
+    screen(&mut tui, "<Tab>", 70, 6);
+    assert_eq!(
+        tui.cmdline.as_ref().unwrap().text,
+        "set number background=light"
+    );
+    screen(&mut tui, "<C-p>", 70, 6);
+    assert_eq!(
+        tui.cmdline.as_ref().unwrap().text,
+        "set number background=dark"
+    );
+    screen(&mut tui, "<S-Tab>", 70, 6);
+    assert_eq!(
+        tui.cmdline.as_ref().unwrap().text,
+        "set number background=light"
+    );
+    screen(&mut tui, "<CR>", 70, 6);
+    assert!(tui.session.editor.options.bool_or("number", false));
+    assert_eq!(tui.session.editor.options.str_or("background", ""), "light");
+}
+
+#[test]
+fn set_completion_preserves_text_after_the_cursor() {
+    let mut tui = Tui::new(open(&["x"]));
+    screen(&mut tui, ":set backg number", 70, 6);
+    tui.cmdline.as_mut().unwrap().cursor = "set backg".chars().count();
+    screen(&mut tui, "<Tab>", 70, 6);
+    let line = tui.cmdline.as_ref().unwrap();
+    assert_eq!(line.text, "set background number");
+    assert_eq!(line.cursor, "set background".len());
+}
+
+#[test]
+fn set_completion_preserves_utf8_before_the_active_option() {
+    let mut tui = Tui::new(open(&["x"]));
+    screen(&mut tui, ":set showbreak=中文 backg<Tab>", 70, 6);
+    let line = tui.cmdline.as_ref().unwrap();
+    assert_eq!(line.text, "set showbreak=中文 background");
+    assert_eq!(line.cursor, line.text.chars().count());
+}
+
+#[test]
+fn setlocal_values_and_comma_list_values_can_be_completed() {
+    let mut tui = Tui::new(open(&["x"]));
+    screen(&mut tui, ":setl fdm=i<Tab><CR>", 70, 6);
+    assert_eq!(tui.session.editor.wopt_str("foldmethod", ""), "indent");
+    screen(&mut tui, ":set bs=indent,e<Tab><CR>", 70, 6);
+    assert_eq!(
+        tui.session.editor.options.str_or("backspace", ""),
+        "indent,eol"
+    );
+}
+
+#[test]
+fn command_completion_cycles_without_appending_to_the_original_prefix() {
+    let mut tui = Tui::new(open(&["x"]));
+    screen(&mut tui, ":se<Tab><Tab>", 60, 6);
+    let candidates = rvim_cmdline::complete_command("se", &[], 50);
+    assert_eq!(tui.cmdline.as_ref().unwrap().text, candidates[1]);
+    screen(&mut tui, "<C-p>", 60, 6);
+    assert_eq!(tui.cmdline.as_ref().unwrap().text, candidates[0]);
+}

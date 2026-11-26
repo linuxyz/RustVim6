@@ -48,12 +48,13 @@ fn syntax_on_colours_a_rust_buffer() {
 }
 
 #[test]
-fn syntax_off_leaves_the_buffer_uncoloured() {
+fn syntax_off_leaves_the_buffer_in_normal_colors() {
     let (session, path) = open_named("rvim_m6_b.rs", "fn main() {}\n");
     let mut tui = Tui::new(session);
     let _ = screen(&mut tui, ":syntax on<CR>:syntax off<CR>", 40, 6);
     let grid = tui.grid(40, 6);
-    assert_eq!(grid.cell(0, 0).unwrap().style.fg, Color::Default);
+    assert_eq!(grid.cell(0, 0).unwrap().style, tui.theme.text);
+    assert_eq!(grid.cell(0, 3).unwrap().style, tui.theme.text);
     let _ = std::fs::remove_file(path);
 }
 

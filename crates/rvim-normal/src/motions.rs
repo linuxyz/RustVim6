@@ -67,40 +67,84 @@ pub fn goto_line(ed: &Editor, count: u64, last: bool) -> VimResult<Pos> {
     Ok(Pos::new(target, col))
 }
 
-/// Word motions w/b/e using the default keyword class (iskeyword option hook
-/// lands in M2).
+/// Word motions using Vim's default Unicode classes; uppercase WORD motions
+/// group all non-whitespace characters together.
 pub fn word_motion(ed: &Editor, key: char, count: u64) -> VimResult<Pos> {
+    word_motion_inner(ed, key, count, false)
+}
+
+/// cw/cW stops at the current word end even on a one-character word.
+pub(crate) fn change_word_end(ed: &Editor, key: char) -> VimResult<Pos> {
+    word_motion_inner(ed, key, 1, true)
+}
+
+fn word_motion_inner(ed: &Editor, key: char, count: u64, stop: bool) -> VimResult<Pos> {
     let buf = ed.current_buffer();
     let mut pos = ed.cursor();
+    let big = key.is_ascii_uppercase();
     for _ in 0..count {
         let text = buf.line_str(pos.line)?;
         let chars: Vec<(usize, char)> = text.char_indices().collect();
         let cur_col = rvim_core::text::byte_to_char_col(text, pos.col);
         match key {
             'w' | 'W' => {
-                if let Some(found) = next_word_start(&chars, cur_col) {
+                if let Some(found) = next_word_start(&chars, cur_col, big) {
                     pos.col = found;
-                } else if pos.line + 1 < buf.line_count() {
-                    pos.line += 1;
-                    pos.col = buf.first_nonblank_byte(pos.line)?;
+                } else {
+                    loop {
+                        if pos.line + 1 == buf.line_count() {
+                            pos.col = rvim_core::text::last_char_offset(buf.line_str(pos.line)?);
+                            break;
+                        }
+                        pos.line += 1;
+                        let text = buf.line_str(pos.line)?;
+                        pos.col = text
+                            .char_indices()
+                            .find(|(_, ch)| class(*ch, big) != 0)
+                            .map(|(byte, _)| byte)
+                            .unwrap_or(0);
+                        if text.is_empty() || text[pos.col..].chars().any(|ch| class(ch, big) != 0)
+                        {
+                            break;
+                        }
+                    }
                 }
             }
             'b' | 'B' => {
-                if let Some(found) = prev_word_start(&chars, cur_col) {
+                if let Some(found) = prev_word_start(&chars, cur_col, big) {
                     pos.col = found;
-                } else if pos.line > 0 {
-                    pos.line -= 1;
+                } else {
                     pos.col = 0;
+                    while pos.line > 0 {
+                        pos.line -= 1;
+                        pos.col = 0;
+                        let chars: Vec<_> = buf.line_str(pos.line)?.char_indices().collect();
+                        if let Some(found) = prev_word_start(&chars, chars.len(), big) {
+                            pos.col = found;
+                            break;
+                        }
+                        if chars.is_empty() {
+                            break;
+                        }
+                    }
                 }
             }
             'e' | 'E' => {
-                if let Some(found) = next_word_end(&chars, cur_col) {
+                if let Some(found) = next_word_end(&chars, cur_col, big, stop) {
                     pos.col = found;
-                } else if pos.line + 1 < buf.line_count() {
-                    pos.line += 1;
-                    let t = buf.line_str(pos.line)?;
-                    let cc: Vec<(usize, char)> = t.char_indices().collect();
-                    pos.col = next_word_end(&cc, 0).unwrap_or(0);
+                } else {
+                    loop {
+                        if pos.line + 1 == buf.line_count() {
+                            pos.col = rvim_core::text::last_char_offset(buf.line_str(pos.line)?);
+                            break;
+                        }
+                        pos.line += 1;
+                        let cc: Vec<_> = buf.line_str(pos.line)?.char_indices().collect();
+                        if let Some(found) = next_word_end(&cc, 0, big, true) {
+                            pos.col = found;
+                            break;
+                        }
+                    }
                 }
             }
             _ => return Err(VimError::internal("unknown word motion")),
@@ -109,40 +153,51 @@ pub fn word_motion(ed: &Editor, key: char, count: u64) -> VimResult<Pos> {
     Ok(buf.clamp_pos(pos))
 }
 
-fn next_word_start(chars: &[(usize, char)], char_col: usize) -> Option<usize> {
+fn class(ch: char, big: bool) -> u32 {
+    let class = charclass::word_class(ch);
+    if big && class != 0 { 1 } else { class }
+}
+
+fn next_word_start(chars: &[(usize, char)], char_col: usize, big: bool) -> Option<usize> {
     let n = chars.len();
     let mut i = char_col;
-    while i < n && charclass::is_word_char(chars[i].1) {
+    let initial = chars.get(i).map(|(_, ch)| class(*ch, big)).unwrap_or(0);
+    while i < n && initial != 0 && class(chars[i].1, big) == initial {
         i += 1;
     }
-    while i < n && !charclass::is_word_char(chars[i].1) {
+    while i < n && class(chars[i].1, big) == 0 {
         i += 1;
     }
     chars.get(i).map(|(byte, _)| *byte)
 }
 
-fn prev_word_start(chars: &[(usize, char)], char_col: usize) -> Option<usize> {
+fn prev_word_start(chars: &[(usize, char)], char_col: usize, big: bool) -> Option<usize> {
     let mut i = char_col.min(chars.len());
     if i == 0 {
         return None;
     }
     i -= 1;
-    while i > 0 && !charclass::is_word_char(chars[i].1) {
+    while i > 0 && class(chars[i].1, big) == 0 {
         i -= 1;
     }
-    while i > 0 && charclass::is_word_char(chars[i - 1].1) {
+    let initial = class(chars[i].1, big);
+    if initial == 0 {
+        return None;
+    }
+    while i > 0 && class(chars[i - 1].1, big) == initial {
         i -= 1;
     }
     chars.get(i).map(|(byte, _)| *byte)
 }
 
-fn next_word_end(chars: &[(usize, char)], char_col: usize) -> Option<usize> {
+fn next_word_end(chars: &[(usize, char)], char_col: usize, big: bool, stop: bool) -> Option<usize> {
     let n = chars.len();
-    let mut i = char_col;
-    while i < n && !charclass::is_word_char(chars[i].1) {
+    let mut i = char_col + usize::from(!stop);
+    while i < n && class(chars[i].1, big) == 0 {
         i += 1;
     }
-    while i + 1 < n && charclass::is_word_char(chars[i + 1].1) {
+    let initial = chars.get(i).map(|(_, ch)| class(*ch, big))?;
+    while i + 1 < n && class(chars[i + 1].1, big) == initial {
         i += 1;
     }
     chars.get(i).map(|(byte, _)| *byte)

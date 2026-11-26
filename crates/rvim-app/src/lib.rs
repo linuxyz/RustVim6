@@ -29,37 +29,47 @@ pub struct Session {
     pub viml: Ctx,
 }
 
-/// Default `'runtimepath'` used when the environment does not provide one.
-///
-/// Prefers `$RVIM_RUNTIME`, then the vendored baseline runtime that ships with
-/// the source tree (so `:runtime` and `:source` work out of the box in tests
-/// and in the development binary).
-pub fn default_runtimepath() -> String {
-    if let Ok(path) = std::env::var("RVIM_RUNTIME") {
-        return path;
-    }
-    // Installed layouts (M8 packaging): next to the executable or in ../share.
-    if let Ok(exe) = std::env::current_exe() {
-        let dir = exe.parent().unwrap_or_else(|| std::path::Path::new("."));
-        for candidate in [
-            dir.join("runtime"),
-            dir.join("../runtime"),
-            dir.join("../share/vim/runtime"),
-        ] {
-            if candidate.join("filetype.vim").is_file() || candidate.join("syntax").is_dir() {
-                if let Ok(canonical) = candidate.canonicalize() {
-                    return canonical.display().to_string();
-                }
+/// Locate a relocatable runtime beside an executable, including help-only trees.
+pub fn runtime_near_executable(exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    let dir = exe.parent()?;
+    for candidate in [
+        dir.join("runtime"),
+        dir.join("../runtime"),
+        dir.join("../share/vim/runtime"),
+    ] {
+        if candidate.join("filetype.vim").is_file()
+            || candidate.join("syntax").is_dir()
+            || candidate.join("doc/help.txt").is_file()
+        {
+            if let Ok(path) = candidate.canonicalize() {
+                return Some(path);
             }
         }
     }
-    // Development tree: the vendored baseline (not versioned).
+    None
+}
+
+/// Explicit runtime overrides, then the installed runtime, then the development
+/// checkout. Installed packages do not depend on the working directory.
+pub fn default_runtimepath() -> String {
+    for name in ["RVIM_RUNTIME", "VIMRUNTIME"] {
+        if let Ok(path) = std::env::var(name) {
+            if !path.trim().is_empty() {
+                return path;
+            }
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(path) = runtime_near_executable(&exe) {
+            return path.display().to_string();
+        }
+    }
     let vendored =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference/vim/runtime");
-    if let Ok(canonical) = vendored.canonicalize() {
-        return canonical.display().to_string();
-    }
-    String::new()
+    vendored
+        .canonicalize()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default()
 }
 
 impl Session {

@@ -449,7 +449,18 @@ impl Windows {
         let id = self.current_id();
         let (height, width) = {
             let win = self.current();
-            (win.height, win.width)
+            (
+                if win.rect.rows > 0 {
+                    win.rect.text_rows()
+                } else {
+                    win.height
+                },
+                if win.rect.cols > 0 {
+                    win.rect.cols
+                } else {
+                    win.width
+                },
+            )
         };
         // Every split keeps at least one content row/column per window, plus the
         // status line for stacked splits and one separator column for rows.
@@ -460,7 +471,7 @@ impl Windows {
                     "Not enough room: need at least 21 columns",
                 ));
             }
-            let half = width / 2;
+            let half = (width - 1) / 2;
             (height, half)
         } else {
             if height < 2 * MIN_HEIGHT + 2 {
@@ -469,7 +480,7 @@ impl Windows {
                     "Not enough room: need at least 6 rows",
                 ));
             }
-            let half = height.div_ceil(2);
+            let half = height.saturating_sub(1) / 2;
             (half, width)
         };
         let tab = self.current_tab().id;
@@ -486,8 +497,16 @@ impl Windows {
         // The old window keeps the other half of the space.
         {
             let cur = self.current_mut();
-            cur.height = height.saturating_sub(new_height);
-            cur.width = width.saturating_sub(new_width);
+            cur.height = if vertical {
+                height
+            } else {
+                height.saturating_sub(new_height + 1)
+            };
+            cur.width = if vertical {
+                width.saturating_sub(new_width + 1)
+            } else {
+                width
+            };
         }
         self.windows.insert(new_id, win);
         let tabpage = self.current_tab_mut();
@@ -686,6 +705,81 @@ impl Windows {
             win.height = size;
         }
         Ok(())
+    }
+
+    /// Resize the current frame against its nearest siblings on one axis.
+    /// Uses rendered geometry so counts are exact, including nested splits.
+    pub fn resize_frame(&mut self, requested: usize, vertical: bool) -> VimResult<()> {
+        let id = self.current_id();
+        if self.current().rect.rows == 0 {
+            return self.set_size(
+                if vertical {
+                    requested
+                } else {
+                    requested.saturating_sub(1)
+                },
+                vertical,
+            );
+        }
+        let layout = self.current_tab().layout.clone();
+        let Some((children, selected)) = resize_siblings(&layout, id, vertical) else {
+            return Ok(());
+        };
+        let mut sizes = children
+            .iter()
+            .map(|child| frame_extent(child, &self.windows, vertical))
+            .collect::<Vec<_>>();
+        let minimums = children
+            .iter()
+            .map(|child| min_extent(child, vertical))
+            .collect::<Vec<_>>();
+        let available = sizes.iter().sum::<usize>();
+        let other_min = minimums.iter().sum::<usize>() - minimums[selected];
+        let target = requested
+            .max(minimums[selected])
+            .min(available.saturating_sub(other_min).max(minimums[selected]));
+        if target > sizes[selected] {
+            let mut needed = target - sizes[selected];
+            for index in (selected + 1..sizes.len()).chain((0..selected).rev()) {
+                let take = needed.min(sizes[index].saturating_sub(minimums[index]));
+                sizes[index] -= take;
+                needed -= take;
+            }
+            sizes[selected] = target - needed;
+        } else {
+            let freed = sizes[selected] - target;
+            sizes[selected] = target;
+            let neighbour = if selected + 1 < sizes.len() {
+                selected + 1
+            } else {
+                selected - 1
+            };
+            sizes[neighbour] += freed;
+        }
+        for (child, size) in children.iter().zip(sizes) {
+            set_frame_extent(child, size, vertical, &mut self.windows);
+        }
+        Ok(())
+    }
+
+    pub fn resize_frame_by(&mut self, delta: i64, vertical: bool) -> VimResult<()> {
+        let win = self.current();
+        let current = if vertical {
+            win.rect.cols
+        } else {
+            win.rect.rows
+        };
+        let current = if current == 0 {
+            if vertical { win.width } else { win.height }
+        } else {
+            current
+        };
+        let target = if delta >= 0 {
+            current.saturating_add(delta as usize)
+        } else {
+            current.saturating_sub(delta.unsigned_abs() as usize)
+        };
+        self.resize_frame(target, vertical)
     }
 
     /// Open a new tabpage holding one window on `bufnr`.
@@ -928,6 +1022,122 @@ fn shrink_to(out: &mut [usize], total: usize, min: usize) {
         };
         out[i] -= 1;
         used -= 1;
+    }
+}
+
+fn resize_siblings(layout: &Layout, id: WindowId, vertical: bool) -> Option<(&[Layout], usize)> {
+    let children = match layout {
+        Layout::Row(children) | Layout::Col(children) => children,
+        _ => return None,
+    };
+    let selected = children.iter().position(|child| child.contains(id))?;
+    if let Some(deeper) = resize_siblings(&children[selected], id, vertical) {
+        return Some(deeper);
+    }
+    if matches!(layout, Layout::Row(_)) == vertical && children.len() > 1 {
+        Some((children, selected))
+    } else {
+        None
+    }
+}
+
+fn min_extent(layout: &Layout, vertical: bool) -> usize {
+    match layout {
+        Layout::Leaf(_) => {
+            if vertical {
+                MIN_WIDTH
+            } else {
+                MIN_HEIGHT + 1
+            }
+        }
+        Layout::Row(children) | Layout::Col(children) => {
+            let sizes = children.iter().map(|child| min_extent(child, vertical));
+            if matches!(layout, Layout::Row(_)) == vertical {
+                sizes.sum::<usize>()
+                    + if vertical {
+                        children.len().saturating_sub(1)
+                    } else {
+                        0
+                    }
+            } else {
+                sizes.max().unwrap_or(0)
+            }
+        }
+    }
+}
+
+fn frame_extent(layout: &Layout, windows: &HashMap<WindowId, Window>, vertical: bool) -> usize {
+    let rects = layout
+        .leaves()
+        .into_iter()
+        .filter_map(|id| windows.get(&id).map(|win| win.rect));
+    let (mut start, mut end) = (usize::MAX, 0);
+    for rect in rects {
+        let (at, size) = if vertical {
+            (rect.col, rect.cols)
+        } else {
+            (rect.row, rect.rows)
+        };
+        start = start.min(at);
+        end = end.max(at + size);
+    }
+    end.saturating_sub(start)
+}
+
+fn set_frame_extent(
+    layout: &Layout,
+    size: usize,
+    vertical: bool,
+    windows: &mut HashMap<WindowId, Window>,
+) {
+    match layout {
+        Layout::Leaf(id) => {
+            if let Some(win) = windows.get_mut(id) {
+                if vertical {
+                    win.width = size;
+                } else {
+                    win.height = size.saturating_sub(1).max(MIN_HEIGHT);
+                }
+            }
+        }
+        Layout::Row(children) | Layout::Col(children) => {
+            if matches!(layout, Layout::Row(_)) == vertical {
+                let available = size.saturating_sub(if vertical {
+                    children.len().saturating_sub(1)
+                } else {
+                    0
+                });
+                let minima = children
+                    .iter()
+                    .map(|child| min_extent(child, vertical))
+                    .collect::<Vec<_>>();
+                let weights = children
+                    .iter()
+                    .zip(&minima)
+                    .map(|(child, minimum)| {
+                        frame_extent(child, windows, vertical).saturating_sub(*minimum)
+                    })
+                    .collect::<Vec<_>>();
+                let total = weights.iter().sum::<usize>();
+                let slack = available.saturating_sub(minima.iter().sum());
+                let mut remaining = slack;
+                for (index, child) in children.iter().enumerate() {
+                    let extra = if index + 1 == children.len() {
+                        remaining
+                    } else {
+                        (slack * weights[index])
+                            .checked_div(total)
+                            .unwrap_or(slack / children.len())
+                    };
+                    remaining -= extra;
+                    set_frame_extent(child, minima[index] + extra, vertical, windows);
+                }
+            } else {
+                for child in children {
+                    set_frame_extent(child, size, vertical, windows);
+                }
+            }
+        }
     }
 }
 

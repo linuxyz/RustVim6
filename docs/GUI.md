@@ -65,6 +65,7 @@ and `:i` for italic. Font-family spaces can be escaped or written as underscores
 ```vim
 set guifont=Consolas:h12:W400
 set guifontwide=Microsoft_YaHei:h14:W600
+set guifont=Maple_Mono_NF_CN:h12:W300  " Light
 ```
 
 `guifontwide` is independent of `guifont`: an explicit wide point size is
@@ -83,15 +84,23 @@ The grid cell count comes from Unicode display width (`unicode-width`).
 In the GUI, a bare `:set guifont`, `:set guifontwide`, `:set guifont=*` or
 `:set guifont=` opens the native Windows **Font** dialog (ChooseFont). The
 selection preserves fractional point size, weight and italic style in the
-option string. Cancelling the dialog leaves the option unchanged.
+option string. Legacy face names returned by the dialog (such as
+`Maple Mono NF CN Light`) are resolved through GDI interop to the DirectWrite
+family, with size and weight kept separate, so they do not silently select a
+proportional fallback font. Cancelling the dialog leaves the option unchanged.
 
 ## IME and clipboard
 
 - IME uses IMM32 with the native IME composition and candidate windows.
   `WM_IME_STARTCOMPOSITION` positions both windows at the caret with
   `ImmSetCompositionWindow` and `ImmSetCandidateWindow`;
-  `WM_IME_COMPOSITION` commits `GCS_RESULTSTR` into the editor. The native
-  candidate list remains visible so Pinyin/CJK IME selection works.
+  start, unfinished composition, cancellation and end messages reach the
+  default IME window so composition text and the candidate list are displayed.
+  `WM_IME_COMPOSITION` consumes a successfully retrieved `GCS_RESULTSTR` once;
+  any simultaneous new composition is forwarded without the result flags.
+  Results that cannot be read use the default handler and `WM_IME_CHAR` path.
+  `WM_CHAR` and `WM_IME_CHAR` decode UTF-16 surrogate pairs, including rare CJK
+  characters and emoji; `WM_UNICHAR` also supports direct Unicode input.
 - Register `*` is synchronised with the Windows clipboard (CF_UNICODETEXT),
   converting between LF and CRLF. Yanking to `*` updates the clipboard; an
   external clipboard change is loaded into `*` before the next key.
@@ -101,9 +110,46 @@ option string. Cancelling the dialog leaves the option unchanged.
 
 ## Tabs
 
-The GUI follows Vim's `guioptions` **e** flag for the tabline. The default is
-`egmrLtT`; use `:set guioptions-=e` to hide the tabline, or
-`:set guioptions+=e` to show it when more than one tab page exists.
+The current GUI uses the `guioptions` **e** flag to control its text grid
+tabline. The default is `egmrLtT`; use `:set guioptions-=e` to hide the tabline,
+or `:set guioptions+=e` to show it when more than one tab page exists. Every
+redraw applies the updated value and adjusts the available buffer rows.
+
+`guioptions` is a character flag string: `+=` appends, `^=` prepends, and `-=`
+removes the supplied substring (remove individual flags when their order is
+irrelevant). Duplicates are removed, and illegal characters report E539 without
+changing the previous value. Completion after `go+=` / `go^=` offers absent
+flags; `go-=` offers currently enabled flags.
+
+The `e`, `r` and `R` flags have a visual effect in this implementation.
+Other recognised Vim flags are stored for script compatibility; native menus
+(`m`), toolbars (`T`), left/horizontal scrollbars (`l`/`L`/`b`), automatic
+selection and other flag behaviours are not implemented. This differs from Vim: Vim's `e` selects a native tab
+control, and removing it can fall back to a text tabline. RustVim currently
+has neither the native tab control nor a `showtabline` option.
+
+## Overlay vertical scrollbars
+
+Each scrollable pane has a slim, rounded, translucent scrollbar at its right
+edge, enabled by `guioptions` `r` or `R` (the default contains `r`). The thumb
+represents the visible fraction of the buffer, has a minimum grab size, widens
+and brightens on hover/drag, and fades out after interaction. Scrollbars overlay
+the grid, so showing them does not shift text or change the column count.
+Short files that fit in the pane have no scrollbar.
+
+- Drag the thumb to scroll, including beyond the window edge while captured.
+- Click the track to jump to that position, with the thumb centred on the click.
+- The mouse wheel scrolls the pane under the pointer, three lines per notch;
+  partial wheel deltas accumulate instead of forcing a full step.
+- Pointer scrolling preserves the edit cursor and active split, even when the
+  cursor goes off screen. Keyboard input resumes following the active cursor.
+- Geometry updates with pane resizing, tabline changes, font size and DPI.
+  Positions use buffer line numbers; targets inside a closed fold snap to its
+  header.
+
+Use `:set go-=r go-=R` to hide the right scrollbars, or `:set go+=r` to enable
+them. This implementation provides overlay vertical scrollbars; it does not
+provide a minimap or pixel-based smooth scrolling.
 
 ## Emoji and ligatures
 
@@ -145,12 +191,29 @@ monitor during the transition). Font sizes are specified in points, so moving
 between 100%, 150% and 200% monitors changes physical cell size and the number
 of columns/rows while keeping the same logical font size.
 
+## Normal-mode split windows
+
+`Ctrl-W s` / `Ctrl-W S` split horizontally and `Ctrl-W v` splits vertically.
+Holding Ctrl for the second key also works (`Ctrl-W Ctrl-S`, `Ctrl-W Ctrl-V`).
+Mixed splits work from either the original or the new pane.
+
+Use `Ctrl-W h/j/k/l` or arrows to move between panes, and `Ctrl-W Ctrl-W` to
+cycle. `Ctrl-W n` opens an empty buffer in a new pane. Counts can precede or
+follow the prefix: `8 Ctrl-W s` and `Ctrl-W 8 s` create an eight-line pane;
+`Ctrl-W 25 v` creates a 25-column pane. Counts on both sides multiply.
+
+`Ctrl-W +` / `-` change height and `Ctrl-W >` / `<` change width; counts specify
+the change. `Ctrl-W _` / `|` maximise height/width without a count, or set the
+requested size with one. `Ctrl-W =` equalises pane sizes. `Ctrl-W c` closes the
+current pane; `Ctrl-W q` can also quit the last unmodified window.
+
 ## Input
 
 - `WM_CHAR` feeds printable characters; `WM_KEYDOWN` maps Enter, Backspace,
   Escape, Tab, arrows, Home/End, Insert/Delete, PageUp/PageDown, F1-F12 and
   Ctrl/Shift navigation.
-- The mouse wheel feeds Ctrl-Y / Ctrl-E.
+- The mouse wheel scrolls the pane under the pointer independently of the edit
+  cursor; dragging and track clicks use the overlay vertical scrollbars.
 - `WM_SIZE`, `WM_DPICHANGED` and device-loss (`D2DERR_RECREATE_TARGET`) rebuild
   the render target; a 100 ms timer pumps jobs/channels/timers.
 

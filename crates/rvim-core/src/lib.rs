@@ -8,6 +8,7 @@ pub mod charclass;
 pub mod error;
 pub mod position;
 pub mod text;
+mod unicode_wordclass;
 
 pub use error::{VimError, VimResult};
 pub use position::{Col, Lineno, Pos};

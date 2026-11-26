@@ -290,16 +290,14 @@ impl Buf {
     // --- character classes --------------------------------------------------
 
     /// Vim's cls(): 0 for white space/NUL, 1 for punctuation or (WORD mode)
-    /// any non-blank, 2 for keyword characters.
-    fn cls(&self, p: Pos, bigword: bool) -> u8 {
+    /// any non-blank, and >=2 for keyword/script classes.
+    fn cls(&self, p: Pos, bigword: bool) -> u32 {
         let c = self.ch(p);
         if c == NUL || is_white(c) {
             return 0;
         }
-        if bigword {
-            return 1;
-        }
-        if charclass::is_word_char(c) { 2 } else { 1 }
+        let class = charclass::word_class(c);
+        if bigword && class != 0 { 1 } else { class }
     }
 
     fn linewhite(&self, line: usize) -> bool {
@@ -393,7 +391,7 @@ impl Buf {
     // --- word motions (textobject.c) ----------------------------------------
 
     /// skip_chars(): skip a run of class cclass; true when EOF was hit.
-    fn skip_chars(&self, p: &mut Pos, cclass: u8, forward: bool, bigword: bool) -> bool {
+    fn skip_chars(&self, p: &mut Pos, cclass: u32, forward: bool, bigword: bool) -> bool {
         while self.cls(*p, bigword) == cclass {
             let r = if forward { self.inc(p) } else { self.dec(p) };
             if r == -1 {

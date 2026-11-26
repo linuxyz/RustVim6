@@ -389,7 +389,11 @@ pub fn cmd_highlight(ed: &mut Editor, p: &ParsedEx) -> VimResult<ExOutcome> {
         list_highlights(ed);
         return Ok(ExOutcome::Continue);
     }
-    let (first, rest) = split_word(args);
+    let (mut first, mut rest) = split_word(args);
+    let default = matches!(first, "default" | "def");
+    if default {
+        (first, rest) = split_word(rest);
+    }
     match first {
         "clear" => {
             let group = rest.trim();
@@ -402,59 +406,88 @@ pub fn cmd_highlight(ed: &mut Editor, p: &ParsedEx) -> VimResult<ExOutcome> {
             }
             return Ok(ExOutcome::Continue);
         }
-        "link" | "def" => {
+        "link" => {
             let rest = rest.trim();
-            let rest = rest.strip_prefix("link").unwrap_or(rest).trim();
             let (from, to) = split_word(rest);
             if from.is_empty() || to.is_empty() {
                 return Err(VimError::new("E412", "Not enough arguments for :highlight"));
             }
-            ed.syntax.highlights.link(from, to.trim());
+            if p.bang || !ed.syntax.highlights.exists(from) {
+                if to.trim().eq_ignore_ascii_case("NONE") {
+                    ed.syntax.highlights.clear(Some(from));
+                } else {
+                    ed.syntax.highlights.force_link(from, to.trim());
+                }
+            }
             return Ok(ExOutcome::Continue);
         }
         _ => {}
     }
     // `Group` alone prints; `Group key=value...` sets attributes.
     let group = first;
-    let mut attr = HlAttr::default();
-    let mut touched = false;
-    for word in rest.split_whitespace() {
-        let Some((key, value)) = word.split_once('=') else {
-            continue;
-        };
-        let value = value.trim();
-        match key {
-            "guifg" | "ctermfg" => {
-                attr.fg = if value.eq_ignore_ascii_case("NONE") {
-                    None
-                } else {
-                    parse_color(value)
-                };
-                touched = true;
+    if default && ed.syntax.highlights.exists(group) {
+        return Ok(ExOutcome::Continue);
+    }
+    if rest.eq_ignore_ascii_case("NONE") {
+        ed.syntax.highlights.clear(Some(group));
+        ed.syntax.highlights.set(group, HlAttr::default());
+        ed.syntax.highlights.set_cterm(group, HlAttr::default());
+        return Ok(ExOutcome::Continue);
+    }
+    // GUI and terminal definitions coexist: later cterm lines in a runtime
+    // scheme must not overwrite its RGB colors. NONE explicitly clears a field.
+    for gui in [true, false] {
+        let mut attr = ed
+            .syntax
+            .highlights
+            .attributes(group, gui)
+            .unwrap_or_default();
+        let mut touched = false;
+        for word in rest.split_whitespace() {
+            let Some((key, value)) = word.split_once('=') else {
+                continue;
+            };
+            let value = value.trim();
+            if (gui && !key.starts_with("gui")) || (!gui && !key.starts_with("cterm")) {
+                continue;
             }
-            "guibg" | "ctermbg" => {
-                attr.bg = if value.eq_ignore_ascii_case("NONE") {
-                    None
-                } else {
-                    parse_color(value)
-                };
-                touched = true;
+            match key {
+                "guifg" | "ctermfg" => {
+                    attr.fg = if value.eq_ignore_ascii_case("NONE") {
+                        None
+                    } else {
+                        parse_color(value)
+                    };
+                    touched = true;
+                }
+                "guibg" | "ctermbg" => {
+                    attr.bg = if value.eq_ignore_ascii_case("NONE") {
+                        None
+                    } else {
+                        parse_color(value)
+                    };
+                    touched = true;
+                }
+                "gui" | "cterm" => {
+                    let parsed = parse_attrs(value);
+                    attr.bold = parsed.bold;
+                    attr.italic = parsed.italic;
+                    attr.underline = parsed.underline;
+                    attr.reverse = parsed.reverse;
+                    touched = true;
+                }
+                _ => {}
             }
-            "gui" | "cterm" => {
-                let parsed = parse_attrs(value);
-                attr.bold |= parsed.bold;
-                attr.italic |= parsed.italic;
-                attr.underline |= parsed.underline;
-                attr.reverse |= parsed.reverse;
-                touched = true;
+        }
+        if touched {
+            if gui {
+                ed.syntax.highlights.set(group, attr);
+            } else {
+                ed.syntax.highlights.set_cterm(group, attr);
             }
-            _ => {}
         }
     }
-    if touched {
-        let mut merged = ed.syntax.highlights.resolve(group).unwrap_or_default();
-        merged.merge(&attr);
-        ed.syntax.highlights.set(group, merged);
+    if rest.contains('=') {
         return Ok(ExOutcome::Continue);
     }
     match ed.syntax.highlights.resolve(group) {

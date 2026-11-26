@@ -45,6 +45,13 @@ target\debug\rvim.exe -es -c '%s/a/b/g' -c 'wq' file.txt                        
 target\debug\rvim.exe -d old.txt new.txt                                          # vimdiff
 ```
 
+In both the GUI and TUI, press Tab after `:set`, `:setlocal`, or `:setglobal`
+to complete registered option names (including short names and `no`/`inv`
+prefixes). Values such as `ff=unix`, `fdm=indent`, comma-separated lists and
+character flags also complete. Tab / Ctrl-N cycle forward; Shift-Tab / Ctrl-P
+cycle backward while the completion menu is open. For example:
+`set nonu<Tab>`, `set ff=u<Tab>`, or `set bs=indent,e<Tab>`.
+
 ## Vim9 script (M9)
 
 Vim9 is implemented against **Vim 9.2.1398** (the editor's compatibility baseline
@@ -97,6 +104,13 @@ guioptions-controlled tabline. See [docs/GUI.md](docs/GUI.md) for the
 rendering/input details and current limitations (mouse click/drag selection and
 native menus are not implemented yet).
 
+Color schemes load from `colors/*.vim` in `runtimepath` and installed Vim
+packages. Use `:colorscheme desert` (or `:colo desert`) to switch, Tab to
+complete theme names, and `:colorscheme` to show the current name.
+`:colorschema` is also accepted as an alias. Put `colorscheme desert` in your
+vimrc to select it at startup. GUI uses RGB colors; the TUI uses RGB when
+`termguicolors` is enabled and the theme's terminal colors otherwise.
+
 ## Packaging (M8)
 
 ```powershell
@@ -108,8 +122,19 @@ makensis packaging\rvim.nsi                    # optional NSIS installer
 The installer/staged tree ships `rvim`/`rvim.exe`, docs and a merged `runtime/`.
 `rvim.exe` and the NSIS installer embed the 10-size icon from [assets/icon](assets/icon); Windows
 picks the native 16/20/24/32/40/48/64/96/128/256 px image for the current DPI.
-`default_runtimepath()` finds `runtime` next to the executable (or in
-`../runtime`), then falls back to `$RVIM_RUNTIME` and the development baseline.
+Runtime lookup honors `$RVIM_RUNTIME` or `$VIMRUNTIME`, then finds `runtime`
+beside the executable (or in `../runtime` or `../share/vim/runtime`), then uses
+the development baseline. Release packages require the runtime and its help
+index; use `-Runtime <path>` to select a different runtime. CI builds once and
+packages with `-SkipBuild`.
+
+Offline help works from any working directory: use `:help`, `:help 'number'`,
+or `:help :split`. Help opens in a separate window and reuses that window for
+subsequent topics. Follow a `|link|` with `Ctrl-]`, return with `Ctrl-T`, and
+close the help window with `:helpclose`. Topic names support Tab completion;
+`:helptags <directory>` builds an index for additional English help files.
+Run `pwsh -File scripts/test-package.ps1 -PackageRoot <extracted-directory>`
+to check that the packaged executable opens its bundled help offline.
 
 ### Prebuilt binaries
 

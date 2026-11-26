@@ -583,6 +583,22 @@ fn runtime_candidates(ed: &Editor, flags: RuntimeFlags, names: &[&str]) -> Vec<P
     out
 }
 
+/// Color schemes are also available from installed start and optional packages.
+pub(crate) fn color_files(ed: &Editor, pattern: &str) -> Vec<PathBuf> {
+    runtime_candidates(
+        ed,
+        RuntimeFlags {
+            rtp: true,
+            start: true,
+            opt: true,
+        },
+        &[pattern],
+    )
+    .into_iter()
+    .filter(|path| path.is_file())
+    .collect()
+}
+
 pub fn cmd_runtime(
     ed: &mut Editor,
     env: &mut Env,

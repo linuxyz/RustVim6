@@ -94,6 +94,7 @@ impl_implemented![
     "let",
     "setfiletype",
     "syntax",
+    "colorscheme",
     "unlet",
     "echomsg",
     "echon",
@@ -157,6 +158,8 @@ impl_implemented![
     "finish",
     "global",
     "help",
+    "helpclose",
+    "helptags",
     "iabbrev",
     "iabclear",
     "imap",
@@ -807,6 +810,7 @@ pub fn run_command_ctx(
         "setf" | "setfiletype" => crate::handlers_viml::cmd_setfiletype(ed, env, state, p),
         "echohl" => Ok(ExOutcome::Continue),
         "syntax" => crate::handlers_syntax::cmd_syntax(ed, p),
+        "colorscheme" => crate::handlers_colors::cmd_colorscheme(ed, env, state, &p.args),
         "highlight" => crate::handlers_syntax::cmd_highlight(ed, p),
         "filetype" => crate::handlers_viml::cmd_filetype_state(ed, env, state, p),
         "if" | "elseif" | "else" | "endif" | "while" | "endwhile" | "for" | "endfor" | "try"
@@ -855,13 +859,9 @@ pub fn run_command_ctx(
             ed.messages.info(crate::version_banner());
             Ok(ExOutcome::Continue)
         }
-        "help" => {
-            ed.messages.info(
-                "RustVim help: see https://vim-jp.org/vimdoc-en/version8.html (bundled docs arrive in M5)"
-                    .to_string(),
-            );
-            Ok(ExOutcome::Continue)
-        }
+        "help" => crate::handlers_help::cmd_help(ed, env, state, &p.args),
+        "helpclose" => crate::handlers_help::cmd_helpclose(ed),
+        "helptags" => crate::handlers_help::cmd_helptags(ed, &p.args),
         "pwd" => {
             ed.messages.info(ed.cwd.display().to_string());
             Ok(ExOutcome::Continue)
@@ -2320,6 +2320,18 @@ fn apply_set_compound(
 ) -> VimResult<()> {
     let canon = rvim_editor::Options::canonical(name)?;
     match ed.wopt(&canon)? {
+        rvim_editor::OptValue::Str(current) if canon == "guioptions" => {
+            // guioptions is a character flag string, not a comma-separated list.
+            // Like Vim, -= removes the first occurrence of the supplied string;
+            // callers should remove individual flags when order is irrelevant.
+            let next = match op {
+                "+=" => format!("{current}{value}"),
+                "^=" => format!("{value}{current}"),
+                "-=" => current.replacen(value, "", 1),
+                _ => current,
+            };
+            ed.set_option(&canon, rvim_editor::OptValue::Str(next), scope)
+        }
         rvim_editor::OptValue::Str(current) => {
             let mut items: Vec<String> = current
                 .split(',')

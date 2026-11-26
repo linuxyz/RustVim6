@@ -11,11 +11,12 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 use std::time::{Duration, Instant};
 use winapi::ctypes::c_void;
 
+use crate::scrollbar::{self, Rect as ScrollRect, VerticalScrollbar};
 use rvim_app::Session;
 use rvim_app::tui::Tui;
 use rvim_core::Pos;
 use rvim_editor::maps::Key;
-use rvim_editor::{Mode, RegType, Register};
+use rvim_editor::{Mode, RegType, Register, WindowId};
 use rvim_normal::operators::{OpRange, yank_range};
 use rvim_syntax::highlight::HlColor;
 use rvim_term::{Color, Style};
@@ -35,7 +36,7 @@ use winapi::um::d2d1::{
     D2D1_COLOR_F, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_FACTORY_TYPE_SINGLE_THREADED,
     D2D1_FEATURE_LEVEL_DEFAULT, D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_POINT_2F,
     D2D1_PRESENT_OPTIONS_NONE, D2D1_RECT_F, D2D1_RENDER_TARGET_PROPERTIES,
-    D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_SIZE_U,
+    D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT, D2D1_SIZE_U,
     D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, D2D1CreateFactory, ID2D1Brush, ID2D1Factory,
     ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
 };
@@ -44,8 +45,9 @@ use winapi::um::dwrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC,
     DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL,
     DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_METRICS,
-    DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection,
-    IDWriteFontFace, IDWriteFontFamily, IDWriteTextFormat, IDWriteTextLayout,
+    DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory, IDWriteFactory, IDWriteFont,
+    IDWriteFontCollection, IDWriteFontFace, IDWriteFontFamily, IDWriteGdiInterop,
+    IDWriteLocalizedStrings, IDWriteTextFormat, IDWriteTextLayout,
 };
 use winapi::um::imm::{
     CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM, HIMC, ImmGetContext, ImmReleaseContext,
@@ -61,6 +63,8 @@ use winapi::um::winuser::*;
 static DIALOG_OWNER: AtomicIsize = AtomicIsize::new(0);
 
 const GCS_RESULTSTR: DWORD = 0x0800;
+// GCS_RESULTREADSTR, GCS_RESULTREADCLAUSE, GCS_RESULTSTR, GCS_RESULTCLAUSE.
+const GCS_RESULT_FLAGS: LPARAM = 0x1e00;
 #[repr(C)]
 struct CandidateForm {
     dw_index: DWORD,
@@ -108,6 +112,18 @@ fn log(message: &str) {
     }
 }
 
+#[derive(Clone, Copy)]
+struct PaneScrollbar {
+    window: WindowId,
+    geometry: VerticalScrollbar,
+}
+
+#[derive(Clone, Copy)]
+struct ScrollDrag {
+    window: WindowId,
+    grab_offset: f32,
+}
+
 struct Gui {
     hwnd: HWND,
     tui: Tui,
@@ -137,11 +153,19 @@ struct Gui {
     blink_initial: bool,
     last_blink: Instant,
     com_initialized: bool,
+    scrollbars: Vec<PaneScrollbar>,
+    scroll_drag: Option<ScrollDrag>,
+    scroll_hover: Option<WindowId>,
+    scroll_activity: Instant,
+    pointer_position: Option<(f32, f32)>,
+    tracking_mouse: bool,
+    wheel_remainder: i32,
+    pending_surrogate: Option<u16>,
 }
 
 impl Gui {
     #[allow(clippy::result_large_err)]
-    fn new(session: Session) -> Result<Self, (Session, String)> {
+    fn new(mut session: Session) -> Result<Self, (Session, String)> {
         unsafe {
             if CoInitializeEx(null_mut(), COINIT_APARTMENTTHREADED) < 0 {
                 return Err((session, "cannot initialize COM".to_string()));
@@ -191,6 +215,7 @@ impl Gui {
             }
         };
 
+        session.editor.gui_running = true;
         Ok(Self {
             hwnd: null_mut(),
             tui: Tui::new(session),
@@ -220,6 +245,14 @@ impl Gui {
             blink_initial: true,
             last_blink: Instant::now(),
             com_initialized: true,
+            scrollbars: Vec::new(),
+            scroll_drag: None,
+            scroll_hover: None,
+            scroll_activity: Instant::now(),
+            pointer_position: None,
+            tracking_mouse: false,
+            wheel_remainder: 0,
+            pending_surrogate: None,
         })
     }
 
@@ -261,6 +294,7 @@ impl Gui {
         if width <= 0 || height <= 0 {
             return;
         }
+        self.cancel_scroll_drag();
         self.client_w = width;
         self.client_h = height;
         self.update_metrics();
@@ -405,9 +439,8 @@ impl Gui {
             }
         }
         self.update_metrics();
-        let guioptions = self.tui.session.editor.options.str_or("guioptions", "");
-        self.tui.set_show_tabline(guioptions.contains('e'));
-        let grid = self.tui.grid(self.cols, self.rows);
+        let grid = self.tui.gui_grid(self.cols, self.rows);
+        self.update_scrollbars();
         let bg = d2d_color(DEFAULT_BG);
         unsafe {
             (*self.rt).BeginDraw();
@@ -493,11 +526,15 @@ impl Gui {
 
         if let Some((row, col)) = grid.cursor() {
             self.cursor_px = (col as f32 * self.cell_w, row as f32 * self.cell_h);
+            if self.focused {
+                self.update_ime_window();
+            }
             if self.focused && self.blink_on && row < self.rows && col < self.cols {
                 let cell = grid.cell(row, col).map(|cell| (cell.ch, cell.style));
                 self.draw_cursor(row, col, cell);
             }
         }
+        self.draw_scrollbars();
         unsafe {
             let hr = (*self.rt).EndDraw(null_mut(), null_mut());
             if hr == D2DERR_RECREATE_TARGET {
@@ -507,6 +544,238 @@ impl Gui {
                 InvalidateRect(self.hwnd, null(), 0);
             }
         }
+    }
+
+    fn tabline_rows(&self) -> usize {
+        usize::from(
+            self.tui.session.editor.tabpage_count() > 1
+                && self
+                    .tui
+                    .session
+                    .editor
+                    .options
+                    .str_or("guioptions", "")
+                    .contains('e'),
+        )
+    }
+
+    fn update_scrollbars(&mut self) {
+        self.scrollbars.clear();
+        let editor = &self.tui.session.editor;
+        if scrollbar::right_scrollbar_enabled(&editor.options.str_or("guioptions", "")) {
+            let tabline = self.tabline_rows();
+            for id in editor.windows.ids() {
+                let Some(win) = editor.windows.get(id) else {
+                    continue;
+                };
+                let total = editor
+                    .buffer(win.bufnr)
+                    .map(|buf| buf.line_count())
+                    .unwrap_or(1);
+                let rect = win.rect;
+                let right = if rect.col + rect.cols >= self.cols {
+                    self.client_w as f32
+                } else {
+                    (rect.col + rect.cols) as f32 * self.cell_w
+                };
+                let track = ScrollRect {
+                    left: (right - 14.0 * self.scale).max(rect.col as f32 * self.cell_w),
+                    right,
+                    top: (rect.row + tabline) as f32 * self.cell_h,
+                    bottom: (rect.row + tabline + rect.text_rows()) as f32 * self.cell_h,
+                };
+                if let Some(geometry) = VerticalScrollbar::new(
+                    track,
+                    total,
+                    rect.text_rows(),
+                    win.top_line,
+                    24.0 * self.scale,
+                ) {
+                    self.scrollbars.push(PaneScrollbar {
+                        window: id,
+                        geometry,
+                    });
+                }
+            }
+        }
+        self.scroll_hover = self
+            .pointer_position
+            .and_then(|(x, y)| self.scrollbar_at(x, y).map(|bar| bar.window));
+        if self
+            .scroll_drag
+            .is_some_and(|drag| !self.scrollbars.iter().any(|bar| bar.window == drag.window))
+        {
+            self.cancel_scroll_drag();
+        }
+    }
+
+    fn scrollbar_at(&self, x: f32, y: f32) -> Option<PaneScrollbar> {
+        self.scrollbars
+            .iter()
+            .copied()
+            .find(|bar| bar.geometry.track.contains(x, y))
+    }
+
+    fn draw_scrollbars(&mut self) {
+        for bar in self.scrollbars.clone() {
+            let active = self
+                .scroll_drag
+                .is_some_and(|drag| drag.window == bar.window);
+            let hover = self.scroll_hover == Some(bar.window);
+            let opacity =
+                scrollbar::opacity(active || hover, self.scroll_activity.elapsed().as_millis());
+            if opacity <= 0.0 {
+                continue;
+            }
+            let brush = self.brush((190, 190, 190));
+            if brush.is_null() {
+                continue;
+            }
+            let track = bar.geometry.track;
+            let thumb = bar.geometry.thumb;
+            let width = if active || hover { 10.0 } else { 6.0 } * self.scale;
+            let right = (track.right - 2.0 * self.scale)
+                .max(track.left + 1.0)
+                .min(track.right);
+            unsafe {
+                if hover || active {
+                    (*brush).SetOpacity(0.10);
+                    let rect = D2D1_RECT_F {
+                        left: track.left,
+                        top: track.top,
+                        right: track.right,
+                        bottom: track.bottom,
+                    };
+                    (*self.rt).FillRectangle(&rect, brush as *mut ID2D1Brush);
+                }
+                (*brush).SetOpacity(
+                    opacity
+                        * if active {
+                            0.85
+                        } else if hover {
+                            0.65
+                        } else {
+                            0.4
+                        },
+                );
+                let rect = D2D1_ROUNDED_RECT {
+                    rect: D2D1_RECT_F {
+                        left: (right - width).max(track.left),
+                        top: thumb.top,
+                        right,
+                        bottom: thumb.bottom,
+                    },
+                    radiusX: 2.0 * self.scale,
+                    radiusY: 2.0 * self.scale,
+                };
+                (*self.rt).FillRoundedRectangle(&rect, brush as *mut ID2D1Brush);
+                (*brush).SetOpacity(1.0);
+            }
+        }
+    }
+
+    fn cancel_scroll_drag(&mut self) {
+        // Native move/resize loops also capture this HWND. Only release a
+        // capture that was acquired by our scrollbar interaction.
+        let dragging = self.scroll_drag.take().is_some();
+        unsafe {
+            if dragging && !self.hwnd.is_null() && GetCapture() == self.hwnd {
+                ReleaseCapture();
+            }
+        }
+    }
+
+    fn scroll_to_pointer(&mut self, y: f32) {
+        let Some(drag) = self.scroll_drag else {
+            return;
+        };
+        let Some(bar) = self.scrollbars.iter().find(|bar| bar.window == drag.window) else {
+            return;
+        };
+        let top = bar.geometry.top_for_pointer(y, drag.grab_offset);
+        self.tui.gui_scroll_to(drag.window, top);
+        self.scroll_activity = Instant::now();
+        unsafe {
+            InvalidateRect(self.hwnd, null(), 0);
+        }
+    }
+
+    fn on_scrollbar_down(&mut self, x: f32, y: f32) -> bool {
+        let Some(bar) = self.scrollbar_at(x, y) else {
+            return false;
+        };
+        let thumb = bar.geometry.thumb;
+        let grab_offset = if thumb.contains(x, y) {
+            y - thumb.top
+        } else {
+            thumb.height() * 0.5
+        };
+        self.scroll_drag = Some(ScrollDrag {
+            window: bar.window,
+            grab_offset,
+        });
+        self.scroll_hover = Some(bar.window);
+        unsafe {
+            SetFocus(self.hwnd);
+            SetCapture(self.hwnd);
+        }
+        self.scroll_to_pointer(y);
+        true
+    }
+
+    fn on_pointer_move(&mut self, x: f32, y: f32) {
+        self.pointer_position = Some((x, y));
+        if !self.tracking_mouse {
+            let mut track = TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: self.hwnd,
+                dwHoverTime: 0,
+            };
+            self.tracking_mouse = unsafe { TrackMouseEvent(&mut track) != 0 };
+        }
+        let hover = self.scrollbar_at(x, y).map(|bar| bar.window);
+        if hover != self.scroll_hover {
+            self.scroll_hover = hover;
+            self.scroll_activity = Instant::now();
+            unsafe {
+                InvalidateRect(self.hwnd, null(), 0);
+            }
+        }
+        if self.scroll_drag.is_some() {
+            self.scroll_to_pointer(y);
+        }
+        unsafe {
+            SetCursor(LoadCursorW(
+                null_mut(),
+                if self.scroll_hover.is_some() || self.scroll_drag.is_some() {
+                    IDC_ARROW
+                } else {
+                    IDC_IBEAM
+                },
+            ));
+        }
+    }
+
+    fn pointer_window(&self) -> WindowId {
+        let editor = &self.tui.session.editor;
+        if let Some((x, y)) = self.pointer_position {
+            let offset = self.tabline_rows();
+            if x >= 0.0 && y >= offset as f32 * self.cell_h {
+                let row = (y / self.cell_h) as usize - offset;
+                let col = (x / self.cell_w) as usize;
+                for id in editor.windows.ids() {
+                    if editor
+                        .windows
+                        .get(id)
+                        .is_some_and(|win| win.rect.contains(row, col))
+                    {
+                        return id;
+                    }
+                }
+            }
+        }
+        editor.windows.current_id()
     }
 
     fn has_glyph(&mut self, fallback: bool, ch: char) -> bool {
@@ -720,10 +989,13 @@ impl Gui {
         brush
     }
 
-    fn composition_string(himc: HIMC, flag: DWORD) -> String {
+    fn composition_string(himc: HIMC, flag: DWORD) -> Option<String> {
         let bytes = unsafe { ImmGetCompositionStringW(himc, flag, null_mut(), 0) };
-        if bytes <= 0 {
-            return String::new();
+        if bytes < 0 || bytes % 2 != 0 {
+            return None;
+        }
+        if bytes == 0 {
+            return Some(String::new());
         }
         let mut buffer = vec![0u16; bytes as usize / 2 + 1];
         let got = unsafe {
@@ -734,10 +1006,10 @@ impl Gui {
                 (buffer.len() * 2) as DWORD,
             )
         };
-        if got <= 0 {
-            return String::new();
+        if got < 0 || got % 2 != 0 || got as usize > buffer.len() * 2 {
+            return None;
         }
-        String::from_utf16_lossy(&buffer[..got as usize / 2])
+        Some(String::from_utf16_lossy(&buffer[..got as usize / 2]))
     }
 
     fn update_ime_window(&self) {
@@ -796,24 +1068,33 @@ impl Gui {
         unsafe { InvalidateRect(self.hwnd, null(), 0) };
     }
 
-    fn on_ime_composition(&mut self, flags: DWORD) {
-        if self.hwnd.is_null() {
-            return;
+    /// Consume only successfully retrieved results. Preedit/cancellation must
+    /// reach DefWindowProc so the native IME can display its composition UI.
+    fn on_ime_composition(&mut self, flags: DWORD) -> bool {
+        if flags & GCS_RESULTSTR == 0 || self.hwnd.is_null() {
+            return false;
         }
-        unsafe {
+        let text = unsafe {
             let himc = ImmGetContext(self.hwnd);
             if himc.is_null() {
-                return;
+                return false;
             }
-            if flags & GCS_RESULTSTR != 0 {
-                let text = Self::composition_string(himc, GCS_RESULTSTR);
-                for ch in text.chars() {
-                    self.feed(Key::Char(ch));
-                }
-            }
+            let text = Self::composition_string(himc, GCS_RESULTSTR);
             ImmReleaseContext(self.hwnd, himc);
+            text
+        };
+        let Some(text) = text else {
+            return false;
+        };
+        self.commit_ime_text(&text);
+        true
+    }
+
+    fn commit_ime_text(&mut self, text: &str) {
+        self.pending_surrogate = None;
+        for ch in text.chars() {
+            self.feed(Key::Char(ch));
         }
-        unsafe { InvalidateRect(self.hwnd, null(), 0) };
     }
 
     fn on_ime_end(&mut self) {
@@ -912,6 +1193,7 @@ impl Gui {
     }
 
     fn feed(&mut self, key: Key) {
+        self.scroll_activity = Instant::now();
         self.sync_register_from_clipboard();
         self.blink_on = true;
         self.blink_initial = true;
@@ -947,9 +1229,10 @@ impl Gui {
         let ctrl = unsafe { GetKeyState(VK_CONTROL) as u16 & 0x8000 != 0 };
         let alt = unsafe { GetKeyState(VK_MENU) as u16 & 0x8000 != 0 };
         if ctrl || alt {
+            self.pending_surrogate = None;
             return;
         }
-        if let Some(ch) = char::from_u32(code) {
+        if let Some(ch) = decode_char(&mut self.pending_surrogate, code) {
             if ch >= ' ' && ch != '\u{7f}' {
                 self.feed(Key::Char(ch));
             }
@@ -957,10 +1240,25 @@ impl Gui {
     }
 
     fn on_wheel(&mut self, delta: i16) {
-        let key = if delta > 0 { "C-Y" } else { "C-E" };
-        let count = (delta.unsigned_abs() / 120).clamp(1, 5);
-        for _ in 0..count {
-            self.feed(Key::Special(key.to_string()));
+        self.wheel_remainder += i32::from(delta);
+        let notches = self.wheel_remainder / 120;
+        self.wheel_remainder %= 120;
+        if notches == 0 {
+            return;
+        }
+        let id = self.pointer_window();
+        if let Some(win) = self.tui.session.editor.windows.get(id) {
+            let lines = notches.unsigned_abs() as usize * 3;
+            let top = if notches > 0 {
+                win.top_line.saturating_sub(lines)
+            } else {
+                win.top_line.saturating_add(lines)
+            };
+            self.tui.gui_scroll_to(id, top);
+            self.scroll_activity = Instant::now();
+            unsafe {
+                InvalidateRect(self.hwnd, null(), 0);
+            }
         }
     }
 
@@ -1072,6 +1370,10 @@ unsafe fn create_window(gui: *mut Gui) -> HWND {
     )
 }
 
+fn scrollbar_owns_cursor(hit_test: isize, hovering: bool, dragging: bool) -> bool {
+    hit_test == HTCLIENT && (hovering || dragging)
+}
+
 unsafe extern "system" fn wndproc(
     hwnd: HWND,
     msg: UINT,
@@ -1113,17 +1415,106 @@ unsafe extern "system" fn wndproc(
         WM_IME_SETCONTEXT => DefWindowProcW(hwnd, msg, wparam, lparam),
         WM_IME_STARTCOMPOSITION => {
             (*gui).on_ime_start();
-            0
+            DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_IME_COMPOSITION => {
-            (*gui).on_ime_composition(lparam as DWORD);
-            0
+            if (*gui).on_ime_composition(lparam as DWORD) {
+                // The result was inserted above. Forward only any simultaneous
+                // new preedit, excluding result flags to prevent a second commit.
+                let preedit = lparam & !GCS_RESULT_FLAGS;
+                if preedit != 0 {
+                    DefWindowProcW(hwnd, msg, wparam, preedit)
+                } else {
+                    0
+                }
+            } else {
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
         }
         WM_IME_ENDCOMPOSITION => {
             (*gui).on_ime_end();
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_IME_CHAR => {
+            // Fallback IMEs deliver committed UTF-16 directly. Do not suppress
+            // these characters because a Ctrl/Alt IME-switch key is still down.
+            if let Some(ch) = decode_char(&mut (*gui).pending_surrogate, wparam as u32) {
+                (*gui).feed(Key::Char(ch));
+            }
             0
         }
+        WM_UNICHAR => {
+            if wparam == UNICODE_NOCHAR {
+                return 1;
+            }
+            (*gui).pending_surrogate = None;
+            if let Some(ch) = char::from_u32(wparam as u32) {
+                if ch >= ' ' && ch != '\u{7f}' {
+                    (*gui).feed(Key::Char(ch));
+                }
+            }
+            0
+        }
+        WM_MOUSEMOVE => {
+            let x = (lparam as u16 as i16) as f32;
+            let y = ((lparam as usize >> 16) as u16 as i16) as f32;
+            (*gui).on_pointer_move(x, y);
+            0
+        }
+        WM_MOUSELEAVE => {
+            (*gui).tracking_mouse = false;
+            (*gui).pointer_position = None;
+            (*gui).scroll_hover = None;
+            (*gui).scroll_activity = Instant::now();
+            InvalidateRect(hwnd, null(), 0);
+            0
+        }
+        WM_LBUTTONDOWN => {
+            let x = (lparam as u16 as i16) as f32;
+            let y = ((lparam as usize >> 16) as u16 as i16) as f32;
+            if (*gui).on_scrollbar_down(x, y) {
+                0
+            } else {
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+        }
+        WM_LBUTTONUP => {
+            if (*gui).scroll_drag.is_some() {
+                (*gui).cancel_scroll_drag();
+                (*gui).scroll_activity = Instant::now();
+                InvalidateRect(hwnd, null(), 0);
+                0
+            } else {
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+        }
+        WM_CAPTURECHANGED => {
+            (*gui).scroll_drag = None;
+            InvalidateRect(hwnd, null(), 0);
+            0
+        }
+        WM_CANCELMODE => {
+            (*gui).cancel_scroll_drag();
+            InvalidateRect(hwnd, null(), 0);
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_SETCURSOR
+            if scrollbar_owns_cursor(
+                lparam as u16 as i16 as isize,
+                (*gui).scroll_hover.is_some(),
+                (*gui).scroll_drag.is_some(),
+            ) =>
+        {
+            SetCursor(LoadCursorW(null_mut(), IDC_ARROW));
+            1
+        }
         WM_MOUSEWHEEL => {
+            let mut point = POINT {
+                x: (lparam as u16 as i16) as i32,
+                y: ((lparam as usize >> 16) as u16 as i16) as i32,
+            };
+            ScreenToClient(hwnd, &mut point);
+            (*gui).pointer_position = Some((point.x as f32, point.y as f32));
             let delta = ((wparam >> 16) & 0xffff) as u16 as i16;
             (*gui).on_wheel(delta);
             0
@@ -1145,6 +1536,8 @@ unsafe extern "system" fn wndproc(
             0
         }
         WM_KILLFOCUS => {
+            (*gui).pending_surrogate = None;
+            (*gui).cancel_scroll_drag();
             (*gui).focused = false;
             InvalidateRect(hwnd, null(), 0);
             0
@@ -1198,7 +1591,11 @@ fn make_formats(
     scale: f32,
     spec: &FontSpec,
 ) -> Result<Vec<*mut IDWriteTextFormat>, String> {
-    let font = wide(&spec.family);
+    // ChooseFont returns a GDI face name (e.g. "Maple Mono NF CN Light").
+    // DirectWrite expects its family name ("Maple Mono NF CN") with the weight
+    // passed separately. An unrecognized name silently selects a fallback font.
+    let family = resolve_font_family(dwrite, spec).unwrap_or_else(|| spec.family.clone());
+    let font = wide(&family);
     let locale = wide("en-us");
     let size = spec.points * (96.0 / 72.0) * scale;
     let base_style = if spec.italic {
@@ -1243,6 +1640,78 @@ fn make_formats(
         formats.push(format);
     }
     Ok(formats)
+}
+
+fn resolve_font_family(dwrite: *mut IDWriteFactory, spec: &FontSpec) -> Option<String> {
+    let requested = wide(&spec.family);
+    unsafe {
+        let mut collection: *mut IDWriteFontCollection = null_mut();
+        if (*dwrite).GetSystemFontCollection(&mut collection, 0) >= 0 && !collection.is_null() {
+            let mut index = 0;
+            let mut exists = 0;
+            let found = (*collection).FindFamilyName(requested.as_ptr(), &mut index, &mut exists)
+                >= 0
+                && exists != 0;
+            release(collection);
+            if found {
+                return Some(spec.family.clone());
+            }
+        }
+        // GDI interop resolves legacy/style-specific and localized face names
+        // using the same LOGFONT contract as the native font dialog.
+        let mut interop: *mut IDWriteGdiInterop = null_mut();
+        if (*dwrite).GetGdiInterop(&mut interop) < 0 || interop.is_null() {
+            return None;
+        }
+        let mut lf: LOGFONTW = zeroed();
+        lf.lfWeight = spec.weight as i32;
+        lf.lfItalic = u8::from(spec.italic);
+        for (slot, unit) in lf
+            .lfFaceName
+            .iter_mut()
+            .zip(spec.family.encode_utf16().take(31))
+        {
+            *slot = unit;
+        }
+        let mut font: *mut IDWriteFont = null_mut();
+        let result = (*interop).CreateFontFromLOGFONT(&lf, &mut font);
+        release(interop);
+        if result < 0 || font.is_null() {
+            return None;
+        }
+        let mut family: *mut IDWriteFontFamily = null_mut();
+        let result = (*font).GetFontFamily(&mut family);
+        release(font);
+        if result < 0 || family.is_null() {
+            return None;
+        }
+        let mut names: *mut IDWriteLocalizedStrings = null_mut();
+        let result = (*family).GetFamilyNames(&mut names);
+        release(family);
+        if result < 0 || names.is_null() {
+            return None;
+        }
+        let resolved = (|| {
+            let mut index = 0;
+            let mut exists = 0;
+            if (*names).FindLocaleName(wide("en-us").as_ptr(), &mut index, &mut exists) < 0
+                || exists == 0
+            {
+                index = 0;
+            }
+            let mut len = 0;
+            if (*names).GetStringLength(index, &mut len) < 0 || len == 0 {
+                return None;
+            }
+            let mut buffer = vec![0u16; len as usize + 1];
+            if (*names).GetString(index, buffer.as_mut_ptr(), len + 1) < 0 {
+                return None;
+            }
+            String::from_utf16(&buffer[..len as usize]).ok()
+        })();
+        release(names);
+        resolved
+    }
 }
 
 fn font_face_from_format(format: *mut IDWriteTextFormat) -> *mut IDWriteFontFace {
@@ -1595,6 +2064,20 @@ fn d2d_color(rgb: (u8, u8, u8)) -> D2D1_COLOR_F {
     }
 }
 
+/// WM_CHAR/WM_IME_CHAR carry UTF-16 units, not Unicode scalar values.
+fn decode_char(pending: &mut Option<u16>, code: u32) -> Option<char> {
+    if (0xd800..=0xdbff).contains(&code) {
+        *pending = Some(code as u16);
+        return None;
+    }
+    let high = pending.take();
+    if (0xdc00..=0xdfff).contains(&code) {
+        let high = u32::from(high?);
+        return char::from_u32(0x10000 + ((high - 0xd800) << 10) + code - 0xdc00);
+    }
+    char::from_u32(code)
+}
+
 fn translate_vkey(vk: u32) -> Option<Key> {
     let vk = vk as i32;
     let ctrl = unsafe { GetKeyState(VK_CONTROL) as u16 & 0x8000 != 0 };
@@ -1614,6 +2097,7 @@ fn translate_vkey(vk: u32) -> Option<Key> {
             VK_PRIOR => "PAGEUP",
             VK_NEXT => "PAGEDOWN",
             VK_SPACE => "SPACE",
+            VK_OEM_6 => "]",
             _ => return None,
         };
         return Some(Key::Special(format!("C-{name}")));
@@ -1678,6 +2162,250 @@ unsafe fn release<T>(pointer: *mut T) {
 mod tests {
     use super::*;
 
+    struct InputWindow(Box<Gui>);
+    impl InputWindow {
+        fn new() -> Self {
+            let mut gui = Box::new(match Gui::new(Session::new()) {
+                Ok(gui) => gui,
+                Err((_, error)) => panic!("{error}"),
+            });
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    0,
+                    wide("STATIC").as_ptr(),
+                    wide("IME regression").as_ptr(),
+                    WS_OVERLAPPEDWINDOW,
+                    0,
+                    0,
+                    800,
+                    400,
+                    null_mut(),
+                    null_mut(),
+                    GetModuleHandleW(null()),
+                    null_mut(),
+                )
+            };
+            assert!(!hwnd.is_null());
+            gui.hwnd = hwnd;
+            unsafe {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, &mut *gui as *mut Gui as LONG_PTR);
+            }
+            Self(gui)
+        }
+        fn message(&mut self, msg: UINT, code: usize, flags: LPARAM) -> LRESULT {
+            unsafe { wndproc(self.0.hwnd, msg, code, flags) }
+        }
+    }
+    impl Drop for InputWindow {
+        fn drop(&mut self) {
+            unsafe {
+                SetWindowLongPtrW(self.0.hwnd, GWLP_USERDATA, 0);
+                DestroyWindow(self.0.hwnd);
+            }
+            self.0.hwnd = null_mut();
+            self.0.cleanup();
+        }
+    }
+
+    #[test]
+    fn utf16_character_messages_preserve_cjk_and_supplementary_characters() {
+        let mut pending = None;
+        let text = "中A文𠀀😀";
+        let decoded: String = text
+            .encode_utf16()
+            .filter_map(|unit| decode_char(&mut pending, u32::from(unit)))
+            .collect();
+        assert_eq!(decoded, text);
+        assert_eq!(pending, None);
+        assert_eq!(decode_char(&mut pending, 0xdc00), None);
+        assert_eq!(decode_char(&mut pending, 0xd800), None);
+        assert_eq!(decode_char(&mut pending, '文' as u32), Some('文'));
+        assert_eq!(decode_char(&mut pending, 0xdc00), None);
+    }
+
+    #[test]
+    fn ime_preedit_and_cancel_are_delegated_without_editing_the_buffer() {
+        let mut window = InputWindow::new();
+        window.0.feed(Key::Char('i'));
+        for flags in [0, 0x0008, 0x0080, 0x0008 | 0x0080] {
+            assert!(
+                !window.0.on_ime_composition(flags),
+                "preedit must reach native IME UI"
+            );
+        }
+        assert_eq!(window.0.tui.session.editor.current_buffer().full_text(), "");
+        let hwnd = window.0.hwnd;
+        window.0.hwnd = null_mut();
+        assert!(
+            !window.0.on_ime_composition(GCS_RESULTSTR),
+            "unreadable results need the default handler"
+        );
+        window.0.hwnd = hwnd;
+        assert_eq!(window.0.tui.session.editor.mode, Mode::Insert);
+    }
+
+    #[test]
+    fn committed_ime_text_is_visible_once_and_undoes_as_one_insert() {
+        let mut window = InputWindow::new();
+        window.0.feed(Key::Char('i'));
+        window.0.commit_ime_text("中文𠀀😀");
+        assert_eq!(
+            window.0.tui.session.editor.current_buffer().full_text(),
+            "中文𠀀😀"
+        );
+        let grid = window.0.tui.gui_grid(40, 12);
+        for (col, ch) in [(0, '中'), (2, '文'), (4, '𠀀'), (6, '😀')] {
+            assert_eq!(grid.cell(0, col).unwrap().ch, ch);
+            assert!(grid.cell(0, col + 1).unwrap().continuation);
+        }
+        window.0.feed(Key::Special("ESC".into()));
+        window.0.feed(Key::Char('u'));
+        assert_eq!(window.0.tui.session.editor.current_buffer().full_text(), "");
+    }
+
+    #[test]
+    fn ime_char_fallback_and_wm_char_accept_utf16_without_duplicate_insertion() {
+        let mut window = InputWindow::new();
+        window.0.feed(Key::Char('i'));
+        for unit in "中文𠀀😀".encode_utf16() {
+            window.message(WM_IME_CHAR, usize::from(unit), 1);
+        }
+        for unit in "A😀".encode_utf16() {
+            window.message(WM_CHAR, usize::from(unit), 1);
+        }
+        assert_eq!(
+            window.0.tui.session.editor.current_buffer().full_text(),
+            "中文𠀀😀A😀"
+        );
+        assert_eq!(window.message(WM_UNICHAR, UNICODE_NOCHAR, 0), 1);
+        window.message(WM_UNICHAR, '𠀀' as usize, 0);
+        assert_eq!(
+            window.0.tui.session.editor.current_buffer().full_text(),
+            "中文𠀀😀A😀𠀀"
+        );
+    }
+
+    #[test]
+    fn ime_characters_are_visible_in_the_command_line_too() {
+        let mut window = InputWindow::new();
+        window.0.feed(Key::Char(':'));
+        for unit in "中文".encode_utf16() {
+            window.message(WM_IME_CHAR, usize::from(unit), 1);
+        }
+        assert!(
+            window
+                .0
+                .tui
+                .screen_text(40, 12)
+                .lines()
+                .last()
+                .unwrap()
+                .starts_with(":中文")
+        );
+        assert_eq!(window.0.tui.session.editor.current_buffer().full_text(), "");
+    }
+
+    #[test]
+    fn focus_loss_clears_an_incomplete_utf16_character() {
+        let mut window = InputWindow::new();
+        window.0.feed(Key::Char('i'));
+        window.message(WM_IME_CHAR, 0xd840, 1);
+        window.message(WM_KILLFOCUS, 0, 0);
+        window.message(WM_IME_CHAR, 0xdc00, 1);
+        window.message(WM_IME_CHAR, '中' as usize, 1);
+        assert_eq!(
+            window.0.tui.session.editor.current_buffer().full_text(),
+            "中"
+        );
+    }
+
+    #[test]
+    fn scrollbar_cursor_never_overrides_native_resize_or_titlebar_cursors() {
+        for hit_test in [
+            HTLEFT,
+            HTRIGHT,
+            HTTOP,
+            HTBOTTOM,
+            HTTOPLEFT,
+            HTTOPRIGHT,
+            HTBOTTOMLEFT,
+            HTBOTTOMRIGHT,
+            HTCAPTION,
+            HTMINBUTTON,
+            HTMAXBUTTON,
+            HTCLOSE,
+        ] {
+            assert!(!scrollbar_owns_cursor(hit_test, true, false));
+            assert!(!scrollbar_owns_cursor(hit_test, false, true));
+        }
+        assert!(scrollbar_owns_cursor(HTCLIENT, true, false));
+        assert!(scrollbar_owns_cursor(HTCLIENT, false, true));
+        assert!(!scrollbar_owns_cursor(HTCLIENT, false, false));
+    }
+
+    #[test]
+    fn resizing_preserves_system_capture_but_releases_scrollbar_capture() {
+        // A hidden native window exercises real capture ownership without
+        // opening a visible GUI or entering the interactive sizing loop.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                wide("capture regression").as_ptr(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                400,
+                300,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        assert!(!hwnd.is_null());
+        let mut gui = match Gui::new(Session::new()) {
+            Ok(gui) => gui,
+            Err((_, message)) => {
+                unsafe {
+                    DestroyWindow(hwnd);
+                }
+                panic!("{message}");
+            }
+        };
+        gui.hwnd = hwnd;
+        unsafe {
+            SetCapture(hwnd);
+        }
+        let acquired = unsafe { GetCapture() == hwnd };
+        gui.on_size(600, 400);
+        let preserved = unsafe { GetCapture() == hwnd };
+        gui.scroll_drag = Some(ScrollDrag {
+            window: gui.tui.session.editor.windows.current_id(),
+            grab_offset: 0.0,
+        });
+        unsafe {
+            SetCapture(hwnd);
+        }
+        gui.cancel_scroll_drag();
+        let released = unsafe { GetCapture() != hwnd };
+        let drag_cleared = gui.scroll_drag.is_none();
+        gui.cleanup();
+        unsafe {
+            ReleaseCapture();
+            DestroyWindow(hwnd);
+        }
+        assert!(acquired, "test window must acquire mouse capture");
+        assert!(
+            preserved,
+            "WM_SIZE must preserve capture owned by native window resizing"
+        );
+        assert!(
+            released && drag_cleared,
+            "cancelling a scrollbar drag must release its capture"
+        );
+    }
+
     #[test]
     fn ansi_palette_covers_cube_and_greyscale() {
         assert_eq!(ansi_rgb(0), (0, 0, 0));
@@ -1733,6 +2461,74 @@ mod tests {
     }
 
     #[test]
+    fn maple_mono_light_preserves_the_halfwidth_to_fullwidth_ratio() {
+        let mut gui = match Gui::new(Session::new()) {
+            Ok(gui) => gui,
+            Err((_, message)) => panic!("{message}"),
+        };
+        let canonical =
+            make_formats(gui.dwrite, 1.0, &parse_font("Maple_Mono_NF_CN:h12:W300")).unwrap();
+        let face = font_face_from_format(canonical[0]);
+        if face.is_null() {
+            for format in canonical {
+                unsafe {
+                    release(format);
+                }
+            }
+            gui.cleanup();
+            eprintln!("Maple Mono NF CN is not installed");
+            return;
+        }
+        unsafe {
+            release(face);
+        }
+        for format in canonical {
+            unsafe {
+                release(format);
+            }
+        }
+        for family in ["Maple_Mono_NF_CN", "Maple_Mono_NF_CN_Light"] {
+            gui.tui
+                .session
+                .ex(&format!("set guifont={family}:h12:W300"))
+                .unwrap();
+            gui.tui
+                .session
+                .ex(&format!("set guifontwide={family}:h12:W300"))
+                .unwrap();
+            for dpi in [96, 144] {
+                gui.update_metrics_at(dpi);
+                assert!(!gui.primary_face.is_null() && !gui.fallback_face.is_null());
+                unsafe {
+                    assert_eq!((*gui.formats[0]).GetFontWeight(), 300);
+                    assert!(
+                        ((*gui.formats[0]).GetFontSize() - 16.0 * dpi as f32 / 96.0).abs() < 0.01
+                    );
+                }
+                for format in gui
+                    .formats
+                    .iter()
+                    .chain(gui.fallback_formats.iter())
+                    .copied()
+                {
+                    let cell = gui.cell_w;
+                    let m = measure_text(gui.dwrite, format, "M").0;
+                    let i = measure_text(gui.dwrite, format, "i").0;
+                    let han = measure_text(gui.dwrite, format, "中").0;
+                    eprintln!("{family} dpi={dpi}: cell={cell}, M={m}, i={i}, CJK={han}");
+                    assert!(
+                        (m - cell).abs() < 0.05
+                            && (i - cell).abs() < 0.05
+                            && (han - 2.0 * cell).abs() < 0.05,
+                        "{family}: Latin glyphs must occupy half a CJK glyph's advance"
+                    );
+                }
+            }
+        }
+        gui.cleanup();
+    }
+
+    #[test]
     fn dialog_font_spec_roundtrips_fractional_size_and_weight() {
         let spec = font_string("Microsoft YaHei", 14.5, 600, true);
         assert_eq!(spec, "Microsoft_YaHei:h14.5:W600:i");
@@ -1740,6 +2536,61 @@ mod tests {
             parse_font(&spec),
             parse_font("Microsoft YaHei:h14.5:W600:i")
         );
+        assert_eq!(
+            font_string("Maple Mono NF CN Light", 12.0, 300, false),
+            "Maple_Mono_NF_CN_Light:h12:W300"
+        );
+    }
+
+    #[test]
+    fn overlay_scrollbars_follow_panes_tabline_dpi_and_guioptions() {
+        let mut session = Session::new();
+        session.ex("tabnew").unwrap();
+        let text = (0..100)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        session.editor.insert_text(Pos::new(0, 0), &text).unwrap();
+        session.editor.set_cursor(Pos::new(0, 0));
+        let mut gui = match Gui::new(session) {
+            Ok(gui) => gui,
+            Err((_, message)) => panic!("{message}"),
+        };
+        gui.client_w = 800;
+        gui.client_h = 400;
+        gui.cols = 80;
+        gui.rows = 20;
+        gui.cell_w = 10.0;
+        gui.cell_h = 20.0;
+        gui.tui.gui_grid(80, 20);
+        gui.update_scrollbars();
+        assert_eq!(gui.scrollbars.len(), 1);
+        assert_eq!(gui.scrollbars[0].geometry.track.top, 20.0);
+        assert_eq!(gui.scrollbars[0].geometry.track.right, 800.0);
+        assert_eq!(gui.scrollbars[0].geometry.track.left, 786.0);
+        let win = gui.tui.session.editor.windows.current();
+        assert_eq!(
+            gui.scrollbars[0].geometry.track.bottom,
+            (win.rect.row + win.rect.text_rows() + 1) as f32 * 20.0
+        );
+        gui.scale = 2.0;
+        gui.update_scrollbars();
+        assert_eq!(gui.scrollbars[0].geometry.track.left, 772.0);
+        gui.tui.session.ex("vsplit").unwrap();
+        gui.tui.gui_grid(80, 20);
+        gui.update_scrollbars();
+        assert_eq!(gui.scrollbars.len(), 2);
+        for bar in &gui.scrollbars {
+            let win = gui.tui.session.editor.windows.get(bar.window).unwrap();
+            assert!(bar.geometry.track.left >= win.rect.col as f32 * 10.0);
+        }
+        gui.tui.session.ex("set go=e").unwrap();
+        gui.update_scrollbars();
+        assert!(gui.scrollbars.is_empty());
+        gui.tui.session.ex("set go+=R").unwrap();
+        gui.update_scrollbars();
+        assert_eq!(gui.scrollbars.len(), 2);
+        gui.cleanup();
     }
 
     #[test]

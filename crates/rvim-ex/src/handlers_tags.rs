@@ -233,7 +233,7 @@ fn jump_to_match(
 
 /// Push one tag stack entry (tag.c:387-408): drop the entries above the current
 /// index, append, then cap the stack at TAGSTACKSIZE by dropping the oldest.
-fn push_tag_stack(state: &mut ScriptState, entry: TagStackEntry) {
+pub(crate) fn push_tag_stack(state: &mut ScriptState, entry: TagStackEntry) {
     let keep = state.win.tag_stack_idx.min(state.win.tag_stack.len());
     state.win.tag_stack.truncate(keep);
     state.win.tag_stack.push(entry);
@@ -344,6 +344,15 @@ pub fn jump_to_tag(
     name: &str,
     count: usize,
 ) -> VimResult<()> {
+    if ed.current_buffer().is_help() {
+        let topic = if name.trim().is_empty() {
+            crate::handlers_help::topic_at_cursor(ed)?
+        } else {
+            name.to_string()
+        };
+        crate::handlers_help::cmd_help(ed, env, state, &topic)?;
+        return Ok(());
+    }
     let name = tag_name(ed, name)?;
     let matches = matches_for(ed, &name)?;
     let index = count.saturating_sub(1).min(matches.len() - 1);

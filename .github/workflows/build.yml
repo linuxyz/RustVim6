@@ -34,24 +34,19 @@ jobs:
 
       - name: Package
         shell: pwsh
-        run: |
-          $version = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
-          $stage = "stage-windows"
-          New-Item -ItemType Directory -Force $stage | Out-Null
-          Copy-Item target/release/rvim.exe $stage
-          Copy-Item README.md, LICENSE $stage
-          if (Test-Path reference/vim/runtime) {
-            Copy-Item reference/vim/runtime $stage/runtime -Recurse
-          }
-          Compress-Archive -Path "$stage/*" -DestinationPath "rvim-$version-windows-x64.zip" -Force
+        run: pwsh -NoProfile -File scripts/package.ps1 -SkipBuild -Target windows -Architecture x64 -Runtime reference/vim/runtime
 
-      - name: Smoke test
-        run: .\target\release\rvim.exe --version
+      - name: Smoke test packaged help
+        shell: pwsh
+        run: |
+          $stage = (Get-ChildItem -Directory target/dist/rvim-*-windows-x64 | Select-Object -First 1).FullName
+          pwsh -NoProfile -File scripts/test-package.ps1 -PackageRoot $stage
 
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x64
-          path: rvim-*-windows-x64.zip
+          path: target/dist/rvim-*-windows-x64.zip
+          compression-level: 0
           if-no-files-found: error
 
   linux-x64:
@@ -70,26 +65,20 @@ jobs:
         run: pwsh -NoProfile -File scripts/fetch-reference.ps1
 
       - name: Package
-        shell: bash
-        run: |
-          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
-          STAGE=stage-linux
-          rm -rf "$STAGE"
-          mkdir -p "$STAGE"
-          cp target/release/rvim "$STAGE/"
-          cp README.md LICENSE "$STAGE/"
-          if [ -d reference/vim/runtime ]; then
-            cp -a reference/vim/runtime "$STAGE/runtime"
-          fi
-          tar -czf "rvim-$VERSION-linux-x64.tar.gz" -C "$STAGE" .
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/package.ps1 -SkipBuild -Target unix -Architecture x64 -Runtime reference/vim/runtime
 
-      - name: Smoke test
-        run: ./target/release/rvim --version
+      - name: Smoke test packaged help
+        shell: pwsh
+        run: |
+          $stage = (Get-ChildItem -Directory target/dist/rvim-*-linux-x64 | Select-Object -First 1).FullName
+          pwsh -NoProfile -File scripts/test-package.ps1 -PackageRoot $stage
 
       - uses: actions/upload-artifact@v4
         with:
           name: linux-x64
-          path: rvim-*-linux-x64.tar.gz
+          path: target/dist/rvim-*-linux-x64.tar.gz
+          compression-level: 0
           if-no-files-found: error
 
   release:
@@ -108,6 +97,7 @@ jobs:
       - name: Upload assets
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
             gh release create "$GITHUB_REF_NAME" --title "RustVim $GITHUB_REF_NAME" --generate-notes

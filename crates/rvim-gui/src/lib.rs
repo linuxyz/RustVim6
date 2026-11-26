@@ -9,6 +9,8 @@
 
 use rvim_app::Session;
 
+pub mod scrollbar;
+
 #[cfg(windows)]
 mod win;
 

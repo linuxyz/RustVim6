@@ -156,6 +156,9 @@ pub fn render_layout(model: &ScreenLayout, cols: usize, rows: usize, theme: &The
     if rows == 0 || cols == 0 {
         return grid;
     }
+    for row in 0..rows {
+        grid.fill_row(row, ' ', theme.text);
+    }
 
     // ---- tabline --------------------------------------------------------
     let mut top = 0usize;

@@ -125,6 +125,8 @@ struct SnapshotHistory {
 }
 
 pub struct Editor {
+    /// True while a native GUI owns this session.
+    pub gui_running: bool,
     buffers: Vec<Buffer>,
     /// Windows, tabpages and the split layout (see [`crate::window`]).
     pub windows: Windows,
@@ -215,6 +217,7 @@ impl Editor {
         let mut undo = std::collections::HashMap::new();
         undo.insert(1, UndoHistory::new());
         Self {
+            gui_running: false,
             buffers,
             windows: Windows::new(),
             fold_store: FoldStore::new(),
@@ -353,7 +356,8 @@ impl Editor {
         // The startup buffer is an empty "[No Name]" buffer. Vim reuses it for
         // the first file instead of creating a second buffer, so `:ls` and
         // `bufnr('%')` show one buffer numbered 1.
-        let reusable = self.buffers.len() == 1
+        let reusable = self.windows.all_ids().len() == 1
+            && self.buffers.len() == 1
             && self.buffers[0].name.is_none()
             && !self.buffers[0].is_changed()
             && self.buffers[0].line_count() == 1
@@ -471,7 +475,14 @@ impl Editor {
         let id = self.windows.current_id();
         let modified = self.current_buffer().is_changed();
         let hidden = self.options.bool_or("hidden", false);
-        if modified && !force && !hidden {
+        let shown_elsewhere = self.windows.all_ids().into_iter().any(|other| {
+            other != id
+                && self
+                    .windows
+                    .get(other)
+                    .is_some_and(|win| win.bufnr == self.current_bufnr())
+        });
+        if modified && !force && !hidden && !shown_elsewhere {
             return Err(VimError::no_write_since_change());
         }
         self.windows.close(id)
@@ -504,11 +515,16 @@ impl Editor {
 
     /// `:wincmd {key}` / <C-w>{key}`.
     ///
-    /// Supported keys: h j k l w W t b p c q o n s v x r = + - _ &#124; and the
+    /// Supported keys: h j k l w W t b p c q o n s S v x r = + - _ &#124; and the
     /// move commands H J K L. Unknown keys are ignored the way vim ignores them.
     pub fn wincmd(&mut self, key: char, count: u64) -> VimResult<()> {
-        let count = count.max(1);
-        match key {
+        self.wincmd_counted(key, (count > 1).then_some(count))
+    }
+
+    /// Preserve an explicit count of one, as distinct from the default action.
+    pub fn wincmd_counted(&mut self, key: char, explicit: Option<u64>) -> VimResult<()> {
+        let count = explicit.unwrap_or(1).clamp(1, 999_999_999);
+        let result = match key {
             'h' | 'j' | 'k' | 'l' => {
                 let dir = Dir::from_key(key).expect("direction key");
                 for _ in 0..count {
@@ -516,39 +532,59 @@ impl Editor {
                 }
                 Ok(())
             }
-            'w' => self.goto_window_cycle(true, count as usize),
-            'W' => self.goto_window_cycle(false, count as usize),
+            'w' | 'W' if explicit.is_some() => {
+                let ids = self.windows.ids();
+                self.windows
+                    .goto(ids[(count as usize - 1).min(ids.len() - 1)])
+            }
+            'w' => self.goto_window_cycle(true, 1),
+            'W' => self.goto_window_cycle(false, 1),
             't' => self.windows.goto_edge(false),
             'b' => self.windows.goto_edge(true),
             'p' => self.windows.goto_prev(),
-            'c' | 'q' => self.windows.close(self.windows.current_id()),
+            'c' | 'q' => self.close_current_window(false),
             'o' => self.only_current_window(),
-            'n' => {
-                let id = self.split_window(false)?;
-                self.goto_window(id)?;
-                let bufnr = self.new_buffer();
-                self.switch_buffer(bufnr)
-            }
-            's' => {
-                self.split_window(false)?;
-                Ok(())
-            }
-            'v' => {
-                self.split_window(true)?;
+            'n' | 's' | 'S' | 'v' => {
+                let vertical = key == 'v';
+                self.split_window(vertical)?;
+                if let Some(size) = explicit {
+                    self.windows.resize_frame(
+                        size.min(999_999_999) as usize + usize::from(!vertical),
+                        vertical,
+                    )?;
+                }
+                if key == 'n' {
+                    let bufnr = self.new_buffer();
+                    self.switch_buffer(bufnr)?;
+                }
                 Ok(())
             }
             'x' => self.exchange_windows(),
             'r' => self.rotate_windows(),
             'H' | 'J' | 'K' | 'L' => self.move_window(key),
             '=' => self.equalize_windows(),
-            '+' => self.windows.resize(count as i64, false),
-            '-' => self.windows.resize(-(count as i64), false),
-            '>' => self.windows.resize(count as i64, true),
-            '<' => self.windows.resize(-(count as i64), true),
-            '_' => self.windows.set_size(count as usize, false),
-            '|' => self.windows.set_size(count as usize, true),
+            '+' => self.windows.resize_frame_by(count as i64, false),
+            '-' => self.windows.resize_frame_by(-(count as i64), false),
+            '>' => self.windows.resize_frame_by(count as i64, true),
+            '<' => self.windows.resize_frame_by(-(count as i64), true),
+            '_' => self.windows.resize_frame(
+                explicit
+                    .map(|size| size.min(999_999_999) as usize + 1)
+                    .unwrap_or(usize::MAX),
+                false,
+            ),
+            '|' => self.windows.resize_frame(
+                explicit
+                    .map(|size| size.min(999_999_999) as usize)
+                    .unwrap_or(usize::MAX),
+                true,
+            ),
             _ => Ok(()),
+        };
+        if result.is_ok() {
+            self.sync_fileformat_option(self.current_bufnr());
         }
+        result
     }
 
     /// Swap the contents of the current window with the next one
@@ -725,13 +761,7 @@ impl Editor {
 
     /// Read an option, preferring the window-local value for a P_WIN option.
     pub fn wopt(&self, name: &str) -> VimResult<OptValue> {
-        let canon = Options::canonical(name)?;
-        if crate::options::is_window_local(&canon) {
-            if let Some(value) = self.windows.current().get_local(&canon) {
-                return Ok(value.clone());
-            }
-        }
-        Ok(self.options.get(&canon)?.clone())
+        self.wopt_for(self.windows.current_id(), name)
     }
 
     /// Read a boolean option, preferring the window-local value.
@@ -859,9 +889,26 @@ impl Editor {
     /// by the window builtins).
     pub fn wopt_for(&self, id: WindowId, name: &str) -> VimResult<OptValue> {
         let canon = Options::canonical(name)?;
+        let window = self.windows.get(id);
+        let help = window
+            .and_then(|win| self.buffer(win.bufnr).ok())
+            .is_some_and(|buf| buf.is_help());
+        if help {
+            match canon.as_str() {
+                "buftype" | "filetype" => return Ok(OptValue::Str("help".to_string())),
+                _ => {}
+            }
+        }
         if crate::options::is_window_local(&canon) {
-            if let Some(value) = self.windows.get(id).and_then(|w| w.get_local(&canon)) {
+            if let Some(value) = window.and_then(|win| win.get_local(&canon)) {
                 return Ok(value.clone());
+            }
+        }
+        if help {
+            match canon.as_str() {
+                "readonly" => return Ok(OptValue::Bool(true)),
+                "modifiable" => return Ok(OptValue::Bool(false)),
+                _ => {}
             }
         }
         Ok(self.options.get(&canon)?.clone())
@@ -1131,8 +1178,19 @@ impl Editor {
 
     // --- edits -----------------------------------------------------------
 
+    fn check_help_modifiable(&self) -> VimResult<()> {
+        if self.current_buffer().is_help() && !self.wopt_bool("modifiable", true) {
+            return Err(VimError::new(
+                "E21",
+                "Cannot make changes, 'modifiable' is off",
+            ));
+        }
+        Ok(())
+    }
+
     /// Apply a range edit to the current buffer and record it for undo.
     pub fn apply_edit(&mut self, edit: RangeEdit) -> VimResult<()> {
+        self.check_help_modifiable()?;
         let bufnr = self.current_bufnr();
         let before = self.cursor();
         let snap_before = self.capture_snapshot(bufnr);
@@ -1145,6 +1203,7 @@ impl Editor {
     }
 
     pub fn replace_lines(&mut self, start: usize, end: usize, after: Vec<String>) -> VimResult<()> {
+        self.check_help_modifiable()?;
         let bufnr = self.current_bufnr();
         let before = self.cursor();
         let snap_before = self.capture_snapshot(bufnr);
@@ -1159,6 +1218,7 @@ impl Editor {
     }
 
     pub fn insert_text(&mut self, pos: Pos, text: &str) -> VimResult<()> {
+        self.check_help_modifiable()?;
         let bufnr = self.current_bufnr();
         let before = self.cursor();
         let snap_before = self.capture_snapshot(bufnr);
@@ -1179,6 +1239,7 @@ impl Editor {
     }
 
     pub fn delete_chars(&mut self, pos: Pos, count: usize) -> VimResult<String> {
+        self.check_help_modifiable()?;
         let bufnr = self.current_bufnr();
         // Vim's `$` leaves the cursor *on* the last character, but the M1
         // motion layer parks a normal-mode cursor one byte past it (col ==
@@ -1216,6 +1277,7 @@ impl Editor {
     }
 
     pub fn undo(&mut self) -> VimResult<()> {
+        self.check_help_modifiable()?;
         let bufnr = self.current_bufnr();
         let idx = self.index_of(bufnr)?;
         let restored = {
@@ -1231,6 +1293,7 @@ impl Editor {
     }
 
     pub fn redo(&mut self) -> VimResult<()> {
+        self.check_help_modifiable()?;
         let bufnr = self.current_bufnr();
         let idx = self.index_of(bufnr)?;
         let restored = {
@@ -1273,6 +1336,7 @@ impl Editor {
         end_exclusive: usize,
         reg: Option<char>,
     ) -> VimResult<()> {
+        self.check_help_modifiable()?;
         let texts: Vec<String> = self.current_buffer().lines()[start..end_exclusive]
             .iter()
             .map(|l| l.as_str().to_string())
@@ -1300,7 +1364,7 @@ impl Editor {
         // 'readonly' *is* the buffer flag (option.c:5504 PV_RO), so mirror the
         // option onto the buffer before writing: check_readonly() raises E45
         // unless the write is forced (ex_cmds.c:2311-2353).
-        let readonly = self.options.bool_or("readonly", false);
+        let readonly = self.wopt_bool("readonly", false);
         self.buffer_mut(bufnr)?.set_readonly(readonly);
         let own_file = match path {
             None => true,
@@ -1566,7 +1630,10 @@ impl Editor {
 
     /// Attributes of a highlight group (`:highlight` + vim's default links).
     pub fn syntax_highlight(&self, group: &str) -> Option<rvim_syntax::highlight::HlAttr> {
-        self.syntax.highlight(group)
+        self.syntax.highlights.resolve_for(
+            group,
+            self.gui_running || self.options.bool_or("termguicolors", false),
+        )
     }
 
     /// `:set [no]modified`: 'modified' is an alias for `b_changed`

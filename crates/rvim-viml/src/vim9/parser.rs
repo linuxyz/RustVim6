@@ -613,10 +613,17 @@ fn parse_params(text: &str) -> VimResult<(Vec<Param>, bool)> {
         if part.is_empty() {
             continue;
         }
+        if varargs {
+            return Err(VimError::new("E125", "Argument follows varargs"));
+        }
         if part == "..." {
             varargs = true;
             continue;
         }
+        let (part, named_varargs) = match part.strip_prefix("...") {
+            Some(rest) => (rest.trim(), true),
+            None => (part, false),
+        };
         let (spec, default) = match find_default(part) {
             Some((left, right)) => (left, Some(parse_expression(default_text(right).as_str())?)),
             None => (part, None),
@@ -637,11 +644,24 @@ fn parse_params(text: &str) -> VimResult<(Vec<Param>, bool)> {
         if name.is_empty() {
             return Err(VimError::new("E125", "Invalid function argument"));
         }
+        if named_varargs && !matches!(ty, Vim9Type::List(_)) {
+            return Err(VimError::new(
+                "E1180",
+                format!("Variable arguments type must be a list: {}", ty.name()),
+            ));
+        }
+        if named_varargs && default.is_some() {
+            return Err(VimError::new(
+                "E125",
+                "Variable arguments cannot have a default",
+            ));
+        }
+        varargs = named_varargs;
         params.push(Param {
             name,
             ty,
             default,
-            varargs: false,
+            varargs: named_varargs,
         });
     }
     Ok((params, varargs))
@@ -2482,6 +2502,35 @@ mod tests {
 
     fn expr(src: &str) -> Expr {
         parse_expression(src).unwrap()
+    }
+
+    #[test]
+    fn parses_named_varargs_as_a_typed_parameter() {
+        let (_, params, variadic, _, _) =
+            parse_def_header("def Collect(first: number = 7, ...rest: list<number>): number")
+                .unwrap();
+        assert!(variadic);
+        assert_eq!(params[1].name, "rest");
+        assert!(params[1].varargs);
+        assert_eq!(params[1].ty, Vim9Type::List(Box::new(Vim9Type::Number)));
+        assert!(params[0].default.is_some());
+    }
+
+    #[test]
+    fn rejects_non_list_varargs_types() {
+        let error = parse_def_header("def Collect(...rest: number)").unwrap_err();
+        assert_eq!(error.code, "E1180");
+    }
+
+    #[test]
+    fn rejects_parameters_after_varargs_or_a_varargs_default() {
+        for header in [
+            "def F(...rest: list<number>, n: number)",
+            "def F(..., n: number)",
+            "def F(...rest: list<number> = [])",
+        ] {
+            assert!(parse_def_header(header).is_err(), "{header}");
+        }
     }
 
     #[test]

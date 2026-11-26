@@ -201,7 +201,7 @@ pub struct Vim9Func {
     /// Canonical name used for lookup (dist#ft#FTasm, <SNR>3_Foo, or Foo).
     pub canonical: String,
     pub params: Vec<Param>,
-    /// True when the signature ended in '...' (anonymous varargs).
+    /// True when the signature ends in anonymous or named varargs.
     pub varargs: bool,
     pub ret: Vim9Type,
     pub body: Vec<Stmt>,

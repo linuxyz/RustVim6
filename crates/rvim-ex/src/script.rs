@@ -43,6 +43,7 @@ pub struct UserFunc {
 /// Script-level state kept across sourced files.
 #[derive(Debug, Default)]
 pub struct ScriptState {
+    pub(crate) colors_loading: bool,
     pub funcs: HashMap<String, UserFunc>,
     /// Buffer-local variables keyed by buffer number.
     pub bufvars: HashMap<i32, HashMap<String, Value>>,
@@ -707,6 +708,7 @@ pub fn make_host<'a>(ed: &'a mut Editor, state: &'a mut ScriptState) -> ExHost<'
 
 impl Host for ExHost<'_> {
     fn option_get(&mut self, name: &str) -> Option<Value> {
+        let global = name.starts_with("g:");
         let name = name
             .strip_prefix("l:")
             .or_else(|| name.strip_prefix("g:"))
@@ -720,11 +722,15 @@ impl Host for ExHost<'_> {
                 self.ed.current_buffer().is_changed(),
             )));
         }
-        let value = self.ed.options.get(name).ok()?;
+        let value = if global {
+            self.ed.options.get(name).ok()?.clone()
+        } else {
+            self.ed.wopt(name).ok()?
+        };
         Some(match value {
-            rvim_editor::OptValue::Bool(b) => Value::Number(i64::from(*b)),
-            rvim_editor::OptValue::Num(n) => Value::Number(*n),
-            rvim_editor::OptValue::Str(s) => Value::String(s.clone()),
+            rvim_editor::OptValue::Bool(b) => Value::Number(i64::from(b)),
+            rvim_editor::OptValue::Num(n) => Value::Number(n),
+            rvim_editor::OptValue::Str(s) => Value::String(s),
         })
     }
 
@@ -980,6 +986,12 @@ pub fn resolve_function_name(name: &str, state: &ScriptState, sid: usize) -> Str
 }
 
 fn host_has(ed: &Editor, feature: &str) -> bool {
+    if feature == "gui_running" {
+        return ed.gui_running;
+    }
+    if feature == "termguicolors" {
+        return true;
+    }
     let feature = feature.to_ascii_lowercase();
     let _ = ed;
     if let Some(patch) = feature.strip_prefix("patch-") {
@@ -1018,6 +1030,9 @@ fn host_exists(ed: &Editor, state: &ScriptState, what: &str) -> Option<bool> {
         return Some(ed.options.get(rest).is_ok());
     }
     if let Some(rest) = what.strip_prefix('&') {
+        if rest.starts_with("t_") {
+            return Some(true);
+        }
         return Some(ed.options.get(rest).is_ok());
     }
     if let Some(rest) = what.strip_prefix('*') {
